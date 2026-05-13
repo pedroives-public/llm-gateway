@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Environment variables (CRÍTICO — nunca commitar)
+.env
+.env.local
+.env.*.local
+*.env.local
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor / IDE
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Testing / Coverage
+coverage/
+.nyc_output/
+.vitest-cache/
+
+# Docker volumes locais (caso você crie bind mounts pra debug)
+.docker-data/
+postgres-data/
+redis-data/
+
+# Drizzle migrations meta (migrations vão pro repo; só cache não)
+drizzle/.cache/
+
+# Misc
+.cache/
+.turbo/
+*.tgz
