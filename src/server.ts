@@ -6,13 +6,10 @@ const HOST = process.env['HOST'] ?? '0.0.0.0';
 
 async function start(): Promise<void> {
   const app = await buildApp();
-
-  try {
-    await app.listen({ port: PORT, host: HOST });
-  } catch (err) {
-    app.log.error(err);
-    process.exit(1);
-  }
+  await app.listen({ port: PORT, host: HOST });
 }
 
-start();
+start().catch((err: unknown) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});
