@@ -12,7 +12,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       level: process.env['LOG_LEVEL'] ?? 'info',
       transport:
         process.env['NODE_ENV'] !== 'production'
-          ? { target: 'pino-pretty', options: { translateTime: 'HH:MM:ss.l', ignore: 'pid,hostname' } }
+          ? { target: 'pino-pretty', options: { translateTime: 'HH:mm:ss.l', ignore: 'pid,hostname' } }
           : undefined,
     },
   });
