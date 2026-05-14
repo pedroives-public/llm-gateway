@@ -1,0 +1,22 @@
+{
+  "name": "llm-gateway",
+  "version": "0.0.1",
+  "description": "Multi-tenant LLM API gateway with rate limiting, retry, idempotency, and semantic caching",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "Pedro Ives Silva Santos <contact.pedroives@gmail.com>",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=11.1.1 <12"
+  },
+  "packageManager": "pnpm@11.1.1",
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "typescript": "^6.0.3"
+  }
+}
