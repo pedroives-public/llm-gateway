@@ -53,3 +53,13 @@ drizzle/.cache/
 .cache/
 .turbo/
 *.tgz
+
+
+# >>> harness >>>
+.remember/
+learnings/
+.harness/tmp/
+.harness/current.txt
+.harness/sprints/
+/tmp/tc_*.txt
+# <<< harness <<<
