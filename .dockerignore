@@ -1,0 +1,13 @@
+.git
+.github
+node_modules
+dist
+coverage
+.env
+*.md
+docs
+tests
+eslint.config.js
+vitest.config.ts
+tsconfig.test.json
+drizzle.config.ts

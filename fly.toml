@@ -1,0 +1,28 @@
+app = 'llm-gateway-v1'
+primary_region = 'gru'
+
+[build]
+
+[deploy]
+  release_command = 'node dist/tools/migrate.js'
+  release_command_timeout = '5m'
+
+[env]
+  PORT = '3000'
+  NODE_ENV = 'production'
+  LOG_LEVEL = 'info'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+  [[http_service.checks]]
+    grace_period = '10s'
+    interval = '15s'
+    method = 'GET'
+    path = '/health'
+    timeout = '5s'
