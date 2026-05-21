@@ -1,9 +1,11 @@
 {
   "extends": "./tsconfig.app.json",
   "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
     "noEmit": true,
     "rootDir": ".",
     "types": ["node"]
   },
-  "include": ["drizzle.config.ts"]
+  "include": ["drizzle.config.ts", "eslint.config.js"]
 }
