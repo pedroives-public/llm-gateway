@@ -12,13 +12,24 @@ interface HealthResponse {
 describe("GET /health", () => {
   let app: FastifyInstance;
 
+  let savedDatabaseUrl: string | undefined;
+
   beforeAll(async () => {
+    savedDatabaseUrl = process.env['DATABASE_URL'];
+    process.env['GATEWAY_HMAC_PEPPER'] = 'test-pepper-must-be-at-least-32-characters-long';
+    process.env['DATABASE_URL'] = 'postgresql://localhost:5432/llm_gateway_test';
     app = await buildApp({ logger: false });
     await app.ready();
   });
 
   afterAll(async () => {
     await app.close();
+    delete process.env['GATEWAY_HMAC_PEPPER'];
+    if (savedDatabaseUrl !== undefined) {
+      process.env['DATABASE_URL'] = savedDatabaseUrl;
+    } else {
+      delete process.env['DATABASE_URL'];
+    }
   });
 
   it("returns 200", async () => {
