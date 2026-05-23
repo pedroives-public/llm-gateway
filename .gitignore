@@ -54,6 +54,17 @@ drizzle/.cache/
 .turbo/
 *.tgz
 
+# Local dev tooling (binaries, scripts, IDE/agent configs not shared yet)
+actionlint
+scripts/
+docs/
+openspec/
+.claude/
+.codex/
+.opencode/
+.github/prompts/
+.github/skills/
+
 
 # >>> harness >>>
 .remember/
