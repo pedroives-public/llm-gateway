@@ -1,5 +1,26 @@
 const KNOWN_DEFAULT_PEPPERS = new Set(["change-me-min-32-chars-recommended"]);
 
+export function getOpenAIApiKey(): string {
+  const key = process.env["OPENAI_API_KEY"];
+  if (!key) {
+    throw new Error("OPENAI_API_KEY environment variable is required");
+  }
+  return key;
+}
+
+export function getOpenAIBaseUrl(): string {
+  const override = process.env["OPENAI_BASE_URL"];
+  if (!override) {
+    return "https://api.openai.com/v1";
+  }
+  if (!override.startsWith("https://") && process.env["NODE_ENV"] !== "test") {
+    throw new Error(
+      `OPENAI_BASE_URL must use https:// outside NODE_ENV=test, got: ${override}`,
+    );
+  }
+  return override;
+}
+
 export function getPepper(): string {
   const pepper = process.env["GATEWAY_HMAC_PEPPER"];
   if (!pepper) {

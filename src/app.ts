@@ -3,7 +3,7 @@ import sensible from "@fastify/sensible";
 import { healthRoute } from "./routes/health.js";
 import { authPreHandler } from "./middleware/auth.js";
 import { createDb, type DrizzleClient } from "./db/client.js";
-import { getPepper } from "./config.js";
+import { getPepper, getOpenAIApiKey, getOpenAIBaseUrl } from "./config.js";
 
 interface BuildAppOptions {
   logger?: boolean | Record<string, unknown>;
@@ -15,6 +15,8 @@ export async function buildApp(
   options: BuildAppOptions = {},
 ): Promise<FastifyInstance> {
   getPepper();
+  getOpenAIApiKey();
+  getOpenAIBaseUrl();
 
   const app = Fastify({
     logger: options.logger ?? {
