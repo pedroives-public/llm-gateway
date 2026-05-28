@@ -66,11 +66,42 @@ openspec/
 .github/skills/
 
 
+
+
+
 # >>> harness >>>
+# Local AI/tool memory
 .remember/
-learnings/
+.claude/
+.agents/
+skills-lock.json
+
+# Harness runtime state
 .harness/tmp/
 .harness/current.txt
+.harness/sessions/
 .harness/sprints/
+
+# Temporary gate outputs
 /tmp/tc_*.txt
+/tmp/test_*.txt
+/tmp/lint_*.txt
+
+# Local learning drafts
+learnings/tmp/
+learnings/private/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+.idea/
+
+# WSL Zone.Identifier alternate data stream artifacts
+*:Zone.Identifier
 # <<< harness <<<
