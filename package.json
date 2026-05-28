@@ -43,6 +43,7 @@
     "@fastify/sensible": "^6.0.4",
     "drizzle-orm": "^0.45.2",
     "fastify": "^5.8.5",
-    "postgres": "^3.4.9"
+    "postgres": "^3.4.9",
+    "uuid": "^14.0.0"
   }
 }

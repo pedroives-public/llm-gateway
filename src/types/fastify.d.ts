@@ -5,6 +5,7 @@ declare module "fastify" {
   interface FastifyRequest {
     tenantId: string | null;
     planTier: import("../db/schema.ts").PlanTier | null;
+    reqId: string;
   }
 }
 

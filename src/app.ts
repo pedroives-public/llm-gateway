@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import sensible from "@fastify/sensible";
+import { v7 as uuidv7 } from "uuid";
 import { healthRoute } from "./routes/health.js";
 import { authPreHandler } from "./middleware/auth.js";
 import { createDb, type DrizzleClient } from "./db/client.js";
@@ -18,18 +19,30 @@ export async function buildApp(
   getOpenAIApiKey();
   getOpenAIBaseUrl();
 
-  const app = Fastify({
-    logger: options.logger ?? {
-      level: process.env["LOG_LEVEL"] ?? "info",
-      transport:
-        process.env["NODE_ENV"] === "development"
-          ? {
-              target: "pino-pretty",
-              options: { translateTime: "HH:mm:ss.l", ignore: "pid,hostname" },
-            }
+  const nodeEnv = process.env["NODE_ENV"];
+
+  const resolvedLogger = options.logger ?? {
+    level: process.env["LOG_LEVEL"] ?? "info",
+    transport:
+      nodeEnv === "development"
+        ? { target: "pino-pretty", options: { translateTime: "HH:mm:ss.l", ignore: "pid,hostname" } }
+        : nodeEnv === "production"
+          ? { target: "pino/file", options: { destination: 1 } }
           : undefined,
-    },
-  });
+  };
+
+  if (
+    nodeEnv === "production" &&
+    resolvedLogger !== false &&
+    typeof resolvedLogger === "object" &&
+    !("transport" in resolvedLogger && resolvedLogger.transport)
+  ) {
+    throw new Error(
+      "pino.transport must be configured in NODE_ENV=production to avoid blocking the event loop",
+    );
+  }
+
+  const app = Fastify({ logger: resolvedLogger });
 
   let db: DrizzleClient;
   let closeDb: (() => Promise<void>) | undefined;
@@ -48,6 +61,10 @@ export async function buildApp(
   app.decorate("db", db);
   app.decorateRequest("tenantId", null);
   app.decorateRequest("planTier", null);
+  app.decorateRequest("reqId", "");
+  app.addHook("onRequest", async (request) => {
+    request.reqId = uuidv7();
+  });
 
   if (closeDb) {
     app.addHook("onClose", closeDb);
