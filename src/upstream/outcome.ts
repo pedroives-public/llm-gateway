@@ -3,6 +3,7 @@ export type Outcome =
       kind: "upstream_error";
       status: number;
       body_raw: string;
+      retry_after?: string;
     }
   | {
       kind: "undecodable";

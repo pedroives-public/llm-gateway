@@ -42,4 +42,21 @@ describe("recognize", () => {
 
     expect(result).toEqual({ kind: "undecodable" });
   });
+
+  it("carries a raw Retry-After header onto upstream_error for a 429", () => {
+    const result = recognize({
+      resolved: true,
+      parsed: false,
+      status: 429,
+      body_raw: '{"error":"rate limited"}',
+      retry_after: "120",
+    });
+
+    expect(result).toEqual({
+      kind: "upstream_error",
+      status: 429,
+      body_raw: '{"error":"rate limited"}',
+      retry_after: "120",
+    });
+  });
 });

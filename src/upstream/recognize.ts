@@ -12,6 +12,7 @@ export type RawFacts =
       parsed: false;
       status: number;
       body_raw: string;
+      retry_after?: string;
     };
 
 function isSuccessStatus(status: number): boolean {
@@ -25,5 +26,10 @@ export function recognize(raw: RawFacts): Outcome {
   if (isSuccessStatus(raw.status)) {
     return { kind: "undecodable" };
   }
-  return { kind: "upstream_error", status: raw.status, body_raw: raw.body_raw };
+  return {
+    kind: "upstream_error",
+    status: raw.status,
+    body_raw: raw.body_raw,
+    retry_after: raw.retry_after,
+  };
 }
