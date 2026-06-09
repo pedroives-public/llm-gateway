@@ -2,14 +2,14 @@ import type { ErrorClass } from "../observability/events.js";
 
 export type Outcome =
   | {
-      kind: "http_status";
+      kind: "upstream_error";
       status: number;
     }
   | {
-      kind: "decode_error";
+      kind: "undecodable";
     }
   | {
-      kind: "connect_error";
+      kind: "network_failed";
     };
 
 export type Classification = {
@@ -24,7 +24,7 @@ function assertNever(value: never): never {
 
 export function classify(outcome: Outcome): Classification {
   switch (outcome.kind) {
-    case "http_status":
+    case "upstream_error":
       if (outcome.status >= 500) {
         return {
           error_class: "upstream-retry-exhausted",
@@ -44,13 +44,13 @@ export function classify(outcome: Outcome): Classification {
         retry_eligible: false,
         breaker_delta: 0,
       };
-    case "decode_error":
+    case "undecodable":
       return {
         error_class: "upstream-fault",
         retry_eligible: false,
         breaker_delta: 1,
       };
-    case "connect_error":
+    case "network_failed":
       return {
         error_class: "upstream-retry-exhausted",
         retry_eligible: true,
