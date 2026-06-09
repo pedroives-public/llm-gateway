@@ -1,16 +1,5 @@
 import type { ErrorClass } from "../observability/events.js";
-
-export type Outcome =
-  | {
-      kind: "upstream_error";
-      status: number;
-    }
-  | {
-      kind: "undecodable";
-    }
-  | {
-      kind: "network_failed";
-    };
+import type { ErrorOutcome } from "./outcome.js";
 
 export type Classification = {
   error_class: ErrorClass;
@@ -22,7 +11,7 @@ function assertNever(value: never): never {
   throw new Error(`Unexpected value: ${JSON.stringify(value)}`);
 }
 
-export function classify(outcome: Outcome): Classification {
+export function classify(outcome: ErrorOutcome): Classification {
   switch (outcome.kind) {
     case "upstream_error":
       if (outcome.status >= 500) {
