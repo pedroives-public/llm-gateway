@@ -9,7 +9,7 @@ describe("classify", () => {
       breaker_delta: 0,
     };
 
-    const result = classify({ kind: "upstream_error", status: 400 });
+    const result = classify({ kind: "upstream_error", status: 400, body_raw: "" });
     expect(result).toEqual(expected);
   });
 
@@ -31,7 +31,7 @@ describe("classify", () => {
       breaker_delta: 1,
     };
 
-    const result = classify({ kind: "upstream_error", status: 503 });
+    const result = classify({ kind: "upstream_error", status: 503, body_raw: "" });
     expect(result).toEqual(expected);
   });
 
@@ -42,7 +42,7 @@ describe("classify", () => {
       breaker_delta: 0,
     };
 
-    const result = classify({ kind: "upstream_error", status: 429 });
+    const result = classify({ kind: "upstream_error", status: 429, body_raw: "" });
     expect(result).toEqual(expected);
   });
 
