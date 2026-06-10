@@ -10,6 +10,7 @@ export type Outcome =
     }
   | {
       kind: "network_failed";
+      pre_send_proven: boolean;
     }
   | {
       kind: "ok";

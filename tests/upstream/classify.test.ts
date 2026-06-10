@@ -53,7 +53,7 @@ describe("classify", () => {
       breaker_delta: 1,
     };
 
-    const result = classify({ kind: "network_failed" });
+    const result = classify({ kind: "network_failed", pre_send_proven: true });
     expect(result).toEqual(expected);
   });
 });
