@@ -1,4 +1,5 @@
 import type { Outcome } from "./outcome.js";
+import { assertNever } from "./assert-never.js";
 
 export type RawFacts =
   | {
@@ -18,6 +19,11 @@ export type RawFacts =
       resolved: false;
       rejection: "network";
       cause_code: string;
+    }
+  | {
+      resolved: false;
+      rejection: "abort";
+      abort_kind: string;
     };
 
 export type UnrecognizedRejection = {
@@ -42,23 +48,41 @@ function isSuccessStatus(status: number): boolean {
   return status >= 200 && status < 300;
 }
 
+function isRecognizedAbortKind(
+  k: string,
+): k is "response_size_cap" | "wall_clock_expired" {
+  return k === "response_size_cap" || k === "wall_clock_expired";
+}
+
 export function recognize(raw: RawFacts): Outcome | UnrecognizedRejection {
   if (!raw.resolved) {
-    if (PRE_SEND_PROVEN_CODES.includes(raw.cause_code)) {
-      return { kind: "network_failed", pre_send_proven: true };
+    switch (raw.rejection) {
+      case "abort":
+        if (isRecognizedAbortKind(raw.abort_kind)) {
+          return { kind: "aborted", abort_kind: raw.abort_kind };
+        }
+        return { kind: "unrecognized" };
+      case "network":
+        if (PRE_SEND_PROVEN_CODES.includes(raw.cause_code)) {
+          return { kind: "network_failed", pre_send_proven: true };
+        }
+        if (POSSIBLY_POST_SEND_CODES.includes(raw.cause_code)) {
+          return { kind: "network_failed", pre_send_proven: false };
+        }
+        return { kind: "unrecognized" };
+      default:
+        return assertNever(raw);
     }
-    if (POSSIBLY_POST_SEND_CODES.includes(raw.cause_code)) {
-      return { kind: "network_failed", pre_send_proven: false };
-    }
-
-    return { kind: "unrecognized" };
   }
+
   if (raw.parsed) {
     return { kind: "ok", status: raw.status, body_parsed: raw.body_parsed };
   }
+
   if (isSuccessStatus(raw.status)) {
     return { kind: "undecodable" };
   }
+
   return {
     kind: "upstream_error",
     status: raw.status,

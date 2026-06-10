@@ -16,6 +16,10 @@ export type Outcome =
       kind: "ok";
       status: number;
       body_parsed: unknown;
+    }
+  | {
+      kind: "aborted";
+      abort_kind: "response_size_cap" | "wall_clock_expired";
     };
 
 export type ErrorOutcome = Exclude<Outcome, { kind: "ok" }>;
