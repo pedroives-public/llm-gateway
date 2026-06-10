@@ -43,6 +43,55 @@ describe("recognize", () => {
     expect(result).toEqual({ kind: "undecodable" });
   });
 
+  it.each(["ENOTFOUND", "ECONNREFUSED", "UND_ERR_CONNECT_TIMEOUT"])(
+    "maps the pre-send-proven connection failure %s to network_failed { pre_send_proven: true }",
+    (causeCode) => {
+      const result = recognize({
+        resolved: false,
+        rejection: "network",
+        cause_code: causeCode,
+      });
+
+      expect(result).toEqual({
+        kind: "network_failed",
+        pre_send_proven: true,
+      });
+    },
+  );
+
+  it.each([
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "UND_ERR_HEADERS_TIMEOUT",
+    "UND_ERR_BODY_TIMEOUT",
+    "EPIPE",
+    "UND_ERR_SOCKET",
+  ])(
+    "maps the possibly-post-send connection failure %s to network_failed { pre_send_proven: false }",
+    (causeCode) => {
+      const result = recognize({
+        resolved: false,
+        rejection: "network",
+        cause_code: causeCode,
+      });
+
+      expect(result).toEqual({
+        kind: "network_failed",
+        pre_send_proven: false,
+      });
+    },
+  );
+
+  it("returns the unrecognized variant AS A VALUE for a cause code on neither list (total — never throws)", () => {
+    const result = recognize({
+      resolved: false,
+      rejection: "network",
+      cause_code: "EHOSTUNREACH",
+    });
+
+    expect(result).toEqual({ kind: "unrecognized" });
+  });
+
   it("carries a raw Retry-After header onto upstream_error for a 429", () => {
     const result = recognize({
       resolved: true,
