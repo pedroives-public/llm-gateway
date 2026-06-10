@@ -1,5 +1,7 @@
 import { recognize } from "../../src/upstream/recognize.js";
-import { describe, it, expect } from "vitest";
+import type { UnrecognizedRejection } from "../../src/upstream/recognize.js";
+import type { Outcome, ErrorOutcome } from "../../src/upstream/outcome.js";
+import { describe, it, expect, expectTypeOf } from "vitest";
 
 describe("recognize", () => {
   it("maps a resolved non-2xx response to upstream_error carrying status and raw body", () => {
@@ -14,6 +16,21 @@ describe("recognize", () => {
       kind: "upstream_error",
       status: 500,
       body_raw: '{"error":"upstream boom"}',
+    });
+  });
+
+  it("maps a resolved 4xx the same way as a 5xx — any non-2xx is upstream_error", () => {
+    const result = recognize({
+      resolved: true,
+      parsed: false,
+      status: 400,
+      body_raw: '{"error":"bad request"}',
+    });
+
+    expect(result).toEqual({
+      kind: "upstream_error",
+      status: 400,
+      body_raw: '{"error":"bad request"}',
     });
   });
 
@@ -90,6 +107,34 @@ describe("recognize", () => {
     });
 
     expect(result).toEqual({ kind: "unrecognized" });
+  });
+
+  it.each(["response_size_cap", "wall_clock_expired"] as const)(
+    "maps the recognized abort kind %s to aborted { abort_kind }",
+    (abortKind) => {
+      const result = recognize({
+        resolved: false,
+        rejection: "abort",
+        abort_kind: abortKind,
+      });
+
+      expect(result).toEqual({ kind: "aborted", abort_kind: abortKind });
+    },
+  );
+
+  it("returns the unrecognized variant for an abort kind outside the enum (total — never throws)", () => {
+    const result = recognize({
+      resolved: false,
+      rejection: "abort",
+      abort_kind: "rogue_kind",
+    });
+
+    expect(result).toEqual({ kind: "unrecognized" });
+  });
+
+  it("keeps the unrecognized variant outside Outcome, so recognize's return cannot reach classify without narrowing", () => {
+    expectTypeOf<UnrecognizedRejection>().not.toExtend<Outcome>();
+    expectTypeOf<ReturnType<typeof recognize>>().not.toExtend<ErrorOutcome>();
   });
 
   it("carries a raw Retry-After header onto upstream_error for a 429", () => {
