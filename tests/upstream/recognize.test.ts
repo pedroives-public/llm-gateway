@@ -1,4 +1,8 @@
-import { recognize } from "../../src/upstream/recognize.js";
+import {
+  recognize,
+  recognizeRejection,
+  recognizeResponse,
+} from "../../src/upstream/recognize.js";
 import type { UnrecognizedRejection } from "../../src/upstream/recognize.js";
 import type { Outcome, ErrorOutcome } from "../../src/upstream/outcome.js";
 import { describe, it, expect, expectTypeOf } from "vitest";
@@ -135,6 +139,16 @@ describe("recognize", () => {
   it("keeps the unrecognized variant outside Outcome, so recognize's return cannot reach classify without narrowing", () => {
     expectTypeOf<UnrecognizedRejection>().not.toExtend<Outcome>();
     expectTypeOf<ReturnType<typeof recognize>>().not.toExtend<ErrorOutcome>();
+  });
+
+  it("exposes branch-specific recognizers with branch-specific return types", () => {
+    expectTypeOf<ReturnType<typeof recognizeRejection>>().toEqualTypeOf<
+      | Extract<Outcome, { kind: "network_failed" | "aborted" }>
+      | UnrecognizedRejection
+    >();
+    expectTypeOf<ReturnType<typeof recognizeResponse>>().toEqualTypeOf<
+      Extract<Outcome, { kind: "ok" | "upstream_error" | "undecodable" }>
+    >();
   });
 
   it("carries a raw Retry-After header onto upstream_error for a 429", () => {
