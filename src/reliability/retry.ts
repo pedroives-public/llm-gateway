@@ -1,5 +1,5 @@
-import { classify } from "../upstream/classify.js";
 import type { ErrorOutcome, Outcome } from "../upstream/outcome.js";
+import { isRetryEligible } from "../upstream/retry-eligibility.js";
 
 const RETRY_BACKOFF_MS = 100;
 
@@ -69,7 +69,7 @@ function shouldRetry(
   return (
     outcome.kind !== "ok" &&
     !opts.signal.aborted &&
-    classify(outcome).retry_eligible &&
+    isRetryEligible(outcome) &&
     !opts.firstByteFlushed()
   );
 }
