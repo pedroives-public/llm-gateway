@@ -33,6 +33,21 @@ function causeCodeOf(err: unknown): string | undefined {
   return undefined;
 }
 
+function causeNameOf(err: unknown): string | undefined {
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    "cause" in err &&
+    typeof err.cause === "object" &&
+    err.cause !== null &&
+    "name" in err.cause &&
+    typeof err.cause.name === "string"
+  ) {
+    return err.cause.name;
+  }
+  return undefined;
+}
+
 // Routes the real rejection through the production recognition path and
 // asserts it lands on the retry-eligible arm without touching the
 // unrecognized log.
@@ -40,7 +55,12 @@ function expectPreSendProven(err: unknown): void {
   const logger = { error: vi.fn() };
   const outcome = resolveRejection(err, new AbortController().signal, logger);
 
-  expect(outcome).toEqual({ kind: "network_failed", pre_send_proven: true });
+  expect(outcome).toEqual({
+    kind: "network_failed",
+    pre_send_proven: true,
+    cause_code: causeCodeOf(err),
+    cause_name: causeNameOf(err),
+  });
   expect(logger.error).not.toHaveBeenCalled();
 }
 
@@ -56,6 +76,7 @@ describe("runtime pin — pre-send network rejection shapes", () => {
 
       expect(err).toBeInstanceOf(TypeError);
       expect(causeCodeOf(err)).toBe("ENOTFOUND");
+      expect(causeNameOf(err)).toBe("Error");
       expectPreSendProven(err);
     },
   );
@@ -76,6 +97,7 @@ describe("runtime pin — pre-send network rejection shapes", () => {
 
       expect(err).toBeInstanceOf(TypeError);
       expect(causeCodeOf(err)).toBe("ECONNREFUSED");
+      expect(causeNameOf(err)).toBe("Error");
       expectPreSendProven(err);
     },
   );
@@ -91,6 +113,7 @@ describe("runtime pin — pre-send network rejection shapes", () => {
 
       expect(err).toBeInstanceOf(TypeError);
       expect(causeCodeOf(err)).toBe("UND_ERR_CONNECT_TIMEOUT");
+      expect(causeNameOf(err)).toBe("ConnectTimeoutError");
       expectPreSendProven(err);
     },
   );

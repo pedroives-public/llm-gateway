@@ -35,6 +35,21 @@ function extractCauseCode(err: unknown): string | undefined {
   return undefined;
 }
 
+function extractCauseName(err: unknown): string | undefined {
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    "cause" in err &&
+    typeof err.cause === "object" &&
+    err.cause !== null &&
+    "name" in err.cause &&
+    typeof err.cause.name === "string"
+  ) {
+    return err.cause.name;
+  }
+  return undefined;
+}
+
 function extractAbortKind(err: unknown): string {
   if (
     typeof err === "object" &&
@@ -93,6 +108,14 @@ export function resolveRejection(
   const outcome = recognizeRejection(arm);
   if (outcome.kind === "unrecognized") {
     logAndRethrow(err, abortIdentity, logger);
+  }
+
+  if (outcome.kind === "network_failed") {
+    return {
+      ...outcome,
+      cause_code: extractCauseCode(err),
+      cause_name: extractCauseName(err),
+    };
   }
 
   return outcome;

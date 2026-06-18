@@ -11,6 +11,8 @@ export type Outcome =
   | {
       kind: "network_failed";
       pre_send_proven: boolean;
+      cause_code?: string;
+      cause_name?: string;
     }
   | {
       kind: "ok";

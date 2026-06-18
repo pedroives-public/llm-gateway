@@ -67,7 +67,9 @@ describe("resolveRejection", () => {
       const err: unknown = controller.signal.reason;
       const logger = makeLogger();
 
-      const caught = catchFrom(() => resolveRejection(err, controller.signal, logger));
+      const caught = catchFrom(() =>
+        resolveRejection(err, controller.signal, logger),
+      );
 
       expect(caught).toBe(err); // same object — cause chain intact for the error handler
       const payload = firstErrorPayload(logger);
@@ -87,7 +89,9 @@ describe("resolveRejection", () => {
       const err: unknown = controller.signal.reason;
       const logger = makeLogger();
 
-      const caught = catchFrom(() => resolveRejection(err, controller.signal, logger));
+      const caught = catchFrom(() =>
+        resolveRejection(err, controller.signal, logger),
+      );
 
       expect(caught).toBe(err);
       const payload = firstErrorPayload(logger);
@@ -110,7 +114,12 @@ describe("resolveRejection", () => {
 
       const outcome = resolveRejection(err, controller.signal, logger);
 
-      expect(outcome).toEqual({ kind: "network_failed", pre_send_proven: true });
+      expect(outcome).toEqual({
+        kind: "network_failed",
+        pre_send_proven: true,
+        cause_code: "ECONNREFUSED",
+        cause_name: "Error",
+      });
       expect(logger.error).not.toHaveBeenCalled();
     });
 
@@ -121,7 +130,12 @@ describe("resolveRejection", () => {
 
       const outcome = resolveRejection(err, controller.signal, logger);
 
-      expect(outcome).toEqual({ kind: "network_failed", pre_send_proven: false });
+      expect(outcome).toEqual({
+        kind: "network_failed",
+        pre_send_proven: false,
+        cause_code: "ECONNRESET",
+        cause_name: "Error",
+      });
       expect(logger.error).not.toHaveBeenCalled();
     });
 
@@ -130,7 +144,9 @@ describe("resolveRejection", () => {
       const controller = new AbortController();
       const logger = makeLogger();
 
-      const caught = catchFrom(() => resolveRejection(err, controller.signal, logger));
+      const caught = catchFrom(() =>
+        resolveRejection(err, controller.signal, logger),
+      );
 
       expect(caught).toBe(err);
       const payload = firstErrorPayload(logger);
@@ -149,7 +165,9 @@ describe("resolveRejection", () => {
       const controller = new AbortController();
       const logger = makeLogger();
 
-      const caught = catchFrom(() => resolveRejection(err, controller.signal, logger));
+      const caught = catchFrom(() =>
+        resolveRejection(err, controller.signal, logger),
+      );
 
       expect(caught).toBe(err);
       const payload = firstErrorPayload(logger);
@@ -174,7 +192,12 @@ describe("resolveRejection", () => {
 
       const outcome = resolveRejection(err, controller.signal, logger);
 
-      expect(outcome).toEqual({ kind: "network_failed", pre_send_proven: false });
+      expect(outcome).toEqual({
+        kind: "network_failed",
+        pre_send_proven: false,
+        cause_code: "ECONNRESET",
+        cause_name: "Error",
+      });
       expect(logger.error).not.toHaveBeenCalled();
     });
   });
