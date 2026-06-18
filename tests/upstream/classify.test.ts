@@ -1,6 +1,7 @@
 import { classify } from "../../src/upstream/classify.js";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
+const makeLog = () => ({ error: vi.fn() });
 describe("classify", () => {
   it("classifies an upstream 4xx as client-fault, non-retryable, no breaker delta", () => {
     const expected = {
@@ -8,11 +9,15 @@ describe("classify", () => {
       breaker_delta: 0,
     };
 
-    const result = classify({
-      kind: "upstream_error",
-      status: 400,
-      body_raw: "",
-    });
+    const result = classify(
+      {
+        kind: "upstream_error",
+        status: 400,
+        body_raw: "",
+      },
+      makeLog(),
+      "req-1",
+    );
     expect(result).toEqual(expected);
   });
 
@@ -22,22 +27,32 @@ describe("classify", () => {
       breaker_delta: 0,
     };
 
-    const result = classify({
-      kind: "upstream_error",
-      status: 401,
-      body_raw: "",
-    });
+    const result = classify(
+      {
+        kind: "upstream_error",
+        status: 401,
+        body_raw: "",
+      },
+      makeLog(),
+      "req-1",
+    );
     expect(result).toEqual(expected);
   });
 
   it("classifies a 2xx with an undecodable body as upstream-fault, non-retryable, breaker delta 1", () => {
+    const log = makeLog();
     const expected = {
       error_class: "upstream-fault",
       breaker_delta: 1,
     };
 
-    const result = classify({ kind: "undecodable" });
+    const result = classify({ kind: "undecodable" }, log, "req-1");
     expect(result).toEqual(expected);
+    expect(log.error).toHaveBeenCalledWith({
+      req_id: "req-1",
+      cause_code: null,
+      cause_name: null,
+    });
   });
 
   it("classifies an upstream 5xx as retryable, terminal-class upstream-retry-exhausted, breaker delta 1", () => {
@@ -46,11 +61,15 @@ describe("classify", () => {
       breaker_delta: 1,
     };
 
-    const result = classify({
-      kind: "upstream_error",
-      status: 503,
-      body_raw: "",
-    });
+    const result = classify(
+      {
+        kind: "upstream_error",
+        status: 503,
+        body_raw: "",
+      },
+      makeLog(),
+      "req-1",
+    );
     expect(result).toEqual(expected);
   });
 
@@ -60,38 +79,54 @@ describe("classify", () => {
       breaker_delta: 0,
     };
 
-    const result = classify({
-      kind: "upstream_error",
-      status: 429,
-      body_raw: "",
-    });
+    const result = classify(
+      {
+        kind: "upstream_error",
+        status: 429,
+        body_raw: "",
+      },
+      makeLog(),
+      "req-1",
+    );
     expect(result).toEqual(expected);
   });
 
   it("classifies a wall-clock abort as gateway-fault, non-retryable, breaker delta 1 (class and breaker are independent axes)", () => {
+    const log = makeLog();
     const expected = {
       error_class: "gateway-fault",
       breaker_delta: 1,
     };
 
-    const result = classify({
-      kind: "aborted",
-      abort_kind: "wall_clock_expired",
-    });
+    const result = classify(
+      {
+        kind: "aborted",
+        abort_kind: "wall_clock_expired",
+      },
+      log,
+      "req-1",
+    );
     expect(result).toEqual(expected);
+    expect(log.error).not.toHaveBeenCalled();
   });
 
   it("classifies a response-size-cap abort as upstream-fault, non-retryable, breaker delta 0 (local policy limit is not upstream unavailability)", () => {
+    const log = makeLog();
     const expected = {
       error_class: "upstream-fault",
       breaker_delta: 0,
     };
 
-    const result = classify({
-      kind: "aborted",
-      abort_kind: "response_size_cap",
-    });
+    const result = classify(
+      {
+        kind: "aborted",
+        abort_kind: "response_size_cap",
+      },
+      log,
+      "req-1",
+    );
     expect(result).toEqual(expected);
+    expect(log.error).not.toHaveBeenCalled();
   });
 
   it("classifies a possibly-post-send network failure as gateway-fault, non-retryable, breaker delta 1 (no proof the upstream never executed)", () => {
@@ -100,17 +135,57 @@ describe("classify", () => {
       breaker_delta: 1,
     };
 
-    const result = classify({ kind: "network_failed", pre_send_proven: false });
+    const result = classify(
+      {
+        kind: "network_failed",
+        pre_send_proven: false,
+      },
+      makeLog(),
+      "req-1",
+    );
     expect(result).toEqual(expected);
   });
 
   it("classifies a connection failure (DNS/ECONNREFUSED) as retryable, upstream-retry-exhausted, breaker delta 1", () => {
+    const log = makeLog();
     const expected = {
       error_class: "upstream-retry-exhausted",
       breaker_delta: 1,
     };
 
-    const result = classify({ kind: "network_failed", pre_send_proven: true });
+    const result = classify(
+      {
+        kind: "network_failed",
+        pre_send_proven: true,
+        cause_code: "ECONNREFUSED",
+        cause_name: "Error",
+      },
+      log,
+      "req-1",
+    );
     expect(result).toEqual(expected);
+    expect(log.error).toHaveBeenCalledWith({
+      req_id: "req-1",
+      cause_code: "ECONNREFUSED",
+      cause_name: "Error",
+    });
+  });
+
+  it("logs the raw upstream cause at error level before returning the label, with null cause fields for a status error", () => {
+    const log = { error: vi.fn() };
+    classify(
+      {
+        kind: "upstream_error",
+        status: 503,
+        body_raw: "X",
+      },
+      log,
+      "req-1",
+    );
+    expect(log.error).toHaveBeenCalledWith({
+      req_id: "req-1",
+      cause_code: null,
+      cause_name: null,
+    });
   });
 });

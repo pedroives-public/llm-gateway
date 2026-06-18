@@ -2,12 +2,45 @@ import type { ErrorClass } from "../observability/events.js";
 import type { ErrorOutcome } from "./outcome.js";
 import { assertNever } from "./assert-never.js";
 
+export type MinLogger = {
+  error: (obj: object) => void;
+};
+
 export type Classification = {
   error_class: ErrorClass;
   breaker_delta: 0 | 1;
 };
 
-export function classify(outcome: ErrorOutcome): Classification {
+function logUpstreamCause(
+  outcome: ErrorOutcome,
+  log: MinLogger,
+  reqId: string,
+): void {
+  switch (outcome.kind) {
+    case "upstream_error":
+    case "undecodable":
+      log.error({ req_id: reqId, cause_code: null, cause_name: null });
+      return;
+    case "network_failed":
+      log.error({
+        req_id: reqId,
+        cause_code: outcome.cause_code ?? null,
+        cause_name: outcome.cause_name ?? null,
+      });
+      return;
+    case "aborted":
+      return;
+    default:
+      return assertNever(outcome);
+  }
+}
+
+export function classify(
+  outcome: ErrorOutcome,
+  log: MinLogger,
+  reqId: string,
+): Classification {
+  logUpstreamCause(outcome, log, reqId);
   switch (outcome.kind) {
     case "upstream_error":
       if (outcome.status >= 500) {
