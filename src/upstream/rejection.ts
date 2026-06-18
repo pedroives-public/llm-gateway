@@ -85,6 +85,8 @@ export function resolveRejection(
 ): Extract<Outcome, { kind: "network_failed" | "aborted" }> {
   const abortIdentity = err === signal.reason;
   let arm: RejectionFacts;
+  let causeCode: string | undefined;
+  let causeName: string | undefined;
 
   if (abortIdentity) {
     arm = {
@@ -93,10 +95,11 @@ export function resolveRejection(
       abort_kind: extractAbortKind(err),
     };
   } else {
-    const causeCode = extractCauseCode(err);
+    causeCode = extractCauseCode(err);
     if (causeCode === undefined) {
       logAndRethrow(err, abortIdentity, logger);
     }
+    causeName = extractCauseName(err);
 
     arm = {
       resolved: false,
@@ -111,10 +114,14 @@ export function resolveRejection(
   }
 
   if (outcome.kind === "network_failed") {
+    // Enrich with the SAME proven cause that passed the eligibility guard
+    // above — a single extraction, reused. The stored code is, by
+    // construction, the one the recognizer accepted, not a second read that
+    // could drift from it.
     return {
       ...outcome,
-      cause_code: extractCauseCode(err),
-      cause_name: extractCauseName(err),
+      cause_code: causeCode,
+      cause_name: causeName,
     };
   }
 

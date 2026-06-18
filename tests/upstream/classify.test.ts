@@ -171,6 +171,16 @@ describe("classify", () => {
     });
   });
 
+  it("logs null cause fields for a recognized network_failed that carries no cause (the ?? null fallback)", () => {
+    const log = makeLog();
+    classify({ kind: "network_failed", pre_send_proven: true }, log, "req-1");
+    expect(log.error).toHaveBeenCalledWith({
+      req_id: "req-1",
+      cause_code: null,
+      cause_name: null,
+    });
+  });
+
   it("logs the raw upstream cause at error level before returning the label, with null cause fields for a status error", () => {
     const log = { error: vi.fn() };
     classify(

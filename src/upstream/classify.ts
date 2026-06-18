@@ -2,8 +2,14 @@ import type { ErrorClass } from "../observability/events.js";
 import type { ErrorOutcome } from "./outcome.js";
 import { assertNever } from "./assert-never.js";
 
+export type CauseLogPayload = {
+  req_id: string;
+  cause_code: string | null;
+  cause_name: string | null;
+};
+
 export type MinLogger = {
-  error: (obj: object) => void;
+  error: (obj: CauseLogPayload) => void;
 };
 
 export type Classification = {
