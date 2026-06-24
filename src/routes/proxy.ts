@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type { CircuitBreaker } from "../reliability/circuit-breaker.js";
 import type { ErrorOutcome, Outcome } from "../upstream/outcome.js";
+import type { Logger } from "../upstream/rejection.js";
 import {
   emitReqStart,
   emitReqComplete,
@@ -29,6 +30,7 @@ export interface ProxyRouteOptions {
   upstreamBuffered: (
     body: ChatCompletionsBody,
     signal: AbortSignal,
+    log: Logger,
   ) => Promise<Outcome>;
 }
 
@@ -114,11 +116,16 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
       let attempts = 0;
       let upstreamDurationMs = 0;
 
+      const upstreamLog = request.log.child({ req_id: request.reqId });
       const callUpstream = async (): Promise<Outcome> => {
         attempts += 1;
         const attemptStartedAt = Date.now();
         try {
-          return await opts.upstreamBuffered(request.body, timeout.signal);
+          return await opts.upstreamBuffered(
+            request.body,
+            timeout.signal,
+            upstreamLog,
+          );
         } finally {
           upstreamDurationMs += Date.now() - attemptStartedAt;
         }

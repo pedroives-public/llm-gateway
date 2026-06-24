@@ -2,6 +2,9 @@ import Fastify, { type FastifyInstance } from "fastify";
 import sensible from "@fastify/sensible";
 import { v7 as uuidv7 } from "uuid";
 import { healthRoute } from "./routes/health.js";
+import { proxyRoute } from "./routes/proxy.js";
+import { createCircuitBreaker } from "./reliability/circuit-breaker.js";
+import { createOpenAIClient } from "./upstream/openai.js";
 import { authPreHandler } from "./middleware/auth.js";
 import { createDb, type DrizzleClient } from "./db/client.js";
 import { getPepper, getOpenAIApiKey, getOpenAIBaseUrl } from "./config.js";
@@ -16,8 +19,8 @@ export async function buildApp(
   options: BuildAppOptions = {},
 ): Promise<FastifyInstance> {
   getPepper();
-  getOpenAIApiKey();
-  getOpenAIBaseUrl();
+  const openaiApiKey = getOpenAIApiKey();
+  const openaiBaseUrl = getOpenAIBaseUrl();
 
   const nodeEnv = process.env["NODE_ENV"];
 
@@ -75,8 +78,19 @@ export async function buildApp(
 
   await app.register(async (scope) => {
     scope.addHook("onRequest", authPreHandler);
+    // Rate-limiter preHandler insertion point (added in a later slice).
     if (options.registerProtected) {
       await options.registerProtected(scope);
+    } else {
+      const breaker = createCircuitBreaker(app.log);
+      const upstream = createOpenAIClient({
+        apiKey: openaiApiKey,
+        baseURL: openaiBaseUrl,
+      });
+      await scope.register(proxyRoute, {
+        breaker,
+        upstreamBuffered: upstream.buffered,
+      });
     }
   });
 
