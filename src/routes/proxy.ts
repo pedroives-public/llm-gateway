@@ -1,4 +1,10 @@
-import type { FastifyPluginAsync } from "fastify";
+import type {
+  FastifyError,
+  FastifyPluginAsync,
+  FastifyReply,
+  FastifyRequest,
+  FastifySchemaValidationError,
+} from "fastify";
 import type { CircuitBreaker } from "../reliability/circuit-breaker.js";
 import type { ErrorOutcome, Outcome } from "../upstream/outcome.js";
 import type { Logger } from "../upstream/rejection.js";
@@ -49,6 +55,13 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
   fastify,
   opts,
 ) => {
+  // Error desk for Fastify-generated faults only. Upstream faults are shaped
+  // inline by the handler and never reach here; the lone exception is the
+  // re-thrown unrecognized upstream rejection, which lands as 500 gateway-fault.
+  fastify.setErrorHandler<FastifyError>((error, request, reply) => {
+    sendProxyError(error, request, reply);
+  });
+
   fastify.post<{ Body: ChatCompletionsBody }>(
     "/v1/chat/completions",
     {
@@ -279,5 +292,72 @@ function bodyForErrorOutcome(
 
     default:
       return assertNever(outcome);
+  }
+}
+
+// Branch selection: `error.validation` is set only for schema rejections (a 413
+// leaves it undefined); an explicit 413 status is the body-too-large case;
+// anything else is unhandled.
+function sendProxyError(
+  error: FastifyError,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): void {
+  if (error.validation && error.validation.length > 0) {
+    reply
+      .code(400)
+      .header("x-gateway-error-class", "client-fault")
+      .send({
+        error: {
+          message: error.message,
+          type: "invalid_request_error",
+          code: deriveValidationCode(error.validation),
+        },
+      });
+    return;
+  }
+
+  if (error.statusCode === 413) {
+    reply
+      .code(413)
+      .header("x-gateway-error-class", "client-fault")
+      .send({
+        error: {
+          message: "request body too large",
+          type: "invalid_request_error",
+          code: "request_too_large",
+        },
+      });
+    return;
+  }
+
+  // Log only allowlisted fields — the raw error (stack/cause) must stay out of
+  // both the client body and the log payload.
+  request.log.error(
+    { req_id: request.reqId, err_name: error.name },
+    "unhandled exception in proxy handler",
+  );
+  reply
+    .code(500)
+    .header("x-gateway-error-class", "gateway-fault")
+    .send({
+      error: {
+        message: "internal server error",
+        type: "internal_error",
+        code: "unhandled_exception",
+      },
+    });
+}
+
+function deriveValidationCode(
+  validation: FastifySchemaValidationError[],
+): string {
+  switch (validation[0]?.keyword) {
+    case "required":
+      return `${String(validation[0].params.missingProperty)}_missing`;
+    case "minItems":
+      return `${validation[0].instancePath.slice(1)}_empty`;
+    default:
+      return "invalid_request";
   }
 }

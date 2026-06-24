@@ -534,3 +534,134 @@ describe("proxy route — default wiring (e2e)", () => {
     }
   });
 });
+
+describe("proxy route — error desk (scoped setErrorHandler)", () => {
+  // Auth (onRequest) runs before body parsing and schema validation, so a valid
+  // key is needed to reach the 413/400 paths.
+  async function buildWithUpstream(
+    upstreamBuffered: (b: ChatCompletionsBody, s: AbortSignal) => Promise<Outcome>,
+  ) {
+    const tenantId = randomUUID();
+    const app = await buildApp({
+      logger: false,
+      db: fakeAuthDb(tenantId),
+      registerProtected: async (scope) => {
+        await scope.register(proxyRoute, {
+          breaker: stubBreaker,
+          upstreamBuffered,
+        });
+      },
+    });
+    const apiKey = `lkey_${randomBytes(32).toString("base64url")}`;
+    return { app, apiKey };
+  }
+
+  it("413 body-too-large → OpenAI shape + client-fault, no default Fastify body", async () => {
+    let upstreamCalls = 0;
+    const countingUpstream = (): Promise<Outcome> => {
+      upstreamCalls += 1;
+      return Promise.resolve({ kind: "ok", status: 200, body_parsed: {} });
+    };
+    const { app, apiKey } = await buildWithUpstream(countingUpstream);
+    try {
+      // > 256 KiB once serialized; the route bodyLimit rejects it pre-handler.
+      const big = "x".repeat(300_000);
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: { model: "gpt-4o", messages: [{ role: "user", content: big }] },
+      });
+      expect(res.statusCode).toBe(413);
+      expect(res.headers["x-gateway-error-class"]).toBe("client-fault");
+      expect(JSON.parse(res.payload)).toEqual({
+        error: {
+          message: expect.any(String),
+          type: "invalid_request_error",
+          code: "request_too_large",
+        },
+      });
+      // Guard: the default Fastify body (`error: "Payload Too Large"`) must not leak.
+      expect(res.payload).not.toContain("Payload Too Large");
+      expect(upstreamCalls).toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("400 missing `model` → invalid_request_error + code model_missing, no upstream call", async () => {
+    let upstreamCalls = 0;
+    const countingUpstream = (): Promise<Outcome> => {
+      upstreamCalls += 1;
+      return Promise.resolve({ kind: "ok", status: 200, body_parsed: {} });
+    };
+    const { app, apiKey } = await buildWithUpstream(countingUpstream);
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: { messages: [{ role: "user", content: "hi" }] },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.headers["x-gateway-error-class"]).toBe("client-fault");
+      const body = JSON.parse(res.payload) as {
+        error: { type: string; code: string };
+      };
+      expect(body.error.type).toBe("invalid_request_error");
+      expect(body.error.code).toBe("model_missing");
+      expect(upstreamCalls).toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("400 empty `messages` → code messages_empty", async () => {
+    const { app, apiKey } = await buildWithUpstream(stubUpstreamBuffered);
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: { model: "gpt-4o", messages: [] },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.headers["x-gateway-error-class"]).toBe("client-fault");
+      const body = JSON.parse(res.payload) as {
+        error: { type: string; code: string };
+      };
+      expect(body.error.type).toBe("invalid_request_error");
+      expect(body.error.code).toBe("messages_empty");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("unhandled exception → 500 gateway-fault + unhandled_exception, no leak in body", async () => {
+    const throwingUpstream = (): Promise<Outcome> => {
+      throw new Error("boom: simulated handler bug");
+    };
+    const { app, apiKey } = await buildWithUpstream(throwingUpstream);
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+      });
+      expect(res.statusCode).toBe(500);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(JSON.parse(res.payload)).toEqual({
+        error: {
+          message: "internal server error",
+          type: "internal_error",
+          code: "unhandled_exception",
+        },
+      });
+      // The thrown error's message/stack must not reach the client body.
+      expect(res.payload).not.toContain("boom");
+    } finally {
+      await app.close();
+    }
+  });
+});
