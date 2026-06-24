@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { proxyRoute, type ChatCompletionsBody } from "../../src/routes/proxy.js";
 import type {
@@ -661,6 +661,110 @@ describe("proxy route — error desk (scoped setErrorHandler)", () => {
       // The thrown error's message/stack must not reach the client body.
       expect(res.payload).not.toContain("boom");
     } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("proxy route — reliability integration (8.1 harness)", () => {
+  function recordingBreaker(recorded: ProbeOutcome[]): CircuitBreaker {
+    return {
+      tryAcquire: () => ({ kind: "NORMAL" }),
+      recordResult: (o) => {
+        recorded.push(o);
+      },
+      getState: () => "CLOSED",
+    };
+  }
+
+  async function buildWith(
+    breaker: CircuitBreaker,
+    upstreamBuffered: (b: ChatCompletionsBody, s: AbortSignal) => Promise<Outcome>,
+  ) {
+    const tenantId = randomUUID();
+    const app = await buildApp({
+      logger: false,
+      db: fakeAuthDb(tenantId),
+      registerProtected: async (scope) => {
+        await scope.register(proxyRoute, { breaker, upstreamBuffered });
+      },
+    });
+    const apiKey = `lkey_${randomBytes(32).toString("base64url")}`;
+    return { app, apiKey };
+  }
+
+  const validBody = { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] };
+
+  it("8.5 retry-then-success: 503 then 200 → 200, two attempts, breaker not incremented", async () => {
+    let calls = 0;
+    const okBody = { id: "chatcmpl-retry", choices: [{ index: 0 }] };
+    const recorded: ProbeOutcome[] = [];
+    // Sequence fake: attempt 1 fails retry-eligibly (503), attempt 2 succeeds.
+    const upstream = (): Promise<Outcome> => {
+      calls += 1;
+      return Promise.resolve(
+        calls === 1
+          ? {
+              kind: "upstream_error",
+              status: 503,
+              body_raw: '{"error":{"message":"transient"}}',
+            }
+          : { kind: "ok", status: 200, body_parsed: okBody },
+      );
+    };
+    const { app, apiKey } = await buildWith(recordingBreaker(recorded), upstream);
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.payload)).toEqual(okBody);
+      expect(calls).toBe(2); // retry fired → two upstream attempts
+      expect(recorded).toEqual(["SUCCESS"]); // success-on-retry: breaker not incremented
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("8.10 wall-clock: upstream hangs past 30s → 504 gateway-fault", async () => {
+    const recorded: ProbeOutcome[] = [];
+    // Hangs until the gateway's own AbortSignal fires, then resolves to the
+    // aborted Outcome the real client would synthesize (mirrors openai.ts).
+    const upstream = (
+      _b: ChatCompletionsBody,
+      signal: AbortSignal,
+    ): Promise<Outcome> =>
+      new Promise((resolve) => {
+        signal.addEventListener(
+          "abort",
+          () => resolve({ kind: "aborted", abort_kind: "wall_clock_expired" }),
+          { once: true },
+        );
+      });
+    // Build with real timers (Fastify boot), then switch to fake timers for the
+    // request so advanceTimersByTimeAsync deterministically fires the 30s deadline.
+    const { app, apiKey } = await buildWith(recordingBreaker(recorded), upstream);
+    vi.useFakeTimers();
+    try {
+      const injected = app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+      await vi.advanceTimersByTimeAsync(30_000);
+      const res = await injected;
+      expect(res.statusCode).toBe(504);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(
+        (JSON.parse(res.payload) as { error: { code: string } }).error.code,
+      ).toBe("wall_clock_exceeded");
+      expect(recorded).toEqual(["FAILURE"]); // wall-clock abort increments the breaker
+    } finally {
+      vi.useRealTimers();
       await app.close();
     }
   });
