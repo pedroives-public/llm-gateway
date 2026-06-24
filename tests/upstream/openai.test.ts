@@ -62,6 +62,22 @@ describe("openai buffered client", () => {
     );
   });
 
+  it("treats a 200 with a non-JSON body as undecodable", async () => {
+    // A 2xx proves the upstream executed, so an unparseable body is not retried —
+    // it surfaces as `undecodable`, which the route normalizes to 502 upstream-fault.
+    await withServer(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("{not valid json");
+      },
+      async (baseURL) => {
+        const client = createOpenAIClient({ apiKey: "k", baseURL });
+        const outcome = await client.buffered(reqBody, freshSignal(), silentLog);
+        expect(outcome).toEqual({ kind: "undecodable" });
+      },
+    );
+  });
+
   it(
     "caps a >1 MiB response as aborted{response_size_cap} and tears the upstream down",
     { timeout: 10_000 },
