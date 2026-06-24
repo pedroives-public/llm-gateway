@@ -1,4 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { proxyRoute, type ChatCompletionsBody } from "../../src/routes/proxy.js";
@@ -488,5 +490,47 @@ describe("proxy route — buffered skeleton", () => {
       },
     });
     expect(recorded).toEqual(["INCONCLUSIVE"]);
+  });
+});
+
+describe("proxy route — default wiring (e2e)", () => {
+  it("serves a request end-to-end through buildApp's real breaker + client", async () => {
+    const upstreamBody = { id: "chatcmpl-e2e", choices: [{ index: 0 }] };
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(upstreamBody));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+
+    const prevBaseUrl = process.env["OPENAI_BASE_URL"];
+    process.env["OPENAI_BASE_URL"] = `http://127.0.0.1:${port}`;
+
+    const tenantId = randomUUID();
+    const apiKey = `lkey_${randomBytes(32).toString("base64url")}`;
+    // No registerProtected → buildApp wires the real breaker + real client.
+    const app = await buildApp({ logger: false, db: fakeAuthDb(tenantId) });
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.payload)).toEqual(upstreamBody);
+    } finally {
+      await app.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (prevBaseUrl === undefined) {
+        delete process.env["OPENAI_BASE_URL"];
+      } else {
+        process.env["OPENAI_BASE_URL"] = prevBaseUrl;
+      }
+    }
   });
 });
