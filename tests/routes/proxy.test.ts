@@ -3,7 +3,10 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
-import { proxyRoute, type ChatCompletionsBody } from "../../src/routes/proxy.js";
+import {
+  proxyRoute,
+  type ChatCompletionsBody,
+} from "../../src/routes/proxy.js";
 import type {
   CircuitBreaker,
   ProbeOutcome,
@@ -107,7 +110,10 @@ describe("proxy route — buffered skeleton", () => {
         method: "POST",
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
-        payload: { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+        payload: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+        },
       });
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.payload)).toEqual(upstreamBody);
@@ -150,7 +156,10 @@ describe("proxy route — buffered skeleton", () => {
         method: "POST",
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
-        payload: { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+        payload: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+        },
       });
       expect(res.statusCode).toBe(503);
       expect(res.headers["x-gateway-error-class"]).toBe(
@@ -209,7 +218,10 @@ describe("proxy route — buffered skeleton", () => {
         method: "POST",
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
-        payload: { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+        payload: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+        },
       });
       expect(res.statusCode).toBe(502);
       expect(res.headers["x-gateway-error-class"]).toBe(
@@ -269,7 +281,10 @@ describe("proxy route — buffered skeleton", () => {
         method: "POST",
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
-        payload: { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+        payload: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+        },
       });
       // Inconclusive for the breaker: a client error is not upstream-health evidence.
       expect(res.statusCode).toBe(400);
@@ -321,7 +336,10 @@ describe("proxy route — buffered skeleton", () => {
         method: "POST",
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
-        payload: { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+        payload: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+        },
       });
       // Inconclusive for the breaker: Retry-After backpressure is not an availability failure.
       expect(res.statusCode).toBe(429);
@@ -369,7 +387,10 @@ describe("proxy route — buffered skeleton", () => {
         method: "POST",
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
-        payload: { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+        payload: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+        },
       });
       // No upstream body to forward -> synthesize a normalized body. A 2xx that
       // failed to decode proves execution, so it is not retry-eligible.
@@ -419,7 +440,10 @@ describe("proxy route — buffered skeleton", () => {
         method: "POST",
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
-        payload: { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+        payload: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+        },
       });
       return { res, recorded };
     } finally {
@@ -437,7 +461,9 @@ describe("proxy route — buffered skeleton", () => {
       }),
     );
     expect(res.statusCode).toBe(502);
-    expect(res.headers["x-gateway-error-class"]).toBe("upstream-retry-exhausted");
+    expect(res.headers["x-gateway-error-class"]).toBe(
+      "upstream-retry-exhausted",
+    );
     expect(JSON.parse(res.payload)).toEqual({
       error: {
         message: "upstream unavailable",
@@ -509,7 +535,9 @@ describe("proxy route — default wiring (e2e)", () => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(upstreamBody));
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
     const { port } = server.address() as AddressInfo;
 
     const prevBaseUrl = process.env["OPENAI_BASE_URL"];
@@ -548,7 +576,10 @@ describe("proxy route — error desk (scoped setErrorHandler)", () => {
   // Auth (onRequest) runs before body parsing and schema validation, so a valid
   // key is needed to reach the 413/400 paths.
   async function buildWithUpstream(
-    upstreamBuffered: (b: ChatCompletionsBody, s: AbortSignal) => Promise<Outcome>,
+    upstreamBuffered: (
+      b: ChatCompletionsBody,
+      s: AbortSignal,
+    ) => Promise<Outcome>,
   ) {
     const tenantId = randomUUID();
     const app = await buildApp({
@@ -579,7 +610,10 @@ describe("proxy route — error desk (scoped setErrorHandler)", () => {
         method: "POST",
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
-        payload: { model: "gpt-4o", messages: [{ role: "user", content: big }] },
+        payload: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: big }],
+        },
       });
       expect(res.statusCode).toBe(413);
       expect(res.headers["x-gateway-error-class"]).toBe("client-fault");
@@ -656,7 +690,10 @@ describe("proxy route — error desk (scoped setErrorHandler)", () => {
         method: "POST",
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
-        payload: { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] },
+        payload: {
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+        },
       });
       expect(res.statusCode).toBe(500);
       expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
@@ -688,7 +725,10 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
 
   async function buildWith(
     breaker: CircuitBreaker,
-    upstreamBuffered: (b: ChatCompletionsBody, s: AbortSignal) => Promise<Outcome>,
+    upstreamBuffered: (
+      b: ChatCompletionsBody,
+      s: AbortSignal,
+    ) => Promise<Outcome>,
     capture?: LogCapture,
   ) {
     const tenantId = randomUUID();
@@ -703,7 +743,10 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
     return { app, apiKey };
   }
 
-  const validBody = { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] };
+  const validBody = {
+    model: "gpt-4o",
+    messages: [{ role: "user", content: "hi" }],
+  };
 
   it("8.3 success: 200 verbatim + req_complete{attempts:1, error_class:null} (log-capture)", async () => {
     const capture = makeLogCapture();
@@ -805,7 +848,10 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       });
     // Build with real timers (Fastify boot), then switch to fake timers for the
     // request so advanceTimersByTimeAsync deterministically fires the 30s deadline.
-    const { app, apiKey } = await buildWith(recordingBreaker(recorded), upstream);
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstream,
+    );
     vi.useFakeTimers();
     try {
       const injected = app.inject({
@@ -824,6 +870,174 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       expect(recorded).toEqual(["FAILURE"]); // wall-clock abort increments the breaker
     } finally {
       vi.useRealTimers();
+      await app.close();
+    }
+  });
+
+  it("8.15 at-most-once: post-send network failure → 504, single attempt (no retry)", async () => {
+    let calls = 0;
+    const recorded: ProbeOutcome[] = [];
+    const capture = makeLogCapture();
+    // pre_send_proven false: bytes may have reached upstream, so the final state is unknown → not retry-eligible (at-most-once).
+    const upstream = (): Promise<Outcome> => {
+      calls += 1;
+      return Promise.resolve({
+        kind: "network_failed",
+        pre_send_proven: false,
+        cause_code: "ECONNRESET",
+        cause_name: "Error",
+      });
+    };
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstream,
+      capture,
+    );
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+      expect(res.statusCode).toBe(504);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(calls).toBe(1); // a post-send failure is never retried
+      const complete = capture.byEvent("req_complete");
+      expect(complete).toHaveLength(1);
+      expect(complete[0]).toMatchObject({
+        attempts: 1,
+        error_class: "gateway-fault",
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("8.14 Idempotency-Key is a no-op: post-send failure → 504, single attempt despite the header", async () => {
+    let calls = 0;
+    const recorded: ProbeOutcome[] = [];
+    const capture = makeLogCapture();
+    const upstream = (): Promise<Outcome> => {
+      calls += 1;
+      return Promise.resolve({
+        kind: "network_failed",
+        pre_send_proven: false,
+        cause_code: "ECONNRESET",
+        cause_name: "Error",
+      });
+    };
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstream,
+      capture,
+    );
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "idempotency-key": "11111111-1111-1111-1111-111111111111",
+        },
+        payload: validBody,
+      });
+      // Identical to the no-key case (504, one attempt): the header must not retry.
+      expect(res.statusCode).toBe(504);
+      expect(calls).toBe(1);
+      // req_start proves the header was seen — yet it changed nothing.
+      expect(capture.byEvent("req_start")[0]).toMatchObject({
+        idempotency_key_present: true,
+      });
+      expect(capture.byEvent("req_complete")[0]).toMatchObject({
+        attempts: 1,
+        error_class: "gateway-fault",
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("8.17 pre-send failure retried: ECONNREFUSED then 200 → 200, two attempts", async () => {
+    let calls = 0;
+    const okBody = { id: "chatcmpl-8-17", choices: [{ index: 0 }] };
+    const recorded: ProbeOutcome[] = [];
+    const capture = makeLogCapture();
+    // pre_send_proven true: no bytes reached upstream, so a retry is side-effect-free.
+    const upstream = (): Promise<Outcome> => {
+      calls += 1;
+      return Promise.resolve(
+        calls === 1
+          ? {
+              kind: "network_failed",
+              pre_send_proven: true,
+              cause_code: "ECONNREFUSED",
+              cause_name: "Error",
+            }
+          : { kind: "ok", status: 200, body_parsed: okBody },
+      );
+    };
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstream,
+      capture,
+    );
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.payload)).toEqual(okBody);
+      expect(calls).toBe(2); // pre-send proof authorizes exactly one retry
+      expect(recorded).toEqual(["SUCCESS"]);
+      expect(capture.byEvent("req_complete")[0]).toMatchObject({
+        attempts: 2,
+        error_class: null,
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("8.17 pre-send failure exhausted: ECONNREFUSED twice → 502 upstream-retry-exhausted", async () => {
+    let calls = 0;
+    const recorded: ProbeOutcome[] = [];
+    const capture = makeLogCapture();
+    const upstream = (): Promise<Outcome> => {
+      calls += 1;
+      return Promise.resolve({
+        kind: "network_failed",
+        pre_send_proven: true,
+        cause_code: "ECONNREFUSED",
+        cause_name: "Error",
+      });
+    };
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstream,
+      capture,
+    );
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+      expect(res.statusCode).toBe(502);
+      expect(res.headers["x-gateway-error-class"]).toBe(
+        "upstream-retry-exhausted",
+      );
+      expect(calls).toBe(2); // retried once; both attempts failed pre-send
+      expect(recorded).toEqual(["FAILURE"]);
+      expect(capture.byEvent("req_complete")[0]).toMatchObject({
+        attempts: 2,
+        error_class: "upstream-retry-exhausted",
+      });
+    } finally {
       await app.close();
     }
   });
