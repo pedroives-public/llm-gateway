@@ -10,6 +10,7 @@ import type {
 } from "../../src/reliability/circuit-breaker.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
 import type { DrizzleClient } from "../../src/db/client.js";
+import { makeLogCapture, type LogCapture } from "../log-capture.js";
 
 const stubBreaker: CircuitBreaker = {
   tryAcquire: () => ({ kind: "NORMAL" }),
@@ -190,9 +191,10 @@ describe("proxy route — buffered skeleton", () => {
       },
       getState: () => "CLOSED",
     };
+    const capture = makeLogCapture();
 
     const app = await buildApp({
-      logger: false,
+      logger: capture.logger,
       db: fakeAuthDb(tenantId),
       registerProtected: async (scope) => {
         await scope.register(proxyRoute, {
@@ -216,6 +218,13 @@ describe("proxy route — buffered skeleton", () => {
       expect(res.payload).toBe(upstreamErrorBody);
       expect(recorded).toEqual(["FAILURE"]);
       expect(upstreamCalls).toBe(2);
+
+      const complete = capture.byEvent("req_complete");
+      expect(complete).toHaveLength(1);
+      expect(complete[0]).toMatchObject({
+        attempts: 2,
+        error_class: "upstream-retry-exhausted",
+      });
     } finally {
       await app.close();
     }
@@ -680,10 +689,11 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
   async function buildWith(
     breaker: CircuitBreaker,
     upstreamBuffered: (b: ChatCompletionsBody, s: AbortSignal) => Promise<Outcome>,
+    capture?: LogCapture,
   ) {
     const tenantId = randomUUID();
     const app = await buildApp({
-      logger: false,
+      logger: capture?.logger ?? false,
       db: fakeAuthDb(tenantId),
       registerProtected: async (scope) => {
         await scope.register(proxyRoute, { breaker, upstreamBuffered });
@@ -695,10 +705,51 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
 
   const validBody = { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] };
 
+  it("8.3 success: 200 verbatim + req_complete{attempts:1, error_class:null} (log-capture)", async () => {
+    const capture = makeLogCapture();
+    const okBody = { id: "chatcmpl-8-3", choices: [{ index: 0 }] };
+    const recorded: ProbeOutcome[] = [];
+    const upstream = (): Promise<Outcome> =>
+      Promise.resolve({ kind: "ok", status: 200, body_parsed: okBody });
+
+    const tenantId = randomUUID();
+    const app = await buildApp({
+      logger: capture.logger,
+      db: fakeAuthDb(tenantId),
+      registerProtected: async (scope) => {
+        await scope.register(proxyRoute, {
+          breaker: recordingBreaker(recorded),
+          upstreamBuffered: upstream,
+        });
+      },
+    });
+    const apiKey = `lkey_${randomBytes(32).toString("base64url")}`;
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.payload)).toEqual(okBody);
+
+      // Assert the terminal req_complete event, not just the body. attempts +
+      // error_class are live today; stream / retry_disposition are not yet wired.
+      const complete = capture.byEvent("req_complete");
+      expect(complete).toHaveLength(1);
+      expect(complete[0]).toMatchObject({ attempts: 1, error_class: null });
+    } finally {
+      await app.close();
+    }
+  });
+
   it("8.5 retry-then-success: 503 then 200 → 200, two attempts, breaker not incremented", async () => {
     let calls = 0;
     const okBody = { id: "chatcmpl-retry", choices: [{ index: 0 }] };
     const recorded: ProbeOutcome[] = [];
+    const capture = makeLogCapture();
     // Sequence fake: attempt 1 fails retry-eligibly (503), attempt 2 succeeds.
     const upstream = (): Promise<Outcome> => {
       calls += 1;
@@ -712,7 +763,11 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
           : { kind: "ok", status: 200, body_parsed: okBody },
       );
     };
-    const { app, apiKey } = await buildWith(recordingBreaker(recorded), upstream);
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstream,
+      capture,
+    );
     try {
       const res = await app.inject({
         method: "POST",
@@ -724,6 +779,10 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       expect(JSON.parse(res.payload)).toEqual(okBody);
       expect(calls).toBe(2); // retry fired → two upstream attempts
       expect(recorded).toEqual(["SUCCESS"]); // success-on-retry: breaker not incremented
+
+      const complete = capture.byEvent("req_complete");
+      expect(complete).toHaveLength(1);
+      expect(complete[0]).toMatchObject({ attempts: 2, error_class: null });
     } finally {
       await app.close();
     }
