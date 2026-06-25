@@ -1041,4 +1041,99 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       await app.close();
     }
   });
+
+  it("8.18 Retry-After honored: 429 + Retry-After:2 then 200 → waits the delay, then 200", async () => {
+    let calls = 0;
+    const okBody = { id: "chatcmpl-8-18", choices: [{ index: 0 }] };
+    const recorded: ProbeOutcome[] = [];
+    const capture = makeLogCapture();
+    const upstream = (): Promise<Outcome> => {
+      calls += 1;
+      return Promise.resolve(
+        calls === 1
+          ? {
+              kind: "upstream_error",
+              status: 429,
+              body_raw: '{"error":{"message":"rate limited"}}',
+              retry_after: "2",
+            }
+          : { kind: "ok", status: 200, body_parsed: okBody },
+      );
+    };
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstream,
+      capture,
+    );
+    // Build under real timers (Fastify boot), then drive the Retry-After wait
+    // with fake timers so the 2s delay is deterministic, not wall-clock.
+    vi.useFakeTimers();
+    try {
+      const injected = app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+      // The second attempt must not fire until the full Retry-After elapses.
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(calls).toBe(1); // still waiting out the 2s
+      await vi.advanceTimersByTimeAsync(1);
+      const res = await injected;
+      // 200 (not 504) proves the 2s wait fit the 30s budget — wall-clock never fired.
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.payload)).toEqual(okBody);
+      expect(calls).toBe(2);
+      expect(recorded).toEqual(["SUCCESS"]); // 429-then-200 is a success, no breaker delta
+      expect(capture.byEvent("req_complete")[0]).toMatchObject({
+        attempts: 2,
+        error_class: null,
+      });
+    } finally {
+      vi.useRealTimers();
+      await app.close();
+    }
+  });
+
+  it("8.24 hook ordering: authPreHandler → rate-limiter preHandler → proxy handler", async () => {
+    const order: string[] = [];
+    let tenantIdAtRateLimiter: string | null = null;
+    const tenantId = randomUUID();
+    const upstream = (): Promise<Outcome> => {
+      order.push("proxy");
+      return Promise.resolve({ kind: "ok", status: 200, body_parsed: {} });
+    };
+    // Inject the rate-limiter preHandler exactly where a future change would,
+    // via registerProtected — no production app.ts wiring is touched.
+    const app = await buildApp({
+      logger: false,
+      db: fakeAuthDb(tenantId),
+      registerProtected: async (scope) => {
+        scope.addHook("preHandler", async (request) => {
+          order.push("rate");
+          // tenantId is populated by authPreHandler (onRequest); its presence
+          // here proves auth ran before this preHandler.
+          tenantIdAtRateLimiter = request.tenantId;
+        });
+        await scope.register(proxyRoute, {
+          breaker: stubBreaker,
+          upstreamBuffered: upstream,
+        });
+      },
+    });
+    const apiKey = `lkey_${randomBytes(32).toString("base64url")}`;
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(order).toEqual(["rate", "proxy"]); // preHandler before the route handler
+      expect(tenantIdAtRateLimiter).toBe(tenantId); // onRequest auth before the preHandler
+    } finally {
+      await app.close();
+    }
+  });
 });
