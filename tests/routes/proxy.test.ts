@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
 import {
   proxyRoute,
+  deriveRetryDisposition,
   type ChatCompletionsBody,
 } from "../../src/routes/proxy.js";
 import type {
@@ -709,6 +710,58 @@ describe("proxy route — error desk (scoped setErrorHandler)", () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe("deriveRetryDisposition — cause discriminant (unit)", () => {
+  const notAborted = new AbortController().signal;
+
+  it("budget-skip WITHOUT a valid Retry-After is ineligible, not skipped_budget", () => {
+    // Eligible 503, not aborted, but no Retry-After: the skip would be
+    // backoff-driven, not backpressure → ineligible.
+    const outcome: Outcome = {
+      kind: "upstream_error",
+      status: 503,
+      body_raw: "{}",
+    };
+    expect(deriveRetryDisposition(1, outcome, notAborted)).toBe("ineligible");
+  });
+
+  it("budget-skip with a PRESENT but unparseable Retry-After is ineligible", () => {
+    // Present but unusable (an HTTP-date, not delta-seconds): the case that pins
+    // validity over presence — a `retry_after !== undefined` check mislabels it
+    // skipped_budget.
+    const outcome: Outcome = {
+      kind: "upstream_error",
+      status: 503,
+      body_raw: "{}",
+      retry_after: "Wed, 21 Oct 2099 07:28:00 GMT",
+    };
+    expect(deriveRetryDisposition(1, outcome, notAborted)).toBe("ineligible");
+  });
+
+  it("budget-skip with a non-positive Retry-After is ineligible", () => {
+    // "0"/negative parse but never govern a wait (retry.ts requires > 0), so
+    // they are not a Retry-After skip — pins the positivity half of "valid".
+    const outcome: Outcome = {
+      kind: "upstream_error",
+      status: 503,
+      body_raw: "{}",
+      retry_after: "0",
+    };
+    expect(deriveRetryDisposition(1, outcome, notAborted)).toBe("ineligible");
+  });
+
+  it("budget-skip WITH a valid Retry-After is skipped_budget", () => {
+    const outcome: Outcome = {
+      kind: "upstream_error",
+      status: 503,
+      body_raw: "{}",
+      retry_after: "31",
+    };
+    expect(deriveRetryDisposition(1, outcome, notAborted)).toBe(
+      "skipped_budget",
+    );
   });
 });
 

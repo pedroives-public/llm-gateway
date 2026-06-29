@@ -1,5 +1,5 @@
 import type { ErrorOutcome, Outcome } from "../upstream/outcome.js";
-import { isRetryEligible } from "../upstream/retry-eligibility.js";
+import { isRetryEligible, retryAfterMs } from "../upstream/retry-eligibility.js";
 
 const RETRY_BACKOFF_MS = 100;
 
@@ -124,23 +124,8 @@ function isKnownAbortReason(
   );
 }
 
-// Only delta-seconds are parsed; a non-numeric Retry-After (e.g. an HTTP-date)
-// falls back to jittered backoff. HTTP-date and retry-after-ms parsing are
-// deferred until the upstream endpoint's header format is known.
+// A usable Retry-After governs the wait; otherwise jittered backoff. The parse +
+// validity rule lives in retryAfterMs (shared with the disposition label).
 function retryAfterOrBackoffMs(outcome: Outcome): number {
-  if (outcome.kind !== "upstream_error") {
-    return Math.random() * backoffCeiling();
-  }
-
-  const rawRetryAfter = outcome.retry_after;
-  if (rawRetryAfter === undefined) {
-    return Math.random() * backoffCeiling();
-  }
-
-  const parsedSeconds = Number(rawRetryAfter);
-  if (!Number.isFinite(parsedSeconds) || parsedSeconds <= 0) {
-    return Math.random() * backoffCeiling();
-  }
-
-  return parsedSeconds * 1000;
+  return retryAfterMs(outcome) ?? Math.random() * backoffCeiling();
 }
