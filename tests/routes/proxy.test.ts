@@ -831,11 +831,14 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.payload)).toEqual(okBody);
 
-      // Assert the terminal req_complete event, not just the body. attempts +
-      // error_class are live today; stream / retry_disposition are not yet wired.
+      // Assert the terminal req_complete event, not just the body.
       const complete = capture.byEvent("req_complete");
       expect(complete).toHaveLength(1);
-      expect(complete[0]).toMatchObject({ attempts: 1, error_class: null });
+      expect(complete[0]).toMatchObject({
+        attempts: 1,
+        error_class: null,
+        retry_disposition: "ineligible",
+      });
     } finally {
       await app.close();
     }
@@ -878,7 +881,11 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
 
       const complete = capture.byEvent("req_complete");
       expect(complete).toHaveLength(1);
-      expect(complete[0]).toMatchObject({ attempts: 2, error_class: null });
+      expect(complete[0]).toMatchObject({
+        attempts: 2,
+        error_class: null,
+        retry_disposition: "attempted",
+      });
     } finally {
       await app.close();
     }
@@ -961,6 +968,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       expect(complete[0]).toMatchObject({
         attempts: 1,
         error_class: "gateway-fault",
+        retry_disposition: "ineligible",
       });
     } finally {
       await app.close();
@@ -1005,6 +1013,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       expect(capture.byEvent("req_complete")[0]).toMatchObject({
         attempts: 1,
         error_class: "gateway-fault",
+        retry_disposition: "ineligible",
       });
     } finally {
       await app.close();
@@ -1049,6 +1058,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       expect(capture.byEvent("req_complete")[0]).toMatchObject({
         attempts: 2,
         error_class: null,
+        retry_disposition: "attempted",
       });
     } finally {
       await app.close();
@@ -1089,6 +1099,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       expect(capture.byEvent("req_complete")[0]).toMatchObject({
         attempts: 2,
         error_class: "upstream-retry-exhausted",
+        retry_disposition: "attempted",
       });
     } finally {
       await app.close();
@@ -1141,6 +1152,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       expect(capture.byEvent("req_complete")[0]).toMatchObject({
         attempts: 2,
         error_class: null,
+        retry_disposition: "attempted",
       });
     } finally {
       vi.useRealTimers();
