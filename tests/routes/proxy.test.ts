@@ -1095,6 +1095,152 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
     }
   });
 
+  it("8.43 Retry-After budget-skip: 503 + Retry-After exceeding the wall-clock → passthrough 503, single attempt, breaker not incremented", async () => {
+    const recorded: ProbeOutcome[] = [];
+    const capture = makeLogCapture();
+    const body503 = '{"error":{"message":"overloaded","type":"server_error"}}';
+    let calls = 0;
+    // Retry-After "31" can't fit the 30s budget → retry skipped, attempt one stands.
+    const upstream = (): Promise<Outcome> => {
+      calls += 1;
+      return Promise.resolve({
+        kind: "upstream_error",
+        status: 503,
+        body_raw: body503,
+        retry_after: "31",
+      });
+    };
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstream,
+      capture,
+    );
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+      // Passthrough verbatim — not a normalized 502, not a manufactured 504.
+      expect(res.statusCode).toBe(503);
+      expect(res.payload).toBe(body503);
+      expect(res.headers["retry-after"]).toBe("31");
+      // The terminator is upstream backpressure, not the gateway clock.
+      expect(res.headers["x-gateway-error-class"]).not.toBe("gateway-fault");
+      expect(calls).toBe(1); // retry skipped → no second billable attempt
+      // A budget-skip is not failure evidence — the breaker must not count it.
+      expect(recorded).toEqual(["INCONCLUSIVE"]);
+
+      const complete = capture.byEvent("req_complete");
+      expect(complete).toHaveLength(1);
+      expect(complete[0]).toMatchObject({
+        attempts: 1,
+        retry_disposition: "skipped_budget",
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("8.43 status-agnostic — 429 budget-skip: Retry-After beyond the wall-clock → passthrough 429, single attempt, breaker not incremented", async () => {
+    const recorded: ProbeOutcome[] = [];
+    const capture = makeLogCapture();
+    const body429 =
+      '{"error":{"message":"rate limited","type":"rate_limit_error"}}';
+    let calls = 0;
+    // A second budget-skip status the 503 case can't witness: pins that the
+    // policy passes the upstream status through verbatim, not a fixed value.
+    const upstream = (): Promise<Outcome> => {
+      calls += 1;
+      return Promise.resolve({
+        kind: "upstream_error",
+        status: 429,
+        body_raw: body429,
+        retry_after: "31",
+      });
+    };
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstream,
+      capture,
+    );
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+      expect(res.statusCode).toBe(429); // verbatim upstream status, not a fixed value
+      expect(res.payload).toBe(body429);
+      expect(res.headers["retry-after"]).toBe("31");
+      expect(res.headers["x-gateway-error-class"]).not.toBe("gateway-fault");
+      expect(calls).toBe(1);
+      expect(recorded).toEqual(["INCONCLUSIVE"]);
+
+      const complete = capture.byEvent("req_complete");
+      expect(complete).toHaveLength(1);
+      expect(complete[0]).toMatchObject({
+        attempts: 1,
+        retry_disposition: "skipped_budget",
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("8.43 sibling — Retry-After within budget retries: 503 + Retry-After:1 then 200 → 200, two attempts", async () => {
+    let calls = 0;
+    const okBody = { id: "chatcmpl-8-43-fits", choices: [{ index: 0 }] };
+    const recorded: ProbeOutcome[] = [];
+    const capture = makeLogCapture();
+    // Same 503 + Retry-After path as the budget-skip above, but a wait that FITS
+    // the budget, so the retry fires — isolating the boundary as the difference.
+    const upstream = (): Promise<Outcome> => {
+      calls += 1;
+      return Promise.resolve(
+        calls === 1
+          ? {
+              kind: "upstream_error",
+              status: 503,
+              body_raw: '{"error":{"message":"overloaded"}}',
+              retry_after: "1",
+            }
+          : { kind: "ok", status: 200, body_parsed: okBody },
+      );
+    };
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstream,
+      capture,
+    );
+    // Fake timers drive the 1s Retry-After wait deterministically (app booted on
+    // real timers).
+    vi.useFakeTimers();
+    try {
+      const injected = app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+      await vi.advanceTimersByTimeAsync(1000); // honor the 1s Retry-After
+      const res = await injected;
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.payload)).toEqual(okBody);
+      expect(calls).toBe(2); // the 1s wait fit the budget → retry fired
+      expect(recorded).toEqual(["SUCCESS"]); // 503-then-200 is a success
+      expect(capture.byEvent("req_complete")[0]).toMatchObject({
+        attempts: 2,
+        retry_disposition: "attempted",
+      });
+    } finally {
+      vi.useRealTimers();
+      await app.close();
+    }
+  });
+
   it("8.24 hook ordering: authPreHandler → rate-limiter preHandler → proxy handler", async () => {
     const order: string[] = [];
     let tenantIdAtRateLimiter: string | null = null;
