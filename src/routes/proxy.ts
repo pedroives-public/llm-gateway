@@ -17,7 +17,7 @@ import {
 } from "../observability/events.js";
 import { retry } from "../reliability/retry.js";
 import { armWallClockTimeout } from "../reliability/timeouts.js";
-import { classify } from "../upstream/classify.js";
+import { classify, type Classification } from "../upstream/classify.js";
 import { assertNever } from "../upstream/assert-never.js";
 import { isRetryEligible } from "../upstream/retry-eligibility.js";
 
@@ -188,30 +188,38 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
       }
 
       const classification = classify(outcome, request.log, request.reqId);
-      opts.breaker.recordResult(
-        classification.breaker_delta === 1 ? "FAILURE" : "INCONCLUSIVE",
+      const retryDisposition = deriveRetryDisposition(
+        attempts,
+        outcome,
+        timeout.signal,
       );
 
-      const status = statusForErrorOutcome(outcome, classification.error_class);
+      // recordResult uses the policy's delta, not classify's raw delta, in the
+      // same synchronous stretch — no await between deciding and recording.
+      const terminal = decideErrorTerminal(
+        classification,
+        retryDisposition,
+        outcome,
+      );
+      opts.breaker.recordResult(
+        terminal.breaker_delta === 1 ? "FAILURE" : "INCONCLUSIVE",
+      );
+
       emitReqComplete(request.log, {
         req_id: request.reqId,
-        status,
-        error_class: classification.error_class,
+        status: terminal.status,
+        error_class: terminal.error_class,
         stream: request.body.stream ?? false,
         duration_ms: durationMs,
         upstream_duration_ms: upstreamDurationMs,
         gateway_overhead_ms: gatewayOverheadMs,
         attempts,
-        retry_disposition: deriveRetryDisposition(
-          attempts,
-          outcome,
-          timeout.signal,
-        ),
+        retry_disposition: retryDisposition,
       });
 
       reply
-        .code(status)
-        .header("x-gateway-error-class", classification.error_class);
+        .code(terminal.status)
+        .header("x-gateway-error-class", terminal.error_class);
 
       if (outcome.kind === "upstream_error") {
         if (outcome.retry_after !== undefined) {
@@ -220,7 +228,7 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         return outcome.body_raw;
       }
 
-      return bodyForErrorOutcome(outcome, classification.error_class);
+      return bodyForErrorOutcome(outcome, terminal.error_class);
     },
   );
 };
@@ -248,6 +256,38 @@ function deriveRetryDisposition(
     return "skipped_budget";
   }
   return "ineligible";
+}
+
+// What an error outcome resolves to — the one place the per-outcome
+// classification and the per-episode disposition compose.
+type ErrorTerminal = {
+  error_class: ErrorClass;
+  breaker_delta: 0 | 1;
+  status: number;
+};
+
+// Suppress ONLY an upstream 429/503 budget-skip: the upstream asked us to back
+// off, so it is not a breaker-worthy fault. A budget-skipped network_failed
+// (e.g. connect timeout) is a real failure and MUST fall through so the breaker
+// counts it.
+function decideErrorTerminal(
+  classification: Classification,
+  disposition: RetryDisposition,
+  outcome: ErrorOutcome,
+): ErrorTerminal {
+  if (disposition === "skipped_budget" && outcome.kind === "upstream_error") {
+    return {
+      ...classification,
+      breaker_delta: 0,
+      status: outcome.status,
+    };
+  }
+
+  return {
+    error_class: classification.error_class,
+    breaker_delta: classification.breaker_delta,
+    status: statusForErrorOutcome(outcome, classification.error_class),
+  };
 }
 
 function statusForErrorOutcome(
