@@ -13,11 +13,13 @@ import {
   emitReqComplete,
   wasColdStart,
   type ErrorClass,
+  type RetryDisposition,
 } from "../observability/events.js";
 import { retry } from "../reliability/retry.js";
 import { armWallClockTimeout } from "../reliability/timeouts.js";
 import { classify } from "../upstream/classify.js";
 import { assertNever } from "../upstream/assert-never.js";
+import { isRetryEligible } from "../upstream/retry-eligibility.js";
 
 const WALL_CLOCK_MS = 30_000;
 const BODY_LIMIT_BYTES = 262_144;
@@ -107,10 +109,12 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           req_id: request.reqId,
           status,
           error_class: errorClass,
+          stream: request.body.stream ?? false,
           duration_ms: durationMs,
           upstream_duration_ms: 0,
           gateway_overhead_ms: durationMs,
           attempts: 0,
+          retry_disposition: "ineligible",
         });
 
         reply.code(status).header("x-gateway-error-class", errorClass);
@@ -167,10 +171,16 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           req_id: request.reqId,
           status: outcome.status,
           error_class: null,
+          stream: request.body.stream ?? false,
           duration_ms: durationMs,
           upstream_duration_ms: upstreamDurationMs,
           gateway_overhead_ms: gatewayOverheadMs,
           attempts,
+          retry_disposition: deriveRetryDisposition(
+            attempts,
+            outcome,
+            timeout.signal,
+          ),
         });
 
         reply.code(outcome.status);
@@ -187,10 +197,16 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         req_id: request.reqId,
         status,
         error_class: classification.error_class,
+        stream: request.body.stream ?? false,
         duration_ms: durationMs,
         upstream_duration_ms: upstreamDurationMs,
         gateway_overhead_ms: gatewayOverheadMs,
         attempts,
+        retry_disposition: deriveRetryDisposition(
+          attempts,
+          outcome,
+          timeout.signal,
+        ),
       });
 
       reply
@@ -208,6 +224,31 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
     },
   );
 };
+
+// retry_disposition reconstructs, at wiring time, WHY a request did or did not
+// retry — from the (attempts, outcome, signal) the primitive leaves behind.
+// Callers pass a real upstream outcome (attempts >= 1); the breaker-OPEN
+// fast-fail sets `ineligible` directly (no upstream attempt to reason about).
+function deriveRetryDisposition(
+  attempts: number,
+  outcome: Outcome,
+  signal: AbortSignal,
+): RetryDisposition {
+  if (attempts === 2) {
+    return "attempted";
+  }
+
+  if (outcome.kind === "ok") {
+    return "ineligible";
+  }
+
+  // attempts is 1 here: the attempts===2 case returned above, and the only
+  // 0-attempt path (breaker FAST_FAIL) sets ineligible without calling this.
+  if (isRetryEligible(outcome) && !signal.aborted) {
+    return "skipped_budget";
+  }
+  return "ineligible";
+}
 
 function statusForErrorOutcome(
   outcome: ErrorOutcome,

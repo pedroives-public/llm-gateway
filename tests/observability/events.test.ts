@@ -71,10 +71,12 @@ describe("event emitters — field shape", () => {
       req_id: "019e6ef2-5065-74d9-ab04-834a39c6e4a9",
       status: 200,
       error_class: null,
+      stream: false,
       duration_ms: 120,
       upstream_duration_ms: 100,
       gateway_overhead_ms: 20,
       attempts: 1,
+      retry_disposition: "ineligible",
     };
     emitReqComplete(mockLog, payload);
     expect(logCalls[0]).toEqual({ event: "req_complete", ...payload });
@@ -89,10 +91,12 @@ describe("event emitters — field shape", () => {
       req_id: "x",
       status: 200,
       error_class: null,
+      stream: false,
       duration_ms: 10,
       upstream_duration_ms: 8,
       gateway_overhead_ms: 2,
       attempts: 1,
+      retry_disposition: "ineligible",
     });
     expect(wasColdStart()).toBe(false);
   });
@@ -176,10 +180,12 @@ describe("event emitters — field shape", () => {
       req_id,
       status: 200,
       error_class: null,
+      stream: false,
       duration_ms: 120,
       upstream_duration_ms: 100,
       gateway_overhead_ms: 20,
       attempts: 1,
+      retry_disposition: "ineligible",
     });
     const start = logCalls[0] as Record<string, unknown>;
     const complete = logCalls[1] as Record<string, unknown>;
@@ -206,10 +212,12 @@ describe("event emitters — field shape", () => {
       req_id: "req1",
       status: 200,
       error_class: null,
+      stream: false,
       duration_ms: 10,
       upstream_duration_ms: 8,
       gateway_overhead_ms: 2,
       attempts: 1,
+      retry_disposition: "ineligible",
     });
 
     const secondColdStart = wasColdStart();

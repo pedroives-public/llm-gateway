@@ -6,6 +6,12 @@ export type ErrorClass =
   | "upstream-fault"
   | "upstream-retry-exhausted";
 
+// Why a request did or did not retry, reconstructed at wiring time for incident
+// triage. `skipped_budget` means STRICTLY a Retry-After-vs-budget skip; an
+// eligible outcome that coincided with a gateway abort is `ineligible`, not a
+// budget skip, so the label stays single-meaning for SLI filters.
+export type RetryDisposition = "attempted" | "skipped_budget" | "ineligible";
+
 export type CbState = "CLOSED" | "OPEN" | "HALF_OPEN";
 
 export interface ReqStartPayload {
@@ -22,10 +28,12 @@ export interface ReqCompletePayload {
   req_id: string;
   status: number;
   error_class: ErrorClass | null;
+  stream: boolean;
   duration_ms: number;
   upstream_duration_ms: number;
   gateway_overhead_ms: number;
   attempts: number;
+  retry_disposition: RetryDisposition;
 }
 
 export interface StreamFirstTokenPayload {
