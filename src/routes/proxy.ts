@@ -19,7 +19,10 @@ import { retry } from "../reliability/retry.js";
 import { armWallClockTimeout } from "../reliability/timeouts.js";
 import { classify, type Classification } from "../upstream/classify.js";
 import { assertNever } from "../upstream/assert-never.js";
-import { isRetryEligible } from "../upstream/retry-eligibility.js";
+import {
+  isRetryEligible,
+  retryAfterMs,
+} from "../upstream/retry-eligibility.js";
 
 const WALL_CLOCK_MS = 30_000;
 const BODY_LIMIT_BYTES = 262_144;
@@ -237,7 +240,9 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
 // retry — from the (attempts, outcome, signal) the primitive leaves behind.
 // Callers pass a real upstream outcome (attempts >= 1); the breaker-OPEN
 // fast-fail sets `ineligible` directly (no upstream attempt to reason about).
-function deriveRetryDisposition(
+// Exported for the cause-discriminant unit test: the no-Retry-After budget-skip
+// is unreachable end-to-end, so it is pinned at the function boundary.
+export function deriveRetryDisposition(
   attempts: number,
   outcome: Outcome,
   signal: AbortSignal,
@@ -250,9 +255,11 @@ function deriveRetryDisposition(
     return "ineligible";
   }
 
-  // attempts is 1 here: the attempts===2 case returned above, and the only
-  // 0-attempt path (breaker FAST_FAIL) sets ineligible without calling this.
-  if (isRetryEligible(outcome) && !signal.aborted) {
+  if (
+    isRetryEligible(outcome) &&
+    !signal.aborted &&
+    retryAfterMs(outcome) !== null
+  ) {
     return "skipped_budget";
   }
   return "ineligible";
