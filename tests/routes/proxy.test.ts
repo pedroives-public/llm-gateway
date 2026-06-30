@@ -1464,4 +1464,70 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       await app.close();
     }
   });
+
+  it("8.39 settle-once race: a recognized network rejection (ECONNRESET) lands as the wall-clock abort fires → the route honors the returned network_failed (504 upstream_connection_failed + boundary log), not a signal.aborted shortcut", async () => {
+    const recorded: ProbeOutcome[] = [];
+    const capture = makeLogCapture();
+
+    const upstreamRace = (
+      _body: ChatCompletionsBody,
+      signal: AbortSignal,
+      log: Logger,
+    ): Promise<Outcome> => {
+      return new Promise<Outcome>((resolve) => {
+        signal.addEventListener(
+          "abort",
+          () => resolve(resolveRejection(fetchFailed("ECONNRESET"), signal, log)),
+          { once: true },
+        );
+      });
+    };
+
+    // Build under real timers, then drive the 30s wall-clock abort with fake timers.
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstreamRace,
+      capture,
+    );
+    vi.useFakeTimers();
+    try {
+      const injected = app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+      await vi.advanceTimersByTimeAsync(30_000);
+      const res = await injected;
+
+      // Dead-weight: a signal.aborted shortcut also yields 504/gateway-fault/FAILURE.
+      expect(res.statusCode).toBe(504);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(recorded).toEqual(["FAILURE"]);
+
+      // Discriminant: the returned network_failed body; a shortcut would render
+      // the wall_clock_exceeded body instead.
+      expect(JSON.parse(res.payload)).toEqual({
+        error: {
+          message: "gateway error",
+          type: "gateway_error",
+          code: "upstream_connection_failed",
+        },
+      });
+
+      // Discriminant: classify() logs the network cause but is a NO-OP for aborted,
+      // so a shortcut emits no boundary log. The cause-log has no msg/event — match
+      // by cause_code.
+      const boundary = capture.logs.find(
+        (line) => line.cause_code === "ECONNRESET",
+      );
+      expect(boundary).toMatchObject({
+        cause_code: "ECONNRESET",
+        cause_name: "Error",
+      });
+    } finally {
+      vi.useRealTimers();
+      await app.close();
+    }
+  });
 });
