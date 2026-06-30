@@ -1365,8 +1365,8 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       signal: AbortSignal,
       log: Logger,
     ): Promise<Outcome> => {
-      return Promise.reject(fetchFailed("EHOSTUNREACH")).catch(
-        (err: unknown) => resolveRejection(err, signal, log),
+      return Promise.reject(fetchFailed("EHOSTUNREACH")).catch((err: unknown) =>
+        resolveRejection(err, signal, log),
       );
     };
 
@@ -1404,6 +1404,61 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       expect(boundary).toMatchObject({
         abort_identity: false,
         cause_code: "EHOSTUNREACH",
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("8.40 unrecognized rejection (out-of-contract abort) -> 500 gateway-fault, breaker INCONCLUSIVE, boundary log abort_identity:true", async () => {
+    const recorded: ProbeOutcome[] = [];
+    const capture = makeLogCapture();
+
+    // Sibling of the EHOSTUNREACH case — the opposite arm of the discriminant.
+    // The route's real signal can never carry an unrecognized reason (single
+    // abort point: only the gateway's funnel aborts it, always with a recognized
+    // kind), so the fake must SYNTHESIZE the out-of-contract abort with its own
+    // controller, then run that reason through resolveRejection.
+    const upstreamOutOfContractAbort = (
+      _body: ChatCompletionsBody,
+      _signal: AbortSignal,
+      log: Logger,
+    ): Promise<Outcome> => {
+      const controller = new AbortController();
+      controller.abort();
+      return Promise.reject(controller.signal.reason).catch((err: unknown) =>
+        resolveRejection(err, controller.signal, log),
+      );
+    };
+
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstreamOutOfContractAbort,
+      capture,
+    );
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+
+      // Identical to the EHOSTUNREACH case — the client cannot tell the two
+      // apart; only the boundary log can.
+      expect(res.statusCode).toBe(500);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(recorded).toEqual(["INCONCLUSIVE"]);
+
+      // The discriminant: same destination, but abort_identity is TRUE (the
+      // rejection IS the gateway's own abort reason) and the rejection is an
+      // AbortError — the out-of-contract aborter, not an exotic network error.
+      const boundary = capture.logs.find(
+        (line) => line.msg === "Unrecognized upstream rejection",
+      );
+      expect(boundary).toMatchObject({
+        abort_identity: true,
+        err_name: "AbortError",
       });
     } finally {
       await app.close();
