@@ -13,8 +13,10 @@ import type {
   ProbeOutcome,
 } from "../../src/reliability/circuit-breaker.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
+import { resolveRejection, type Logger } from "../../src/upstream/rejection.js";
 import type { DrizzleClient } from "../../src/db/client.js";
 import { makeLogCapture, type LogCapture } from "../log-capture.js";
+import { fetchFailed } from "../helpers/fetch-rejection.js";
 
 const stubBreaker: CircuitBreaker = {
   tryAcquire: () => ({ kind: "NORMAL" }),
@@ -781,6 +783,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
     upstreamBuffered: (
       b: ChatCompletionsBody,
       s: AbortSignal,
+      log: Logger,
     ) => Promise<Outcome>,
     capture?: LogCapture,
   ) {
@@ -1343,6 +1346,65 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       expect(res.statusCode).toBe(200);
       expect(order).toEqual(["rate", "proxy"]); // preHandler before the route handler
       expect(tenantIdAtRateLimiter).toBe(tenantId); // onRequest auth before the preHandler
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("8.40 unrecognized rejection (EHOSTUNREACH) -> 500 gateway-fault, breaker INCONCLUSIVE, boundary log abort_identity:false", async () => {
+    const recorded: ProbeOutcome[] = [];
+    const capture = makeLogCapture();
+
+    // The fake stands in for the real client at the upstreamBuffered seam. To
+    // exercise the recognition + re-throw under test (and NOT pre-bake an
+    // Outcome that bypasses it), it must run an unrecognized rejection through
+    // resolveRejection. The route hands it (body, signal, log); resolveRejection
+    // is already imported.
+    const upstreamUnrecognized = (
+      _body: ChatCompletionsBody,
+      signal: AbortSignal,
+      log: Logger,
+    ): Promise<Outcome> => {
+      return Promise.reject(fetchFailed("EHOSTUNREACH")).catch(
+        (err: unknown) => resolveRejection(err, signal, log),
+      );
+    };
+
+    const { app, apiKey } = await buildWith(
+      recordingBreaker(recorded),
+      upstreamUnrecognized,
+      capture,
+    );
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+
+      // Status + breaker are identical for BOTH 8.40 variants (true/false), so
+      // they pin the route wiring but cannot tell the variants apart.
+      expect(res.statusCode).toBe(500);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(JSON.parse(res.payload)).toEqual({
+        error: {
+          message: "internal server error",
+          type: "internal_error",
+          code: "unhandled_exception",
+        },
+      });
+      expect(recorded).toEqual(["INCONCLUSIVE"]);
+
+      // The discriminant. The boundary log is a plain `error` log (no `event`
+      // field), so it is read from `capture.logs`, not `byEvent`.
+      const boundary = capture.logs.find(
+        (line) => line.msg === "Unrecognized upstream rejection",
+      );
+      expect(boundary).toMatchObject({
+        abort_identity: false,
+        cause_code: "EHOSTUNREACH",
+      });
     } finally {
       await app.close();
     }

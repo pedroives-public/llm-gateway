@@ -1,5 +1,6 @@
 import { resolveRejection, type Logger } from "../../src/upstream/rejection.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
+import { fetchFailed } from "../helpers/fetch-rejection.js";
 import { describe, it, expect, expectTypeOf, vi } from "vitest";
 
 // The boundary logger payload deliberately omits req_id: the caller passes a
@@ -19,17 +20,6 @@ function firstErrorPayload(
     throw new Error("expected logger.error to be called");
   }
   return call[0];
-}
-
-// Mimics the shape undici's fetch produces on a network rejection:
-// TypeError("fetch failed") whose cause is an Error optionally carrying a
-// string `code` (pinned empirically on Node 22 — see abort-identity-pin).
-function fetchFailed(code?: string): TypeError {
-  const cause = new Error("connect failed");
-  if (code !== undefined) {
-    (cause as Error & { code?: string }).code = code;
-  }
-  return new TypeError("fetch failed", { cause });
 }
 
 function catchFrom(fn: () => unknown): unknown {
