@@ -8,9 +8,10 @@ import {
   deriveRetryDisposition,
   type ChatCompletionsBody,
 } from "../../src/routes/proxy.js";
-import type {
-  CircuitBreaker,
-  ProbeOutcome,
+import {
+  createCircuitBreaker,
+  type CircuitBreaker,
+  type ProbeOutcome,
 } from "../../src/reliability/circuit-breaker.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
 import { resolveRejection, type Logger } from "../../src/upstream/rejection.js";
@@ -894,6 +895,75 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
     }
   });
 
+  it(
+    "8.7 CB OPEN fast-fail: five retry-exhausted requests open the REAL breaker; the sixth fast-fails with attempts: 0",
+    { timeout: 15_000 },
+    async () => {
+      const capture = makeLogCapture();
+      const cbEvents: object[] = [];
+      const breaker = createCircuitBreaker({ info: (o) => cbEvents.push(o) });
+      let upstreamCalls = 0;
+      const failing503 = (): Promise<Outcome> => {
+        upstreamCalls += 1;
+        return Promise.resolve({
+          kind: "upstream_error",
+          status: 503,
+          body_raw: '{"error":{"message":"down","type":"server_error"}}',
+        });
+      };
+      const { app, apiKey } = await buildWith(breaker, failing503, capture);
+
+      try {
+        // Prime the real FSM: five retry-exhausted requests (two attempts
+        // each), the fifth FAILURE crosses the open threshold.
+        for (let i = 1; i <= 5; i++) {
+          const res = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            headers: { authorization: `Bearer ${apiKey}` },
+            payload: validBody,
+          });
+          expect(res.statusCode, `priming request ${i}`).toBe(502);
+        }
+        expect(upstreamCalls).toBe(10); // two attempts per primed request
+        expect(breaker.getState()).toBe("OPEN");
+
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: `Bearer ${apiKey}` },
+          payload: validBody,
+        });
+        expect(res.statusCode).toBe(503);
+        expect(res.headers["x-gateway-error-class"]).toBe(
+          "upstream-retry-exhausted",
+        );
+        expect(JSON.parse(res.payload)).toMatchObject({
+          error: { code: "circuit_breaker_open" },
+        });
+
+        expect(upstreamCalls).toBe(10);
+
+        expect(cbEvents).toHaveLength(1);
+        expect(cbEvents[0]).toMatchObject({
+          event: "cb_state_change",
+          from: "CLOSED",
+          to: "OPEN",
+        });
+
+        const complete = capture.byEvent("req_complete");
+        expect(complete).toHaveLength(6); // one terminal per request
+        expect(complete.at(-1)).toMatchObject({
+          attempts: 0,
+          error_class: "upstream-retry-exhausted",
+          retry_disposition: "ineligible",
+        });
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
   it("8.10 wall-clock: upstream hangs past 30s → 504 gateway-fault", async () => {
     const recorded: ProbeOutcome[] = [];
     // Hangs until the gateway's own AbortSignal fires, then resolves to the
@@ -1477,7 +1547,8 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       return new Promise<Outcome>((resolve) => {
         signal.addEventListener(
           "abort",
-          () => resolve(resolveRejection(fetchFailed("ECONNRESET"), signal, log)),
+          () =>
+            resolve(resolveRejection(fetchFailed("ECONNRESET"), signal, log)),
           { once: true },
         );
       });
