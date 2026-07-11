@@ -239,12 +239,11 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
   );
 };
 
-// retry_disposition reconstructs, at wiring time, WHY a request did or did not
-// retry — from the (attempts, outcome, signal) the primitive leaves behind.
-// Callers pass a real upstream outcome (attempts >= 1); the breaker-OPEN
-// fast-fail sets `ineligible` directly (no upstream attempt to reason about).
-// Exported for the cause-discriminant unit test: the no-Retry-After budget-skip
-// is unreachable end-to-end, so it is pinned at the function boundary.
+// Reconstructs WHY a request did or did not retry from what the retry
+// primitive leaves behind (attempts, outcome, signal). Callers pass a real
+// upstream outcome (attempts >= 1); the breaker-OPEN fast-fail sets
+// `ineligible` directly. Exported so a unit test can pin the no-Retry-After
+// budget-skip, a path unreachable end-to-end.
 export function deriveRetryDisposition(
   attempts: number,
   outcome: Outcome,
