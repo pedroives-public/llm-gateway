@@ -30,7 +30,9 @@ const BODY_LIMIT_BYTES = 262_144;
 export interface ChatCompletionsBody {
   model: string;
   messages: unknown[];
-  stream?: boolean;
+  // Buffered-only V1: the schema rejects stream:true, so the type carries the
+  // same pin; widen back to `boolean` when streaming ships.
+  stream?: false;
   [key: string]: unknown;
 }
 
@@ -51,7 +53,8 @@ const chatCompletionsBodySchema = {
   properties: {
     model: { type: "string" },
     messages: { type: "array", minItems: 1 },
-    stream: { type: "boolean" },
+    // Buffered-only V1: reject stream:true at the schema, before it can reach the breaker or upstream; lift when streaming ships.
+    stream: { type: "boolean", const: false },
   },
   additionalProperties: true,
 };
@@ -440,6 +443,16 @@ function sendProxyError(
 function deriveValidationCode(
   validation: FastifySchemaValidationError[],
 ): string {
+  // Both checks on purpose: keyword alone would claim any future `const`
+  // field; path alone would mislabel a type violation on /stream (e.g.
+  // stream: "x"). Remove when streaming ships.
+  if (
+    validation[0]?.keyword === "const" &&
+    validation[0].instancePath === "/stream"
+  ) {
+    return "stream_not_supported";
+  }
+
   switch (validation[0]?.keyword) {
     case "required":
       return `${String(validation[0].params.missingProperty)}_missing`;
