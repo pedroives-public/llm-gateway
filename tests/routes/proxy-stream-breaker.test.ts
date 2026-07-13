@@ -1,16 +1,15 @@
-import { randomBytes, randomUUID } from "node:crypto";
 import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { describe, it, expect } from "vitest";
-import { buildApp } from "../../src/app.js";
-import { proxyRoute } from "../../src/routes/proxy.js";
 import {
   createCircuitBreaker,
   type CircuitBreaker,
 } from "../../src/reliability/circuit-breaker.js";
 import { createOpenAIClient } from "../../src/upstream/openai.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
-import type { DrizzleClient } from "../../src/db/client.js";
+import { bearer } from "../helpers/fake-auth-db.js";
+import { stubBreaker } from "../helpers/breaker-stubs.js";
+import { listenEphemeral } from "../helpers/ephemeral-server.js";
+import { buildProxyApp } from "../helpers/proxy-app.js";
 
 // One client must not open the process-wide circuit breaker for everyone else
 // by sending `stream: true`: a streaming upstream answers it 200 + SSE, which
@@ -36,43 +35,6 @@ const VICTIM_BODY = {
   id: "chatcmpl-victim",
   choices: [{ message: { role: "assistant", content: "served" } }],
 };
-
-// One active row for any presented key, so an authenticated request reaches the
-// route. Auth edge cases live in tests/middleware/auth.test.ts. Same shape as
-// proxy.test.ts / proxy-composition.test.ts — intentionally duplicated.
-function fakeAuthDb(tenantId: string): DrizzleClient {
-  return {
-    select() {
-      return {
-        from() {
-          return {
-            innerJoin() {
-              return {
-                where() {
-                  return {
-                    limit() {
-                      return Promise.resolve([
-                        {
-                          tenantId,
-                          planTier: "pro",
-                          apiKeyStatus: "active",
-                          tenantStatus: "active",
-                        },
-                      ]);
-                    },
-                  };
-                },
-              };
-            },
-          };
-        },
-      };
-    },
-  } as unknown as DrizzleClient;
-}
-
-const bearer = (): string =>
-  `Bearer lkey_${randomBytes(32).toString("base64url")}`;
 
 // The breaker emits cb_state_change through a logger it never reads back here.
 const noopLog = { info: () => {} };
@@ -115,10 +77,7 @@ describe("stream:true must not open the shared circuit breaker", () => {
           }
         });
       });
-      await new Promise<void>((resolve) =>
-        server.listen(0, "127.0.0.1", resolve),
-      );
-      const { port } = server.address() as AddressInfo;
+      const { port, close } = await listenEphemeral(server);
 
       // Real breaker + real client (pointed at the fake) wired through the real
       // route. Holding the breaker lets us read its state directly; injecting
@@ -128,15 +87,9 @@ describe("stream:true must not open the shared circuit breaker", () => {
         apiKey: "gateway-key",
         baseURL: `http://127.0.0.1:${port}`,
       });
-      const app = await buildApp({
-        logger: false,
-        db: fakeAuthDb(randomUUID()),
-        registerProtected: async (scope) => {
-          await scope.register(proxyRoute, {
-            breaker: heldBreaker,
-            upstreamBuffered: client.buffered,
-          });
-        },
+      const app = await buildProxyApp({
+        breaker: heldBreaker,
+        upstreamBuffered: client.buffered,
       });
 
       const attackerAuth = bearer();
@@ -169,7 +122,7 @@ describe("stream:true must not open the shared circuit breaker", () => {
         expect(heldBreaker.getState()).toBe("CLOSED");
       } finally {
         await app.close();
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await close();
       }
     },
   );
@@ -198,15 +151,9 @@ describe("stream:true must not open the shared circuit breaker", () => {
       },
       getState: () => "CLOSED",
     };
-    const app = await buildApp({
-      logger: false,
-      db: fakeAuthDb(randomUUID()),
-      registerProtected: async (scope) => {
-        await scope.register(proxyRoute, {
-          breaker: tripwireBreaker,
-          upstreamBuffered: countingUpstream,
-        });
-      },
+    const app = await buildProxyApp({
+      breaker: tripwireBreaker,
+      upstreamBuffered: countingUpstream,
     });
 
     try {
@@ -240,20 +187,9 @@ describe("stream:true must not open the shared circuit breaker", () => {
         body_parsed: VICTIM_BODY,
       });
     };
-    const okBreaker: CircuitBreaker = {
-      tryAcquire: () => ({ kind: "NORMAL" }),
-      recordResult: () => {},
-      getState: () => "CLOSED",
-    };
-    const app = await buildApp({
-      logger: false,
-      db: fakeAuthDb(randomUUID()),
-      registerProtected: async (scope) => {
-        await scope.register(proxyRoute, {
-          breaker: okBreaker,
-          upstreamBuffered: countingUpstream,
-        });
-      },
+    const app = await buildProxyApp({
+      breaker: stubBreaker,
+      upstreamBuffered: countingUpstream,
     });
 
     try {

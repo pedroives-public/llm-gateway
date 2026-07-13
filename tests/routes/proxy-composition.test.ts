@@ -1,6 +1,5 @@
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import postgres from "postgres";
@@ -13,12 +12,14 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../../src/app.js";
-import { proxyRoute } from "../../src/routes/proxy.js";
-import type { CircuitBreaker } from "../../src/reliability/circuit-breaker.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
 import { createDb, type DrizzleClient } from "../../src/db/client.js";
 import { apiKeys, tenants } from "../../src/db/schema.js";
 import { TEST_PEPPER } from "../constants.js";
+import { fakeAuthDb } from "../helpers/fake-auth-db.js";
+import { stubBreaker } from "../helpers/breaker-stubs.js";
+import { listenEphemeral } from "../helpers/ephemeral-server.js";
+import { buildProxyApp } from "../helpers/proxy-app.js";
 
 // Composition tests, one seam each: the size cap through the real client and
 // breaker (auth faked), and real pepper+HMAC auth through the route (upstream
@@ -28,39 +29,6 @@ const validBody = {
   model: "gpt-4o",
   messages: [{ role: "user", content: "hi" }],
 };
-
-// Same shape as proxy.test.ts's fakeAuthDb: one valid active row so an
-// authenticated request reaches the route regardless of the presented key.
-function fakeAuthDb(tenantId: string): DrizzleClient {
-  return {
-    select() {
-      return {
-        from() {
-          return {
-            innerJoin() {
-              return {
-                where() {
-                  return {
-                    limit() {
-                      return Promise.resolve([
-                        {
-                          tenantId,
-                          planTier: "pro",
-                          apiKeyStatus: "active",
-                          tenantStatus: "active",
-                        },
-                      ]);
-                    },
-                  };
-                },
-              };
-            },
-          };
-        },
-      };
-    },
-  } as unknown as DrizzleClient;
-}
 
 describe("8.23 — >1 MiB upstream through the REAL client + route + breaker", () => {
   it(
@@ -92,10 +60,7 @@ describe("8.23 — >1 MiB upstream through the REAL client + route + breaker", (
         };
         pump();
       });
-      await new Promise<void>((resolve) =>
-        server.listen(0, "127.0.0.1", resolve),
-      );
-      const { port } = server.address() as AddressInfo;
+      const { port, close } = await listenEphemeral(server);
 
       const prevBaseUrl = process.env["OPENAI_BASE_URL"];
       process.env["OPENAI_BASE_URL"] = `http://127.0.0.1:${port}`;
@@ -135,7 +100,7 @@ describe("8.23 — >1 MiB upstream through the REAL client + route + breaker", (
         }
       } finally {
         await app.close();
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await close();
         if (prevBaseUrl === undefined) {
           delete process.env["OPENAI_BASE_URL"];
         } else {
@@ -178,25 +143,15 @@ describe("8.2 — real pepper + HMAC + Postgres row through the proxy route", ()
     db = created.db;
     closeDb = created.close;
 
-    const stubBreaker: CircuitBreaker = {
-      tryAcquire: () => ({ kind: "NORMAL" }),
-      recordResult: () => {},
-      getState: () => "CLOSED",
-    };
     const countingUpstream = (): Promise<Outcome> => {
       upstreamCalls += 1;
       return Promise.resolve({ kind: "ok", status: 200, body_parsed: {} });
     };
 
-    app = await buildApp({
-      logger: false,
+    app = await buildProxyApp({
+      breaker: stubBreaker,
+      upstreamBuffered: countingUpstream,
       db,
-      registerProtected: async (scope) => {
-        await scope.register(proxyRoute, {
-          breaker: stubBreaker,
-          upstreamBuffered: countingUpstream,
-        });
-      },
     });
   }, 120_000);
 

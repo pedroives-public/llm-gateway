@@ -15,50 +15,13 @@ import {
 } from "../../src/reliability/circuit-breaker.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
 import { resolveRejection, type Logger } from "../../src/upstream/rejection.js";
-import type { DrizzleClient } from "../../src/db/client.js";
 import { makeLogCapture, type LogCapture } from "../log-capture.js";
 import { fetchFailed } from "../helpers/fetch-rejection.js";
+import { fakeAuthDb } from "../helpers/fake-auth-db.js";
+import { stubBreaker } from "../helpers/breaker-stubs.js";
 
-const stubBreaker: CircuitBreaker = {
-  tryAcquire: () => ({ kind: "NORMAL" }),
-  recordResult: () => {},
-  getState: () => "CLOSED",
-};
 const stubUpstreamBuffered = (): Promise<Outcome> =>
   Promise.resolve({ kind: "ok", status: 200, body_parsed: {} });
-
-// Fake db: one valid active row so an authenticated request reaches the route.
-// Auth edge cases (bad hash, unknown key) live in tests/middleware/auth.test.ts.
-function fakeAuthDb(tenantId: string): DrizzleClient {
-  return {
-    select() {
-      return {
-        from() {
-          return {
-            innerJoin() {
-              return {
-                where() {
-                  return {
-                    limit() {
-                      return Promise.resolve([
-                        {
-                          tenantId,
-                          planTier: "pro",
-                          apiKeyStatus: "active",
-                          tenantStatus: "active",
-                        },
-                      ]);
-                    },
-                  };
-                },
-              };
-            },
-          };
-        },
-      };
-    },
-  } as unknown as DrizzleClient;
-}
 
 describe("proxy route — buffered skeleton", () => {
   it("rejects a body missing `model` with 400 before any upstream call", async () => {
