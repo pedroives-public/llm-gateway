@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { DrizzleClient } from '../src/db/client.js';
+import { fakeAuthDb } from './helpers/fake-auth-db.js';
 
 describe('buildApp — pepper boot validation', () => {
   let savedPepper: string | undefined;
@@ -186,29 +187,7 @@ describe('buildApp — reqId decorator', () => {
     const apiKey = `lkey_${randomBytes(32).toString('base64url')}`;
     let capturedReqId: string | undefined;
 
-    const fakeDb = {
-      select() {
-        return {
-          from() {
-            return {
-              innerJoin() {
-                return {
-                  where() {
-                    return {
-                      limit() {
-                        return Promise.resolve([
-                          { tenantId, planTier: 'pro', apiKeyStatus: 'active', tenantStatus: 'active' },
-                        ]);
-                      },
-                    };
-                  },
-                };
-              },
-            };
-          },
-        };
-      },
-    } as unknown as DrizzleClient;
+    const fakeDb = fakeAuthDb(tenantId);
 
     const app = await buildApp({
       logger: false,
@@ -246,34 +225,7 @@ describe('buildApp — protected scope integration', () => {
     // The fake db always resolves to a valid row; the test verifies the wiring
     // (request reaches the route, decorations populated). Hash mismatch and
     // unknown-key paths are covered by tests/middleware/auth.test.ts.
-    const fakeDb = {
-      select() {
-        return {
-          from() {
-            return {
-              innerJoin() {
-                return {
-                  where() {
-                    return {
-                      limit() {
-                        return Promise.resolve([
-                          {
-                            tenantId,
-                            planTier: 'pro',
-                            apiKeyStatus: 'active',
-                            tenantStatus: 'active',
-                          },
-                        ]);
-                      },
-                    };
-                  },
-                };
-              },
-            };
-          },
-        };
-      },
-    } as unknown as DrizzleClient;
+    const fakeDb = fakeAuthDb(tenantId);
 
     const app = await buildApp({
       logger: false,
