@@ -214,3 +214,67 @@ describe("stream:true must not open the shared circuit breaker", () => {
     }
   });
 });
+
+describe("stream field under Ajv default type coercion", () => {
+  // Fastify's default Ajv coerces body types, so the `const: false` pin is
+  // also reachable through coercible values: "true"/1 coerce to true and must
+  // be rejected exactly like the boolean; "false"/0 coerce to false and must
+  // stay accepted. A validator config change that turns coercion off would
+  // flip these outcomes — these pins make that drift loud.
+  it("rejects 'true' and 1 as stream:true, before any upstream call", async () => {
+    let upstreamCalls = 0;
+    const countingUpstream = (): Promise<Outcome> => {
+      upstreamCalls += 1;
+      return Promise.resolve({ kind: "ok", status: 200, body_parsed: {} });
+    };
+    const app = await buildProxyApp({
+      breaker: stubBreaker,
+      upstreamBuffered: countingUpstream,
+    });
+
+    try {
+      for (const coerced of ["true", 1]) {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: bearer() },
+          payload: { ...validBody, stream: coerced },
+        });
+        expect(res.statusCode, `stream: ${JSON.stringify(coerced)}`).toBe(400);
+        expect(res.json()).toMatchObject({
+          error: { code: "stream_not_supported" },
+        });
+      }
+      expect(upstreamCalls).toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("accepts 'false' and 0 as stream:false (no over-block)", async () => {
+    let upstreamCalls = 0;
+    const countingUpstream = (): Promise<Outcome> => {
+      upstreamCalls += 1;
+      return Promise.resolve({ kind: "ok", status: 200, body_parsed: {} });
+    };
+    const app = await buildProxyApp({
+      breaker: stubBreaker,
+      upstreamBuffered: countingUpstream,
+    });
+
+    try {
+      for (const coerced of ["false", 0]) {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: bearer() },
+          payload: { ...validBody, stream: coerced },
+        });
+        expect(res.statusCode, `stream: ${JSON.stringify(coerced)}`).toBe(200);
+      }
+      expect(upstreamCalls).toBe(2);
+    } finally {
+      await app.close();
+    }
+  });
+});
