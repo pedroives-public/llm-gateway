@@ -159,6 +159,8 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         outcome = await retry(callUpstream, {
           signal: timeout.signal,
           deadlineAt,
+          // Buffered-only V1: nothing is flushed before the terminal; replace
+          // with the real first-byte marker when streaming ships.
           firstByteFlushed: () => false,
         });
       } catch (error) {
