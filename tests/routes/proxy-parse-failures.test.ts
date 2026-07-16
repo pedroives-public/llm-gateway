@@ -1,16 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { FastifyError, FastifyInstance } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { buildProxyApp } from "../helpers/proxy-app.js";
 import { stubBreaker } from "../helpers/breaker-stubs.js";
 import { bearer } from "../helpers/fake-auth-db.js";
 
-// Pre-validation parse failures at the proxy error desk. This suite is being
-// converted from probe to contract via TDD: tests asserting the target
-// contract (4xx client-fault with a public code) go first; tests labeled
-// OBSERVED still pin today's mislabeled behavior (500 gateway-fault) until
-// their slice flips them. The DIAGNOSTIC test is temporary scaffolding for
-// picking the error discriminator and is removed when the desk is done.
-describe("probe: pre-validation parse failures at the proxy error desk", () => {
+// Pre-validation parse failures must be answered as client faults with a
+// stable public error code, never fall through to the unhandled 500 branch.
+// Exception: Fastify parses text/plain natively, so that string body is
+// rejected by schema validation, not by a parse branch of the desk.
+describe("pre-validation parse failures at the proxy error desk", () => {
   function probeApp(): Promise<FastifyInstance> {
     return buildProxyApp({
       breaker: stubBreaker,
@@ -53,7 +51,7 @@ describe("probe: pre-validation parse failures at the proxy error desk", () => {
     });
   });
 
-  it("OBSERVED: text/plain is parsed natively; string body fails schema -> 400 client-fault", async () => {
+  it("text/plain is parsed natively; string body fails schema -> 400 client-fault", async () => {
     const observed = await probe("text/plain", "model=gpt-4o");
     expect(observed).toMatchObject({
       status: 400,
@@ -95,42 +93,4 @@ describe("probe: pre-validation parse failures at the proxy error desk", () => {
     });
   });
 
-  it("DIAGNOSTIC (temporary): raw Fastify error properties per parse-failure case", async () => {
-    const Fastify = (await import("fastify")).default;
-    const app = Fastify({ logger: false });
-    const seen: Record<string, unknown>[] = [];
-    app.setErrorHandler<FastifyError>((error, _request, reply) => {
-      seen.push({
-        name: error.name,
-        code: error.code,
-        statusCode: error.statusCode,
-        hasValidation: error.validation !== undefined,
-      });
-      reply.code(599).send({});
-    });
-    app.post("/x", { schema: { body: { type: "object" } } }, async () => ({}));
-    const cases: ReadonlyArray<readonly [string, string]> = [
-      ["application/json", '{"a": '],
-      ["application/json", ""],
-      ["application/xml", "<x/>"],
-    ];
-    try {
-      for (const [contentType, payload] of cases) {
-        await app.inject({
-          method: "POST",
-          url: "/x",
-          headers: { "content-type": contentType },
-          payload,
-        });
-      }
-    } finally {
-      await app.close();
-    }
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(
-      "/tmp/claude-1000/-home-pedro-projects-llm-gateway/cc21e71c-5814-4870-b9ed-b3ff0fd64631/scratchpad/diag-parse-errors.json",
-      JSON.stringify(seen, null, 2),
-    );
-    expect(seen).toHaveLength(3);
-  });
 });
