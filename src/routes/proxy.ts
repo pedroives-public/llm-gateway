@@ -437,6 +437,20 @@ function sendProxyError(
     return;
   }
 
+  if (error.code === "FST_ERR_CTP_INVALID_MEDIA_TYPE") {
+    reply
+      .code(415)
+      .header("x-gateway-error-class", "client-fault")
+      .send({
+        error: {
+          message: "request content type unsupported",
+          type: "invalid_request_error",
+          code: "unsupported_content_type",
+        },
+      });
+    return;
+  }
+
   if (error.statusCode === 413) {
     reply
       .code(413)
