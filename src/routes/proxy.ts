@@ -423,6 +423,20 @@ function sendProxyError(
     return;
   }
 
+  if (error.code === "FST_ERR_CTP_EMPTY_JSON_BODY") {
+    reply
+      .code(400)
+      .header("x-gateway-error-class", "client-fault")
+      .send({
+        error: {
+          message: "request body is empty",
+          type: "invalid_request_error",
+          code: "empty_body",
+        },
+      });
+    return;
+  }
+
   if (error.statusCode === 413) {
     reply
       .code(413)
