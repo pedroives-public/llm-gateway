@@ -387,9 +387,10 @@ function bodyForErrorOutcome(
   }
 }
 
-// Branch selection: `error.validation` is set only for schema rejections (a 413
-// leaves it undefined); an explicit 413 status is the body-too-large case;
-// anything else is unhandled.
+// Branch selection: `error.validation` is set only for schema rejections;
+// parse failures are recognized by their stable FST_ERR_CTP_* identity
+// codes; an explicit 413 status is body-too-large; anything else is
+// unhandled and answered as a gateway fault.
 function sendProxyError(
   error: FastifyError,
   request: FastifyRequest,
@@ -415,7 +416,7 @@ function sendProxyError(
       .header("x-gateway-error-class", "client-fault")
       .send({
         error: {
-          message: "JSON malformed",
+          message: "request body is not valid JSON",
           type: "invalid_request_error",
           code: "malformed_json",
         },
