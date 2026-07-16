@@ -61,11 +61,17 @@ describe("probe: pre-validation parse failures at the proxy error desk", () => {
     });
   });
 
-  it("OBSERVED: unparseable content-type -> 500 gateway-fault (mislabeled client fault)", async () => {
+  it("unparseable content-type -> 415 client-fault unsupported_content_type", async () => {
     const observed = await probe("application/xml", "<model/>");
     expect(observed).toMatchObject({
-      status: 500,
-      errorClass: "gateway-fault",
+      status: 415,
+      errorClass: "client-fault",
+      body: {
+        error: {
+          type: "invalid_request_error",
+          code: "unsupported_content_type",
+        },
+      },
     });
   });
 
