@@ -69,11 +69,14 @@ describe("probe: pre-validation parse failures at the proxy error desk", () => {
     });
   });
 
-  it("OBSERVED: empty JSON body -> 500 gateway-fault (mislabeled client fault)", async () => {
+  it("empty JSON body -> 400 client-fault empty_body", async () => {
     const observed = await probe("application/json", "");
     expect(observed).toMatchObject({
-      status: 500,
-      errorClass: "gateway-fault",
+      status: 400,
+      errorClass: "client-fault",
+      body: {
+        error: { type: "invalid_request_error", code: "empty_body" },
+      },
     });
   });
 
