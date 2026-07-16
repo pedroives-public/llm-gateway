@@ -409,6 +409,20 @@ function sendProxyError(
     return;
   }
 
+  if (error.code === "FST_ERR_CTP_INVALID_JSON_BODY") {
+    reply
+      .code(400)
+      .header("x-gateway-error-class", "client-fault")
+      .send({
+        error: {
+          message: "JSON malformed",
+          type: "invalid_request_error",
+          code: "malformed_json",
+        },
+      });
+    return;
+  }
+
   if (error.statusCode === 413) {
     reply
       .code(413)
