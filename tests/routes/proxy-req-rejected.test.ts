@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { buildApp } from "../../src/app.js";
-import { proxyRoute } from "../../src/routes/proxy.js";
+import { proxyRoute, type ProxyRouteOptions } from "../../src/routes/proxy.js";
 import { stubBreaker } from "../helpers/breaker-stubs.js";
 import { bearer, fakeAuthDb } from "../helpers/fake-auth-db.js";
 import { makeLogCapture, type LogCapture } from "../log-capture.js";
@@ -14,6 +14,7 @@ import { makeLogCapture, type LogCapture } from "../log-capture.js";
 describe("req_rejected terminal event for schema rejections", () => {
   async function buildRejectionProbe(
     tenantId: string,
+    upstreamBuffered?: ProxyRouteOptions["upstreamBuffered"],
   ): Promise<{ app: FastifyInstance; capture: LogCapture }> {
     const capture = makeLogCapture();
     const app = await buildApp({
@@ -22,11 +23,13 @@ describe("req_rejected terminal event for schema rejections", () => {
       registerProtected: async (scope) => {
         await scope.register(proxyRoute, {
           breaker: stubBreaker,
-          upstreamBuffered: async () => {
-            throw new Error(
-              "tripwire: upstream reached — request passed validation",
-            );
-          },
+          upstreamBuffered:
+            upstreamBuffered ??
+            (async () => {
+              throw new Error(
+                "tripwire: upstream reached — request passed validation",
+              );
+            }),
         });
       },
     });
@@ -110,6 +113,84 @@ describe("req_rejected terminal event for schema rejections", () => {
       expect(serialized).not.toContain("must have required property");
       expect(serialized).not.toContain(auth.slice("Bearer ".length));
       expect(serialized).not.toContain("probe=1");
+    } finally {
+      await app.close();
+    }
+  });
+
+  // Hybrid discriminator: a schema rejection is recognized only when BOTH
+  // signals agree — the FST_ERR_VALIDATION code AND a populated `validation`
+  // array. A lone signal is an impossible state for this desk: it must fall
+  // to the unhandled-fault branch (500 + anomaly log), never emit req_rejected.
+  it("validation array without FST_ERR_VALIDATION code -> 500 anomaly, no req_rejected", async () => {
+    const impostor = Object.assign(new Error("impostor upstream failure"), {
+      code: "E_IMPOSTOR",
+      validation: [{ keyword: "impostor" }],
+    });
+    const { app, capture } = await buildRejectionProbe(
+      randomUUID(),
+      async () => {
+        throw impostor;
+      },
+    );
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: bearer(),
+          "content-type": "application/json",
+        },
+        payload:
+          '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}',
+      });
+
+      expect(res.statusCode).toBe(500);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(capture.byEvent("req_rejected")).toHaveLength(0);
+      expect(
+        capture.logs.some(
+          (line) => line.level === 50 && typeof line.req_id === "string",
+        ),
+      ).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("FST_ERR_VALIDATION code without validation array -> 500 anomaly, no req_rejected", async () => {
+    const halfSignal = Object.assign(
+      new Error("code without validation array"),
+      { code: "FST_ERR_VALIDATION" },
+    );
+    const { app, capture } = await buildRejectionProbe(
+      randomUUID(),
+      async () => {
+        throw halfSignal;
+      },
+    );
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: bearer(),
+          "content-type": "application/json",
+        },
+        payload:
+          '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}',
+      });
+
+      expect(res.statusCode).toBe(500);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(capture.byEvent("req_rejected")).toHaveLength(0);
+      expect(
+        capture.logs.some(
+          (line) => line.level === 50 && typeof line.req_id === "string",
+        ),
+      ).toBe(true);
     } finally {
       await app.close();
     }
