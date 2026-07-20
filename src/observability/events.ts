@@ -36,6 +36,14 @@ export interface ReqCompletePayload {
   retry_disposition: RetryDisposition;
 }
 
+export interface ReqRejectPayload {
+  req_id: string;
+  tenant_id: string | null;
+  route: string | undefined;
+  reason: "schema_validation";
+  status: number;
+}
+
 export interface StreamFirstTokenPayload {
   req_id: string;
   ttft_ms: number;
@@ -82,6 +90,13 @@ export function emitReqComplete(
 ): void {
   log.info({ event: "req_complete", ...payload });
   _markFirstRequestCompleted();
+}
+
+export function emitReqRejected(
+  log: MinLogger,
+  payload: ReqRejectPayload,
+): void {
+  log.info({ event: "req_rejected", ...payload });
 }
 
 export function emitStreamFirstToken(

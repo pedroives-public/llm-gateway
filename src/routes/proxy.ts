@@ -14,6 +14,7 @@ import {
   wasColdStart,
   type ErrorClass,
   type RetryDisposition,
+  emitReqRejected,
 } from "../observability/events.js";
 import { retry } from "../reliability/retry.js";
 import { armWallClockTimeout } from "../reliability/timeouts.js";
@@ -397,6 +398,13 @@ function sendProxyError(
   reply: FastifyReply,
 ): void {
   if (error.validation && error.validation.length > 0) {
+    emitReqRejected(request.log, {
+      req_id: request.reqId,
+      tenant_id: request.tenantId,
+      route: request.routeOptions.url,
+      reason: "schema_validation",
+      status: 400,
+    });
     reply
       .code(400)
       .header("x-gateway-error-class", "client-fault")
