@@ -38,7 +38,7 @@ export interface ReqCompletePayload {
 
 export interface ReqRejectPayload {
   req_id: string;
-  tenant_id: string | null;
+  tenant_id: string;
   route: string | undefined;
   reason: "schema_validation";
   status: number;

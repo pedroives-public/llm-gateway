@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 import { buildApp } from "../../src/app.js";
 import { proxyRoute } from "../../src/routes/proxy.js";
 import { stubBreaker } from "../helpers/breaker-stubs.js";
@@ -110,6 +110,55 @@ describe("req_rejected terminal event for schema rejections", () => {
       expect(serialized).not.toContain("must have required property");
       expect(serialized).not.toContain(auth.slice("Bearer ".length));
       expect(serialized).not.toContain("probe=1");
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// A schema rejection with a null tenant means the route was registered without
+// the auth hook — a gateway misconfiguration, not client traffic. The event's
+// population is authenticated-only, so the desk must not emit req_rejected;
+// it must log an operator-facing anomaly instead of skipping silently.
+describe("req_rejected population guard: tenant-null anomaly", () => {
+  it("validation failure without auth -> 400, no req_rejected, one anomaly log", async () => {
+    const capture = makeLogCapture();
+    const app = Fastify({ logger: capture.logger });
+    app.decorateRequest("tenantId", null);
+    app.decorateRequest("planTier", null);
+    app.decorateRequest("reqId", "");
+    app.addHook("onRequest", async (request) => {
+      request.reqId = randomUUID();
+    });
+    await app.register(proxyRoute, {
+      breaker: stubBreaker,
+      upstreamBuffered: async () => {
+        throw new Error(
+          "tripwire: upstream reached — request passed validation",
+        );
+      },
+    });
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { "content-type": "application/json" },
+        payload: '{"model": "gpt-4o"}',
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.headers["x-gateway-error-class"]).toBe("client-fault");
+      expect(capture.byEvent("req_rejected")).toHaveLength(0);
+
+      const anomalies = capture.logs.filter((line) => line.level === 50);
+      expect(anomalies.length).toBeGreaterThanOrEqual(1);
+      expect(anomalies.some((line) => typeof line.req_id === "string")).toBe(
+        true,
+      );
+      expect(JSON.stringify(anomalies)).not.toContain(
+        "must have required property",
+      );
     } finally {
       await app.close();
     }
