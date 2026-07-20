@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { buildApp } from "../../src/app.js";
 import { proxyRoute, type ProxyRouteOptions } from "../../src/routes/proxy.js";
+import { wasColdStart } from "../../src/observability/events.js";
+import type { DrizzleClient } from "../../src/db/client.js";
 import { stubBreaker } from "../helpers/breaker-stubs.js";
 import { bearer, fakeAuthDb } from "../helpers/fake-auth-db.js";
 import { makeLogCapture, type LogCapture } from "../log-capture.js";
@@ -195,6 +197,91 @@ describe("req_rejected terminal event for schema rejections", () => {
       await app.close();
     }
   });
+
+  // Ordering constraint: the next two cells must run before any cell in this
+  // file that emits req_complete — cold-start state is module-global and only
+  // a completed request may consume it.
+  it("a rejection leaves the cold-start marker unconsumed", async () => {
+    expect(wasColdStart()).toBe(true);
+    const { app, capture } = await buildRejectionProbe(randomUUID());
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: bearer(),
+          "content-type": "application/json",
+        },
+        payload: '{"model": "gpt-4o"}',
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(capture.byEvent("req_rejected")).toHaveLength(1);
+      expect(wasColdStart()).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("valid body -> 200, one req_start + req_complete, no req_rejected, still cold", async () => {
+    const { app, capture } = await buildRejectionProbe(
+      randomUUID(),
+      async () => ({
+        kind: "ok" as const,
+        status: 200,
+        body_parsed: { id: "cmpl-ok" },
+      }),
+    );
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: bearer(),
+          "content-type": "application/json",
+        },
+        payload:
+          '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(capture.byEvent("req_start")).toHaveLength(1);
+      expect(capture.byEvent("req_complete")).toHaveLength(1);
+      expect(capture.byEvent("req_rejected")).toHaveLength(0);
+      expect(capture.byEvent("req_start")[0]).toMatchObject({
+        was_cold_start: true,
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("413 body-too-large -> request_too_large, no req_rejected, no lifecycle events", async () => {
+    const { app, capture } = await buildRejectionProbe(randomUUID());
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: bearer(),
+          "content-type": "application/json",
+        },
+        payload: `{"model":"gpt-4o","messages":[{"role":"user","content":"${"x".repeat(262_200)}"}]}`,
+      });
+
+      expect(res.statusCode).toBe(413);
+      expect(res.json()).toMatchObject({
+        error: { code: "request_too_large" },
+      });
+      expect(capture.byEvent("req_rejected")).toHaveLength(0);
+      expect(capture.byEvent("req_start")).toHaveLength(0);
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 // A schema rejection with a null tenant means the route was registered without
@@ -240,6 +327,69 @@ describe("req_rejected population guard: tenant-null anomaly", () => {
       expect(JSON.stringify(anomalies)).not.toContain(
         "must have required property",
       );
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// Auth runs at onRequest, before parsing and validation: a request failing
+// both auth and schema is answered 401 with no events — the lifecycle order
+// that makes the authenticated-only req_rejected population possible.
+describe("lifecycle order: auth precedes validation", () => {
+  it("invalid key + invalid body -> 401, no req_rejected, no req_start", async () => {
+    const emptyAuthDb = {
+      select() {
+        return {
+          from() {
+            return {
+              innerJoin() {
+                return {
+                  where() {
+                    return {
+                      limit() {
+                        return Promise.resolve([]);
+                      },
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as DrizzleClient;
+
+    const capture = makeLogCapture();
+    const app = await buildApp({
+      logger: capture.logger,
+      db: emptyAuthDb,
+      registerProtected: async (scope) => {
+        await scope.register(proxyRoute, {
+          breaker: stubBreaker,
+          upstreamBuffered: async () => {
+            throw new Error(
+              "tripwire: upstream reached — request passed validation",
+            );
+          },
+        });
+      },
+    });
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: bearer(),
+          "content-type": "application/json",
+        },
+        payload: '{"model": "gpt-4o"}',
+      });
+
+      expect(res.statusCode).toBe(401);
+      expect(capture.byEvent("req_rejected")).toHaveLength(0);
+      expect(capture.byEvent("req_start")).toHaveLength(0);
     } finally {
       await app.close();
     }
