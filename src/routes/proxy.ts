@@ -388,16 +388,20 @@ function bodyForErrorOutcome(
   }
 }
 
-// Branch selection: `error.validation` is set only for schema rejections;
-// parse failures are recognized by their stable FST_ERR_CTP_* identity
-// codes; an explicit 413 status is body-too-large; anything else is
-// unhandled and answered as a gateway fault.
+// Branch selection: a schema rejection requires BOTH the FST_ERR_VALIDATION
+// code AND a populated `validation` array — a lone signal falls to the
+// unhandled 500 branch. Parse failures match stable FST_ERR_CTP_* codes;
+// explicit 413 is body-too-large; anything else is a gateway fault.
 function sendProxyError(
   error: FastifyError,
   request: FastifyRequest,
   reply: FastifyReply,
 ): void {
-  if (error.validation && error.validation.length > 0) {
+  if (
+    error.validation &&
+    error.validation.length > 0 &&
+    error.code === "FST_ERR_VALIDATION"
+  ) {
     if (request.tenantId === null) {
       request.log.error(
         { req_id: request.reqId, err_name: error.name },
