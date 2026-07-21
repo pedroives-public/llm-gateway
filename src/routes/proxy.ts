@@ -15,6 +15,7 @@ import {
   type ErrorClass,
   type RetryDisposition,
   emitReqRejected,
+  type ReqRejectedReason,
 } from "../observability/events.js";
 import { retry } from "../reliability/retry.js";
 import { armWallClockTimeout } from "../reliability/timeouts.js";
@@ -408,6 +409,8 @@ function sendProxyError(
     error.validation.length > 0 &&
     error.code === "FST_ERR_VALIDATION"
   ) {
+    const { code, reason } = deriveValidationRejection(error.validation);
+
     if (request.tenantId === null) {
       request.log.error(
         { req_id: request.reqId, err_name: error.name },
@@ -418,7 +421,7 @@ function sendProxyError(
         req_id: request.reqId,
         tenant_id: request.tenantId,
         route: request.routeOptions.url,
-        reason: "schema_validation",
+        reason,
         status: 400,
       });
     }
@@ -429,9 +432,10 @@ function sendProxyError(
         error: {
           message: error.message,
           type: "invalid_request_error",
-          code: deriveValidationCode(error.validation),
+          code,
         },
       });
+
     return;
   }
 
@@ -509,9 +513,12 @@ function sendProxyError(
     });
 }
 
-function deriveValidationCode(
+function deriveValidationRejection(
   validation: FastifySchemaValidationError[],
-): string {
+): {
+  code: string;
+  reason: ReqRejectedReason;
+} {
   // Both checks on purpose in each const branch: keyword alone would claim
   // any other `const` field; path alone would mislabel a type violation on
   // the same field (e.g. stream: "x").
@@ -519,7 +526,10 @@ function deriveValidationCode(
     validation[0]?.keyword === "const" &&
     validation[0].instancePath === "/n"
   ) {
-    return "n_not_supported";
+    return {
+      code: "n_not_supported",
+      reason: "cost_cap_exceeded",
+    };
   }
 
   // Remove this branch when streaming ships.
@@ -527,17 +537,29 @@ function deriveValidationCode(
     validation[0]?.keyword === "const" &&
     validation[0].instancePath === "/stream"
   ) {
-    return "stream_not_supported";
+    return {
+      code: "stream_not_supported",
+      reason: "schema_validation",
+    };
   }
 
   switch (validation[0]?.keyword) {
     case "required":
-      return `${String(validation[0].params.missingProperty)}_missing`;
+      return {
+        code: `${String(validation[0].params.missingProperty)}_missing`,
+        reason: "schema_validation",
+      };
     case "minItems":
-      return `${validation[0].instancePath.slice(1)}_empty`;
+      return {
+        code: `${validation[0].instancePath.slice(1)}_empty`,
+        reason: "schema_validation",
+      };
     case "maximum":
-      return `${validation[0].instancePath.slice(1)}_too_large`;
+      return {
+        code: `${validation[0].instancePath.slice(1)}_too_large`,
+        reason: "cost_cap_exceeded",
+      };
     default:
-      return "invalid_request";
+      return { code: "invalid_request", reason: "schema_validation" };
   }
 }
