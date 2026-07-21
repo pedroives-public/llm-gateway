@@ -56,6 +56,7 @@ const chatCompletionsBodySchema = {
     messages: { type: "array", minItems: 1 },
     // Buffered-only V1: reject stream:true at the schema, before it can reach the breaker or upstream; lift when streaming ships.
     stream: { type: "boolean", const: false },
+    max_tokens: { type: "integer", minimum: 1, maximum: 16384 },
   },
   additionalProperties: true,
 };
@@ -521,6 +522,8 @@ function deriveValidationCode(
       return `${String(validation[0].params.missingProperty)}_missing`;
     case "minItems":
       return `${validation[0].instancePath.slice(1)}_empty`;
+    case "maximum":
+      return `${validation[0].instancePath.slice(1)}_too_large`;
     default:
       return "invalid_request";
   }
