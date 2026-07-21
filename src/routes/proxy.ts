@@ -28,6 +28,7 @@ import {
 
 const WALL_CLOCK_MS = 30_000;
 const BODY_LIMIT_BYTES = 262_144;
+const MAX_OUTPUT_TOKENS_CAP = 16_384;
 
 export interface ChatCompletionsBody {
   model: string;
@@ -59,8 +60,12 @@ const chatCompletionsBodySchema = {
     stream: { type: "boolean", const: false },
     // Cost cap: the upstream honors either field (max_completion_tokens succeeds max_tokens),
     // so both carry the same ceiling on purpose — capping only one leaves the other as a bypass.
-    max_tokens: { type: "integer", minimum: 1, maximum: 16384 },
-    max_completion_tokens: { type: "integer", minimum: 1, maximum: 16384 },
+    max_tokens: { type: "integer", minimum: 1, maximum: MAX_OUTPUT_TOKENS_CAP },
+    max_completion_tokens: {
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_OUTPUT_TOKENS_CAP,
+    },
     // n (choice count) stays 1 in V1: each extra choice multiplies the output cost
     n: { type: "integer", const: 1 },
   },
@@ -147,13 +152,24 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
       let attempts = 0;
       let upstreamDurationMs = 0;
 
+      // A schema maximum only fires on a present field: when the client omits
+      // both spend fields, inject the cap so omission cannot reach the
+      // upstream uncapped.
+      const hasSpendField =
+        request.body.max_tokens !== undefined ||
+        request.body.max_completion_tokens !== undefined;
+
+      const forwardedBody = hasSpendField
+        ? request.body
+        : { ...request.body, max_tokens: MAX_OUTPUT_TOKENS_CAP };
+
       const upstreamLog = request.log.child({ req_id: request.reqId });
       const callUpstream = async (): Promise<Outcome> => {
         attempts += 1;
         const attemptStartedAt = Date.now();
         try {
           return await opts.upstreamBuffered(
-            request.body,
+            forwardedBody,
             timeout.signal,
             upstreamLog,
           );
