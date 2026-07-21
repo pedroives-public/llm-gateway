@@ -69,4 +69,37 @@ describe("cost caps: max_tokens ceiling", () => {
     }
   });
 
+  // Modern SDKs send max_completion_tokens instead of max_tokens; with
+  // additionalProperties:true an uncapped alias would travel to the upstream
+  // verbatim and bypass the ceiling entirely, so both fields carry the same cap.
+  it("max_completion_tokens above the cap -> 400 max_completion_tokens_too_large", async () => {
+    const { app } = await buildCapProbe();
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: bearer(),
+          "content-type": "application/json",
+        },
+        payload: JSON.stringify({
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+          max_completion_tokens: MAX_OUTPUT_TOKENS_CAP + 1,
+        }),
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.headers["x-gateway-error-class"]).toBe("client-fault");
+      expect(res.json()).toMatchObject({
+        error: {
+          type: "invalid_request_error",
+          code: "max_completion_tokens_too_large",
+        },
+      });
+    } finally {
+      await app.close();
+    }
+  });
 });
