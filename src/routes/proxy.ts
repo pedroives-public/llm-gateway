@@ -56,7 +56,10 @@ const chatCompletionsBodySchema = {
     messages: { type: "array", minItems: 1 },
     // Buffered-only V1: reject stream:true at the schema, before it can reach the breaker or upstream; lift when streaming ships.
     stream: { type: "boolean", const: false },
+    // Cost cap: the upstream honors either field (max_completion_tokens succeeds max_tokens),
+    // so both carry the same ceiling on purpose — capping only one leaves the other as a bypass.
     max_tokens: { type: "integer", minimum: 1, maximum: 16384 },
+    max_completion_tokens: { type: "integer", minimum: 1, maximum: 16384 },
   },
   additionalProperties: true,
 };
