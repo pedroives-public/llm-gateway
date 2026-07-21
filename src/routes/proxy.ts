@@ -60,6 +60,8 @@ const chatCompletionsBodySchema = {
     // so both carry the same ceiling on purpose — capping only one leaves the other as a bypass.
     max_tokens: { type: "integer", minimum: 1, maximum: 16384 },
     max_completion_tokens: { type: "integer", minimum: 1, maximum: 16384 },
+    // n (choice count) stays 1 in V1: each extra choice multiplies the output cost
+    n: { type: "integer", const: 1 },
   },
   additionalProperties: true,
 };
@@ -510,9 +512,17 @@ function sendProxyError(
 function deriveValidationCode(
   validation: FastifySchemaValidationError[],
 ): string {
-  // Both checks on purpose: keyword alone would claim any future `const`
-  // field; path alone would mislabel a type violation on /stream (e.g.
-  // stream: "x"). Remove when streaming ships.
+  // Both checks on purpose in each const branch: keyword alone would claim
+  // any other `const` field; path alone would mislabel a type violation on
+  // the same field (e.g. stream: "x").
+  if (
+    validation[0]?.keyword === "const" &&
+    validation[0].instancePath === "/n"
+  ) {
+    return "n_not_supported";
+  }
+
+  // Remove this branch when streaming ships.
   if (
     validation[0]?.keyword === "const" &&
     validation[0].instancePath === "/stream"

@@ -14,7 +14,7 @@ import { makeLogCapture, type LogCapture } from "../log-capture.js";
 // with a field-specific code (same pattern as stream_not_supported).
 const MAX_OUTPUT_TOKENS_CAP = 16_384;
 
-describe("cost caps: max_tokens ceiling", () => {
+describe("cost caps on client-controlled spend fields", () => {
   async function buildCapProbe(
     upstreamBuffered?: ProxyRouteOptions["upstreamBuffered"],
   ): Promise<{ app: FastifyInstance; capture: LogCapture }> {
@@ -96,6 +96,40 @@ describe("cost caps: max_tokens ceiling", () => {
         error: {
           type: "invalid_request_error",
           code: "max_completion_tokens_too_large",
+        },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  // n multiplies the whole output cost (n choices = n completions billed), so
+  // V1 pins it to 1 outright rather than capping a multiplier no client of the
+  // gateway needs — same "not supported" posture as stream:true.
+  it("n above 1 -> 400 n_not_supported", async () => {
+    const { app } = await buildCapProbe();
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: bearer(),
+          "content-type": "application/json",
+        },
+        payload: JSON.stringify({
+          model: "gpt-4o",
+          messages: [{ role: "user", content: "hi" }],
+          n: 2,
+        }),
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.headers["x-gateway-error-class"]).toBe("client-fault");
+      expect(res.json()).toMatchObject({
+        error: {
+          type: "invalid_request_error",
+          code: "n_not_supported",
         },
       });
     } finally {
