@@ -176,4 +176,51 @@ describe("cost caps on client-controlled spend fields", () => {
     expect(await rejectionReason({ n: 2 })).toBe("cost_cap_exceeded");
     expect(await rejectionReason({ stream: true })).toBe("schema_validation");
   });
+
+  // Absence closes the bypass the schema cannot see: a maximum only fires on a
+  // present field, and omitting both fields would otherwise hand the upstream
+  // its model-maximum default. The gateway injects max_tokens = cap only when
+  // NEITHER field came from the client; a present field is forwarded untouched.
+  it("injects max_tokens = cap when neither spend field is present; never otherwise", async () => {
+    async function forwardedBody(body: Record<string, unknown>) {
+      let captured: Record<string, unknown> | null = null;
+      const { app } = await buildCapProbe(async (upstreamBody) => {
+        captured = { ...upstreamBody };
+        return {
+          kind: "ok" as const,
+          status: 200,
+          body_parsed: { id: "cmpl-ok" },
+        };
+      });
+      try {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: {
+            authorization: bearer(),
+            "content-type": "application/json",
+          },
+          payload: JSON.stringify({
+            model: "gpt-4o",
+            messages: [{ role: "user", content: "hi" }],
+            ...body,
+          }),
+        });
+        expect(res.statusCode).toBe(200);
+        return captured as Record<string, unknown> | null;
+      } finally {
+        await app.close();
+      }
+    }
+
+    const injected = await forwardedBody({});
+    expect(injected?.max_tokens).toBe(MAX_OUTPUT_TOKENS_CAP);
+
+    const explicit = await forwardedBody({ max_tokens: 100 });
+    expect(explicit?.max_tokens).toBe(100);
+
+    const aliasOnly = await forwardedBody({ max_completion_tokens: 100 });
+    expect(aliasOnly?.max_completion_tokens).toBe(100);
+    expect(aliasOnly?.max_tokens).toBeUndefined();
+  });
 });
