@@ -136,4 +136,44 @@ describe("cost caps on client-controlled spend fields", () => {
       await app.close();
     }
   });
+
+  // Observability: cost-cap rejections are the attack/demand signal the caps
+  // exist to measure, so they carry their own req_rejected reason instead of
+  // blending into the schema_validation population. stream:true is policy but
+  // not cost policy — it must stay schema_validation (population boundary pin).
+  it("cap rejections emit reason cost_cap_exceeded; stream stays schema_validation", async () => {
+    async function rejectionReason(body: Record<string, unknown>) {
+      const { app, capture } = await buildCapProbe();
+      try {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: {
+            authorization: bearer(),
+            "content-type": "application/json",
+          },
+          payload: JSON.stringify({
+            model: "gpt-4o",
+            messages: [{ role: "user", content: "hi" }],
+            ...body,
+          }),
+        });
+        expect(res.statusCode).toBe(400);
+        const events = capture.byEvent("req_rejected");
+        expect(events).toHaveLength(1);
+        return events[0]?.reason;
+      } finally {
+        await app.close();
+      }
+    }
+
+    expect(await rejectionReason({ max_tokens: MAX_OUTPUT_TOKENS_CAP + 1 })).toBe(
+      "cost_cap_exceeded",
+    );
+    expect(
+      await rejectionReason({ max_completion_tokens: MAX_OUTPUT_TOKENS_CAP + 1 }),
+    ).toBe("cost_cap_exceeded");
+    expect(await rejectionReason({ n: 2 })).toBe("cost_cap_exceeded");
+    expect(await rejectionReason({ stream: true })).toBe("schema_validation");
+  });
 });

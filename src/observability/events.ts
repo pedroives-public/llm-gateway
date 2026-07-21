@@ -14,6 +14,8 @@ export type RetryDisposition = "attempted" | "skipped_budget" | "ineligible";
 
 export type CbState = "CLOSED" | "OPEN" | "HALF_OPEN";
 
+export type ReqRejectedReason = "schema_validation" | "cost_cap_exceeded";
+
 export interface ReqStartPayload {
   req_id: string;
   route: string;
@@ -40,7 +42,7 @@ export interface ReqRejectPayload {
   req_id: string;
   tenant_id: string;
   route: string | undefined;
-  reason: "schema_validation";
+  reason: ReqRejectedReason;
   status: number;
 }
 
