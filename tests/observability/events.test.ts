@@ -13,25 +13,21 @@ describe("wasColdStart", () => {
   });
 
   it("returns true before any request completes", async () => {
-    const { wasColdStart } = await import(
-      "../../src/observability/events.js"
-    );
+    const { wasColdStart } = await import("../../src/observability/events.js");
     expect(wasColdStart()).toBe(true);
   });
 
   it("returns false after _markFirstRequestCompleted", async () => {
-    const { wasColdStart, _markFirstRequestCompleted } = await import(
-      "../../src/observability/events.js"
-    );
+    const { wasColdStart, _markFirstRequestCompleted } =
+      await import("../../src/observability/events.js");
     expect(wasColdStart()).toBe(true);
     _markFirstRequestCompleted();
     expect(wasColdStart()).toBe(false);
   });
 
   it("stays false on repeated _markFirstRequestCompleted calls", async () => {
-    const { wasColdStart, _markFirstRequestCompleted } = await import(
-      "../../src/observability/events.js"
-    );
+    const { wasColdStart, _markFirstRequestCompleted } =
+      await import("../../src/observability/events.js");
     _markFirstRequestCompleted();
     _markFirstRequestCompleted();
     expect(wasColdStart()).toBe(false);
@@ -64,9 +60,8 @@ describe("event emitters — field shape", () => {
   });
 
   it("emitReqComplete emits all required fields and no extras", async () => {
-    const { emitReqComplete } = await import(
-      "../../src/observability/events.js"
-    );
+    const { emitReqComplete } =
+      await import("../../src/observability/events.js");
     const payload: ReqCompletePayload = {
       req_id: "019e6ef2-5065-74d9-ab04-834a39c6e4a9",
       status: 200,
@@ -83,9 +78,8 @@ describe("event emitters — field shape", () => {
   });
 
   it("emitReqComplete calls _markFirstRequestCompleted", async () => {
-    const { emitReqComplete, wasColdStart } = await import(
-      "../../src/observability/events.js"
-    );
+    const { emitReqComplete, wasColdStart } =
+      await import("../../src/observability/events.js");
     expect(wasColdStart()).toBe(true);
     emitReqComplete(mockLog, {
       req_id: "x",
@@ -102,9 +96,8 @@ describe("event emitters — field shape", () => {
   });
 
   it("emitStreamFirstToken emits all required fields and no extras", async () => {
-    const { emitStreamFirstToken } = await import(
-      "../../src/observability/events.js"
-    );
+    const { emitStreamFirstToken } =
+      await import("../../src/observability/events.js");
     const payload: StreamFirstTokenPayload = {
       req_id: "019e6ef2-5065-74d9-ab04-834a39c6e4a9",
       ttft_ms: 350,
@@ -115,9 +108,8 @@ describe("event emitters — field shape", () => {
   });
 
   it("emitStreamDone emits all required fields and no extras (completed)", async () => {
-    const { emitStreamDone } = await import(
-      "../../src/observability/events.js"
-    );
+    const { emitStreamDone } =
+      await import("../../src/observability/events.js");
     const payload: StreamDonePayload = {
       req_id: "019e6ef2-5065-74d9-ab04-834a39c6e4a9",
       completed: true,
@@ -132,9 +124,8 @@ describe("event emitters — field shape", () => {
   });
 
   it("emitStreamDone calls _markFirstRequestCompleted", async () => {
-    const { emitStreamDone, wasColdStart } = await import(
-      "../../src/observability/events.js"
-    );
+    const { emitStreamDone, wasColdStart } =
+      await import("../../src/observability/events.js");
     expect(wasColdStart()).toBe(true);
     emitStreamDone(mockLog, {
       req_id: "x",
@@ -149,9 +140,8 @@ describe("event emitters — field shape", () => {
   });
 
   it("emitCbStateChange emits all required fields and no extras", async () => {
-    const { emitCbStateChange } = await import(
-      "../../src/observability/events.js"
-    );
+    const { emitCbStateChange } =
+      await import("../../src/observability/events.js");
     const payload: CbStateChangePayload = {
       from: "CLOSED",
       to: "OPEN",
@@ -163,9 +153,8 @@ describe("event emitters — field shape", () => {
   });
 
   it("req_id propagates across events for the same request", async () => {
-    const { emitReqStart, emitReqComplete } = await import(
-      "../../src/observability/events.js"
-    );
+    const { emitReqStart, emitReqComplete } =
+      await import("../../src/observability/events.js");
     const req_id = "019e6ef2-5065-74d9-ab04-834a39c6e4a9";
     emitReqStart(mockLog, {
       req_id,
@@ -194,9 +183,8 @@ describe("event emitters — field shape", () => {
   });
 
   it("was_cold_start is true on first request events, false on subsequent", async () => {
-    const { emitReqStart, emitReqComplete, wasColdStart } = await import(
-      "../../src/observability/events.js"
-    );
+    const { emitReqStart, emitReqComplete, wasColdStart } =
+      await import("../../src/observability/events.js");
 
     const firstColdStart = wasColdStart();
     emitReqStart(mockLog, {
@@ -235,5 +223,33 @@ describe("event emitters — field shape", () => {
     const secondStart = logCalls[2] as Record<string, unknown>;
     expect(firstStart["was_cold_start"]).toBe(true);
     expect(secondStart["was_cold_start"]).toBe(false);
+  });
+});
+
+describe("emitUpstreamAuthAlert", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it("emits exactly-once per process", async () => {
+    const { emitUpstreamAuthAlert } =
+      await import("../../src/observability/events.js");
+
+    const errorCalls: object[] = [];
+    const mockLog = {
+      error: (obj: object) => {
+        errorCalls.push(obj);
+      },
+    };
+
+    emitUpstreamAuthAlert(mockLog, { req_id: "r-1" });
+    emitUpstreamAuthAlert(mockLog, { req_id: "r-2" });
+
+    expect(errorCalls.length).toBe(1);
+    expect(errorCalls[0]).toEqual({
+      event: "operational_alert",
+      alert: "upstream_auth_failure",
+      req_id: "r-1",
+    });
   });
 });

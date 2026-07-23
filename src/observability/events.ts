@@ -18,6 +18,12 @@ export type CbState = "CLOSED" | "OPEN" | "HALF_OPEN";
 
 export type ReqRejectedReason = "schema_validation" | "cost_cap_exceeded";
 
+type UpstreamAuthAlertLine = {
+  event: "operational_alert";
+  alert: "upstream_auth_failure";
+  req_id: string;
+};
+
 export interface ReqStartPayload {
   req_id: string;
   route: string;
@@ -65,6 +71,10 @@ export interface StreamDonePayload {
   error_class: ErrorClass | null;
 }
 
+export interface UpstreamAuthAlertPayload {
+  req_id: string;
+}
+
 export interface CbStateChangePayload {
   from: CbState;
   to: CbState;
@@ -73,8 +83,10 @@ export interface CbStateChangePayload {
 }
 
 type MinLogger = { info: (obj: object) => void };
+type AlertMinLogger = { error: (obj: UpstreamAuthAlertLine) => void };
 
 let _firstRequestCompleted = false;
+let _upstreamAuthAlertFired = false;
 
 export function wasColdStart(): boolean {
   return !_firstRequestCompleted;
@@ -125,3 +137,19 @@ export function emitCbStateChange(
   log.info({ event: "cb_state_change", ...payload });
 }
 
+export function emitUpstreamAuthAlert(
+  log: AlertMinLogger,
+  payload: UpstreamAuthAlertPayload,
+): void {
+  if (_upstreamAuthAlertFired) {
+    return;
+  }
+
+  _upstreamAuthAlertFired = true;
+
+  log.error({
+    event: "operational_alert",
+    alert: "upstream_auth_failure",
+    ...payload,
+  });
+}
