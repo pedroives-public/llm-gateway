@@ -253,7 +253,13 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         .code(terminal.status)
         .header("x-gateway-error-class", terminal.error_class);
 
-      if (outcome.kind === "upstream_error") {
+      // Credential rejections never pass through: the upstream credential is
+      // deployment-owned, so the upstream's own body and headers (Retry-After
+      // included) are replaced by the sanitized terminal below.
+      if (
+        outcome.kind === "upstream_error" &&
+        !isCredentialRejection(terminal.error_class)
+      ) {
         if (outcome.retry_after !== undefined) {
           reply.header("retry-after", outcome.retry_after);
         }
@@ -325,12 +331,28 @@ function decideErrorTerminal(
   };
 }
 
+// Upstream credential/access rejections (401/403) are sanitized end-to-end:
+// the upstream credential is deployment-owned, so the upstream's own status,
+// headers, and body never reach the consumer.
+function isCredentialRejection(errorClass: ErrorClass): boolean {
+  return (
+    errorClass === "upstream-auth-failure" ||
+    errorClass === "upstream-access-denied"
+  );
+}
+
 function statusForErrorOutcome(
   outcome: ErrorOutcome,
   errorClass: ErrorClass,
 ): number {
   switch (outcome.kind) {
     case "upstream_error":
+      // Credential/access rejections are proxy-boundary failures: the
+      // upstream was reached but refused the deployment-owned auth context —
+      // 502, never the upstream's original status.
+      if (isCredentialRejection(errorClass)) {
+        return 502;
+      }
       return outcome.status >= 500 ? 502 : outcome.status;
     case "undecodable":
       return 502;
@@ -354,6 +376,26 @@ function bodyForErrorOutcome(
 ): unknown {
   switch (outcome.kind) {
     case "upstream_error":
+      // Only the sanitized credential-rejection classes reach here; verbatim
+      // passthrough returns earlier in the handler.
+      if (errorClass === "upstream-auth-failure") {
+        return {
+          error: {
+            message: "upstream authentication failed",
+            type: "server_error",
+            code: "upstream_auth_failure",
+          },
+        };
+      }
+      if (errorClass === "upstream-access-denied") {
+        return {
+          error: {
+            message: "upstream access denied",
+            type: "server_error",
+            code: "upstream_access_denied",
+          },
+        };
+      }
       return outcome.body_raw;
 
     case "undecodable":

@@ -55,6 +55,23 @@ export function classify(
           breaker_delta: 1,
         };
       }
+      // Deployment-owned credential rejected upstream (consumer input cannot
+      // reach the auth headers — pinned by the adapter header-isolation test):
+      // a persistent operator-side failure, so it counts toward the breaker.
+      if (outcome.status === 401) {
+        return {
+          error_class: "upstream-auth-failure",
+          breaker_delta: 1,
+        };
+      }
+      // Access denial is consumer-influencible (the free-form model field can
+      // induce 403s at will), so it must not count toward the shared breaker.
+      if (outcome.status === 403) {
+        return {
+          error_class: "upstream-access-denied",
+          breaker_delta: 0,
+        };
+      }
       if (outcome.status === 429) {
         return {
           error_class: "upstream-retry-exhausted",
