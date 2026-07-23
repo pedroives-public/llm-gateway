@@ -4,7 +4,9 @@ export type ErrorClass =
   | "client-fault"
   | "gateway-fault"
   | "upstream-fault"
-  | "upstream-retry-exhausted";
+  | "upstream-retry-exhausted"
+  | "upstream-auth-failure"
+  | "upstream-access-denied";
 
 // Why a request did or did not retry, reconstructed at wiring time for incident
 // triage. `skipped_budget` means STRICTLY a Retry-After-vs-budget skip; an
@@ -122,3 +124,4 @@ export function emitCbStateChange(
 ): void {
   log.info({ event: "cb_state_change", ...payload });
 }
+

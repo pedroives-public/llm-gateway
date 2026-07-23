@@ -21,7 +21,43 @@ describe("classify", () => {
     expect(result).toEqual(expected);
   });
 
-  it("classifies a 401 as client-fault too — the 4xx arm is not anchored to 400 alone", () => {
+  it("classifies an upstream 401 as upstream-auth-failure, breaker delta 1 (deployment credential rejected)", () => {
+    const expected = {
+      error_class: "upstream-auth-failure",
+      breaker_delta: 1,
+    };
+
+    const result = classify(
+      {
+        kind: "upstream_error",
+        status: 401,
+        body_raw: "",
+      },
+      makeLog(),
+      "req-1",
+    );
+    expect(result).toEqual(expected);
+  });
+
+  it("classifies an upstream 403 as upstream-access-denied, breaker delta 0 (consumer-influencible)", () => {
+    const expected = {
+      error_class: "upstream-access-denied",
+      breaker_delta: 0,
+    };
+
+    const result = classify(
+      {
+        kind: "upstream_error",
+        status: 403,
+        body_raw: "",
+      },
+      makeLog(),
+      "req-1",
+    );
+    expect(result).toEqual(expected);
+  });
+
+  it("classifies a 404 as client-fault too — the 4xx arm is not anchored to 400 alone", () => {
     const expected = {
       error_class: "client-fault",
       breaker_delta: 0,
@@ -30,7 +66,7 @@ describe("classify", () => {
     const result = classify(
       {
         kind: "upstream_error",
-        status: 401,
+        status: 404,
         body_raw: "",
       },
       makeLog(),

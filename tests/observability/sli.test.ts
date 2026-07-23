@@ -133,6 +133,8 @@ type SetParams = {
   nClientFault: number;
   nGatewayFault: number;
   nRetryExhausted: number;
+  nAuthFailure: number;
+  nAccessDenied: number;
   nStreamPreTokenFault: number; // streaming failure before first token → req_complete with stream: true
   nStreamCompleted: number;
   nStreamFaulted: number;
@@ -150,6 +152,8 @@ function paramsFor(i: number): SetParams {
     nClientFault: 2 + (i % 5),
     nGatewayFault: 1 + (i % 4),
     nRetryExhausted: 1 + (i % 3),
+    nAuthFailure: 1 + (i % 2),
+    nAccessDenied: 1 + (i % 3),
     nStreamPreTokenFault: 1 + (i % 2),
     nStreamCompleted: 8 + (i % 6),
     nStreamFaulted: 1 + (i % 3),
@@ -180,6 +184,8 @@ function makeSet(i: number): { set: EventSet; expected: ExpectedSli } {
     p.nClientFault +
     p.nGatewayFault +
     p.nRetryExhausted +
+    p.nAuthFailure +
+    p.nAccessDenied +
     p.nStreamPreTokenFault +
     p.nStreamCompleted +
     p.nStreamFaulted +
@@ -210,6 +216,24 @@ function makeSet(i: number): { set: EventSet; expected: ExpectedSli } {
       ...range(p.nRetryExhausted).map(() =>
         reqComplete(
           "upstream-retry-exhausted",
+          false,
+          POISON_DURATION_MS,
+          nextOverhead(),
+        ),
+      ),
+      // Sanitized upstream credential rejections: failures for the success
+      // rate, excluded from the error-free non-stream latency percentile.
+      ...range(p.nAuthFailure).map(() =>
+        reqComplete(
+          "upstream-auth-failure",
+          false,
+          POISON_DURATION_MS,
+          nextOverhead(),
+        ),
+      ),
+      ...range(p.nAccessDenied).map(() =>
+        reqComplete(
+          "upstream-access-denied",
           false,
           POISON_DURATION_MS,
           nextOverhead(),
@@ -338,5 +362,24 @@ describe("SLI formulas — query coverage smoke", () => {
     };
 
     expect(requestSuccessRate(set)).toBeCloseTo(980 / 1000, 10);
+  });
+
+  it("request_success_rate_30d: credential rejections count as failures → exactly 950/1000", () => {
+    const set: EventSet = {
+      streamDone: [],
+      streamFirstToken: [],
+      reqComplete: [
+        ...range(940).map(() => reqComplete(null, false, 100, 1)),
+        ...range(10).map(() => reqComplete("client-fault", false, 100, 1)),
+        ...range(30).map(() =>
+          reqComplete("upstream-auth-failure", false, 100, 1),
+        ),
+        ...range(20).map(() =>
+          reqComplete("upstream-access-denied", false, 100, 1),
+        ),
+      ],
+    };
+
+    expect(requestSuccessRate(set)).toBeCloseTo(950 / 1000, 10);
   });
 });
