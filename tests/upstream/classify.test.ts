@@ -127,6 +127,42 @@ describe("classify", () => {
     expect(result).toEqual(expected);
   });
 
+  it("classifies a 429 carrying insufficient_quota as upstream-quota-exhausted, breaker delta 0 (body-derived, never breaker)", () => {
+    const expected = {
+      error_class: "upstream-quota-exhausted",
+      breaker_delta: 0,
+    };
+
+    const result = classify(
+      {
+        kind: "upstream_error",
+        status: 429,
+        body_raw: JSON.stringify({ error: { code: "insufficient_quota" } }),
+      },
+      makeLog(),
+      "req-1",
+    );
+    expect(result).toEqual(expected);
+  });
+
+  it("keeps a 429 with the legitimate rate-limit code on upstream-retry-exhausted — quota discrimination does not widen", () => {
+    const expected = {
+      error_class: "upstream-retry-exhausted",
+      breaker_delta: 0,
+    };
+
+    const result = classify(
+      {
+        kind: "upstream_error",
+        status: 429,
+        body_raw: JSON.stringify({ error: { code: "rate_limit_exceeded" } }),
+      },
+      makeLog(),
+      "req-1",
+    );
+    expect(result).toEqual(expected);
+  });
+
   it("classifies a wall-clock abort as gateway-fault, non-retryable, breaker delta 1 (class and breaker are independent axes)", () => {
     const log = makeLog();
     const expected = {

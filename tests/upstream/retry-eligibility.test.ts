@@ -33,6 +33,24 @@ describe("isRetryEligible", () => {
       eligible: true,
     },
     {
+      name: "upstream 429 carrying insufficient_quota — quota exhaustion, not retryable",
+      outcome: {
+        kind: "upstream_error",
+        status: 429,
+        body_raw: JSON.stringify({ error: { code: "insufficient_quota" } }),
+      },
+      eligible: false,
+    },
+    {
+      name: "upstream 429 with the legitimate rate-limit code — still retry-eligible",
+      outcome: {
+        kind: "upstream_error",
+        status: 429,
+        body_raw: JSON.stringify({ error: { code: "rate_limit_exceeded" } }),
+      },
+      eligible: true,
+    },
+    {
       name: "undecodable 2xx body — not retryable",
       outcome: { kind: "undecodable" },
       eligible: false,

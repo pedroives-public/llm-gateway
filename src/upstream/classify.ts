@@ -1,6 +1,7 @@
 import type { ErrorClass } from "../observability/events.js";
 import type { ErrorOutcome } from "./outcome.js";
 import { assertNever } from "./assert-never.js";
+import { isInsufficientQuota } from "./quota.js";
 
 export type CauseLogPayload = {
   req_id: string;
@@ -69,6 +70,15 @@ export function classify(
       if (outcome.status === 403) {
         return {
           error_class: "upstream-access-denied",
+          breaker_delta: 0,
+        };
+      }
+      // Quota exhaustion is an operator-account condition recognized from
+      // the response body; body-derived signals never count toward the
+      // breaker (it tracks transport/availability faults only).
+      if (isInsufficientQuota(outcome)) {
+        return {
+          error_class: "upstream-quota-exhausted",
           breaker_delta: 0,
         };
       }
