@@ -1,9 +1,16 @@
 import type { ErrorOutcome, Outcome } from "./outcome.js";
 import { assertNever } from "./assert-never.js";
+import { isInsufficientQuota } from "./quota.js";
 
 export function isRetryEligible(outcome: ErrorOutcome): boolean {
   switch (outcome.kind) {
     case "upstream_error":
+      // Quota exhaustion cannot clear within a retry window; staying
+      // ineligible also keeps the Retry-After budget-skip passthrough
+      // unreachable for quota, so its body never reaches the consumer.
+      if (isInsufficientQuota(outcome)) {
+        return false;
+      }
       return outcome.status >= 500 || outcome.status === 429;
     case "undecodable":
       return false;
