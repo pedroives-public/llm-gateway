@@ -260,12 +260,13 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         .code(terminal.status)
         .header("x-gateway-error-class", terminal.error_class);
 
-      // Credential rejections never pass through: the upstream credential is
-      // deployment-owned, so the upstream's own body and headers (Retry-After
-      // included) are replaced by the sanitized terminal below.
+      // Sanitized terminals never pass through: the upstream condition is the
+      // deployment operator's own (credentials, access, quota), so the
+      // upstream's body and headers (Retry-After included) are replaced by
+      // the deterministic terminal below.
       if (
         outcome.kind === "upstream_error" &&
-        !isCredentialRejection(terminal.error_class)
+        !isSanitizedUpstreamTerminal(terminal.error_class)
       ) {
         if (outcome.retry_after !== undefined) {
           reply.header("retry-after", outcome.retry_after);
@@ -338,14 +339,30 @@ function decideErrorTerminal(
   };
 }
 
-// Upstream credential/access rejections (401/403) are sanitized end-to-end:
-// the upstream credential is deployment-owned, so the upstream's own status,
-// headers, and body never reach the consumer.
-function isCredentialRejection(errorClass: ErrorClass): boolean {
-  return (
-    errorClass === "upstream-auth-failure" ||
-    errorClass === "upstream-access-denied"
-  );
+// For an upstream_error terminal: does this class answer with the
+// deterministic sanitized 502 (true) or pass the upstream's own status and
+// body through verbatim (false)? Total over ErrorClass: adding a class
+// without deciding here is a compile error.
+function isSanitizedUpstreamTerminal(errorClass: ErrorClass): boolean {
+  switch (errorClass) {
+    // Operator-culpable rejections: upstream body/headers never reach the consumer.
+    case "upstream-auth-failure":
+    case "upstream-access-denied":
+    case "upstream-quota-exhausted":
+      return true;
+    // Consumer-relevant upstream responses pass through verbatim.
+    case "client-fault":
+    case "upstream-retry-exhausted":
+      return false;
+    // Never produced from an upstream_error outcome today; if that ever
+    // changes, sanitize by default — no unvetted body reaches the consumer.
+    case "gateway-fault":
+    case "upstream-fault":
+      return true;
+
+    default:
+      assertNever(errorClass);
+  }
 }
 
 function statusForErrorOutcome(
@@ -354,10 +371,10 @@ function statusForErrorOutcome(
 ): number {
   switch (outcome.kind) {
     case "upstream_error":
-      // Credential/access rejections are proxy-boundary failures: the
-      // upstream was reached but refused the deployment-owned auth context —
-      // 502, never the upstream's original status.
-      if (isCredentialRejection(errorClass)) {
+      // Sanitized terminals are proxy-boundary failures: the upstream was
+      // reached but refused the deployment's own account context — 502,
+      // never the upstream's original status.
+      if (isSanitizedUpstreamTerminal(errorClass)) {
         return 502;
       }
       return outcome.status >= 500 ? 502 : outcome.status;
@@ -383,8 +400,8 @@ function bodyForErrorOutcome(
 ): unknown {
   switch (outcome.kind) {
     case "upstream_error":
-      // Only the sanitized credential-rejection classes reach here; verbatim
-      // passthrough returns earlier in the handler.
+      // Only sanitized terminal classes reach here; verbatim passthrough
+      // returns earlier in the handler.
       if (errorClass === "upstream-auth-failure") {
         return {
           error: {
@@ -400,6 +417,15 @@ function bodyForErrorOutcome(
             message: "upstream access denied",
             type: "server_error",
             code: "upstream_access_denied",
+          },
+        };
+      }
+      if (errorClass === "upstream-quota-exhausted") {
+        return {
+          error: {
+            message: "upstream quota exhausted",
+            type: "server_error",
+            code: "upstream_quota_exhausted",
           },
         };
       }
