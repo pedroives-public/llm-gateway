@@ -17,6 +17,7 @@ import {
   emitReqRejected,
   type ReqRejectedReason,
   emitUpstreamAuthAlert,
+  emitUpstreamQuotaAlert,
 } from "../observability/events.js";
 import { retry } from "../reliability/retry.js";
 import { armWallClockTimeout } from "../reliability/timeouts.js";
@@ -240,6 +241,12 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
 
       if (terminal.error_class === "upstream-auth-failure") {
         emitUpstreamAuthAlert(request.log, {
+          req_id: request.reqId,
+        });
+      }
+
+      if (terminal.error_class === "upstream-quota-exhausted") {
+        emitUpstreamQuotaAlert(request.log, {
           req_id: request.reqId,
         });
       }

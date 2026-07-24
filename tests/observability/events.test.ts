@@ -253,3 +253,34 @@ describe("emitUpstreamAuthAlert", () => {
     });
   });
 });
+
+describe("emitUpstreamQuotaAlert", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it("emits exactly-once per process, on its own flag independent of the auth alert", async () => {
+    const { emitUpstreamQuotaAlert, emitUpstreamAuthAlert } = await import(
+      "../../src/observability/events.js"
+    );
+
+    const errorCalls: object[] = [];
+    const mockLog = {
+      error: (obj: object) => {
+        errorCalls.push(obj);
+      },
+    };
+
+    // Consuming the auth flag first must not consume the quota flag.
+    emitUpstreamAuthAlert(mockLog, { req_id: "r-0" });
+    emitUpstreamQuotaAlert(mockLog, { req_id: "r-1" });
+    emitUpstreamQuotaAlert(mockLog, { req_id: "r-2" });
+
+    expect(errorCalls.length).toBe(2);
+    expect(errorCalls[1]).toEqual({
+      event: "operational_alert",
+      alert: "upstream_quota_exhausted",
+      req_id: "r-1",
+    });
+  });
+});

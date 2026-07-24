@@ -25,6 +25,12 @@ type UpstreamAuthAlertLine = {
   req_id: string;
 };
 
+type UpstreamQuotaAlertLine = {
+  event: "operational_alert";
+  alert: "upstream_quota_exhausted";
+  req_id: string;
+};
+
 export interface ReqStartPayload {
   req_id: string;
   route: string;
@@ -76,6 +82,10 @@ export interface UpstreamAuthAlertPayload {
   req_id: string;
 }
 
+export interface UpstreamQuotaAlertPayload {
+  req_id: string;
+}
+
 export interface CbStateChangePayload {
   from: CbState;
   to: CbState;
@@ -85,9 +95,11 @@ export interface CbStateChangePayload {
 
 type MinLogger = { info: (obj: object) => void };
 type AlertMinLogger = { error: (obj: UpstreamAuthAlertLine) => void };
+type QuotaAlertMinLogger = { error: (obj: UpstreamQuotaAlertLine) => void };
 
 let _firstRequestCompleted = false;
 let _upstreamAuthAlertFired = false;
+let _upstreamQuotaAlertFired = false;
 
 export function wasColdStart(): boolean {
   return !_firstRequestCompleted;
@@ -151,6 +163,26 @@ export function emitUpstreamAuthAlert(
   log.error({
     event: "operational_alert",
     alert: "upstream_auth_failure",
+    ...payload,
+  });
+}
+
+// Deliberate near-duplicate of emitUpstreamAuthAlert: two alerts is below the
+// abstraction threshold, and per-alert Line types keep the log allowlist
+// explicit. Generalize into a single emitter when a third alert lands.
+export function emitUpstreamQuotaAlert(
+  log: QuotaAlertMinLogger,
+  payload: UpstreamQuotaAlertPayload,
+): void {
+  if (_upstreamQuotaAlertFired) {
+    return;
+  }
+
+  _upstreamQuotaAlertFired = true;
+
+  log.error({
+    event: "operational_alert",
+    alert: "upstream_quota_exhausted",
     ...payload,
   });
 }
