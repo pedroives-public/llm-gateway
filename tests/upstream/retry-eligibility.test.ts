@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { isRetryEligible } from "../../src/upstream/retry-eligibility.js";
-import type { ErrorOutcome } from "../../src/upstream/outcome.js";
+import {
+  isRetryEligible,
+  retryAfterMs,
+} from "../../src/upstream/retry-eligibility.js";
+import type { ErrorOutcome, Outcome } from "../../src/upstream/outcome.js";
 
 // Pure retry-eligibility predicate extracted from classify (design step 1, M-1). It is the SOLE reader of retry-eligibility; the verdicts mirror the
 // `retry_eligible` column the classifier used to return, so retry behavior is
@@ -79,5 +82,93 @@ describe("isRetryEligible", () => {
 
   it.each(cases)("$name", ({ outcome, eligible }) => {
     expect(isRetryEligible(outcome)).toBe(eligible);
+  });
+});
+
+// Retry-After has temporal authority only on 429 (RFC 6585 §4) and 503
+// (RFC 9110 §10.2.3); any other status yields null and the caller jitters.
+// Living in this single source, the whitelist keeps the sleep, the
+// skipped_budget disposition, and the budget-skip terminal aligned — an
+// untrusted upstream header commands none of them.
+describe("retryAfterMs", () => {
+  const cases: ReadonlyArray<{
+    name: string;
+    outcome: Outcome;
+    expected: number | null;
+  }> = [
+    {
+      name: "429 with Retry-After: 25 — honored, delta-seconds converted to ms",
+      outcome: {
+        kind: "upstream_error",
+        status: 429,
+        body_raw: "",
+        retry_after: "25",
+      },
+      expected: 25_000,
+    },
+    {
+      name: "503 with Retry-After: 7 — honored, delta-seconds converted to ms",
+      outcome: {
+        kind: "upstream_error",
+        status: 503,
+        body_raw: "",
+        retry_after: "7",
+      },
+      expected: 7_000,
+    },
+    {
+      name: "500 with Retry-After: 25 — no temporal authority, header ignored",
+      outcome: {
+        kind: "upstream_error",
+        status: 500,
+        body_raw: "",
+        retry_after: "25",
+      },
+      expected: null,
+    },
+    {
+      name: "502 with Retry-After: 25 — no temporal authority, header ignored",
+      outcome: {
+        kind: "upstream_error",
+        status: 502,
+        body_raw: "",
+        retry_after: "25",
+      },
+      expected: null,
+    },
+    {
+      name: "504 with Retry-After: 25 — no temporal authority, header ignored",
+      outcome: {
+        kind: "upstream_error",
+        status: 504,
+        body_raw: "",
+        retry_after: "25",
+      },
+      expected: null,
+    },
+    {
+      name: "429 with absent Retry-After — null (validity rule unchanged by the whitelist)",
+      outcome: { kind: "upstream_error", status: 429, body_raw: "" },
+      expected: null,
+    },
+    {
+      name: "429 with Retry-After: 0 — zero is not a usable wait, even whitelisted",
+      outcome: {
+        kind: "upstream_error",
+        status: 429,
+        body_raw: "",
+        retry_after: "0",
+      },
+      expected: null,
+    },
+    {
+      name: "network_failed — kind gate holds: only upstream errors carry the header",
+      outcome: { kind: "network_failed", pre_send_proven: true },
+      expected: null,
+    },
+  ];
+
+  it.each(cases)("$name", ({ outcome, expected }) => {
+    expect(retryAfterMs(outcome)).toBe(expected);
   });
 });

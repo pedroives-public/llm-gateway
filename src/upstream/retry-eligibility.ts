@@ -2,6 +2,8 @@ import type { ErrorOutcome, Outcome } from "./outcome.js";
 import { assertNever } from "./assert-never.js";
 import { isInsufficientQuota } from "./quota.js";
 
+const RETRY_AFTER_HONORED_STATUSES: readonly number[] = [429, 503];
+
 export function isRetryEligible(outcome: ErrorOutcome): boolean {
   switch (outcome.kind) {
     case "upstream_error":
@@ -23,14 +25,20 @@ export function isRetryEligible(outcome: ErrorOutcome): boolean {
   }
 }
 
-// The Retry-After wait in ms if usable, else null — the single source both the
-// retry sleep and the disposition label read, so they can't disagree on what
-// counts as a Retry-After. Only positive delta-seconds qualify; absent or
-// non-numeric (e.g. an HTTP-date) returns null.
+// The Retry-After wait in ms if usable, else null — the single source for the
+// retry sleep and the disposition label, so they can't disagree. Only 429/503
+// carry temporal authority (RFC 6585 §4; RFC 9110 §10.2.3): other statuses
+// jitter, keeping budget-skip unreachable. Positive delta-seconds only; absent
+// or non-numeric (e.g. an HTTP-date) returns null.
 export function retryAfterMs(outcome: Outcome): number | null {
   if (outcome.kind !== "upstream_error") {
     return null;
   }
+
+  if (!RETRY_AFTER_HONORED_STATUSES.includes(outcome.status)) {
+    return null;
+  }
+
   if (outcome.retry_after === undefined) {
     return null;
   }
