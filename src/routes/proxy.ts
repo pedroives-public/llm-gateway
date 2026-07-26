@@ -322,10 +322,11 @@ type ErrorTerminal = {
   status: number;
 };
 
-// Suppress ONLY an upstream 429/503 budget-skip: the upstream asked us to back
-// off, so it is not a breaker-worthy fault. A budget-skipped network_failed
-// (e.g. connect timeout) is a real failure and MUST fall through so the breaker
-// counts it.
+// Suppress an upstream budget-skip: the upstream asked us to back off, so it
+// is not a breaker-worthy fault. Only a 429/503 can reach this branch —
+// skipped_budget requires a usable Retry-After, and retryAfterMs grants that
+// authority to those statuses alone (non-upstream outcomes never qualify);
+// the kind guard narrows the type and keeps impossible kinds falling through.
 function decideErrorTerminal(
   classification: Classification,
   disposition: RetryDisposition,
