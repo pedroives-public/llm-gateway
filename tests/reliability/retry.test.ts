@@ -309,6 +309,80 @@ describe("retry", () => {
     await expect(result).resolves.toEqual(attempt2);
   });
 
+  // Retry-After has no temporal authority outside 429/503 (see retryAfterMs):
+  // a 5xx carrying the header must behave exactly as if the header were
+  // absent. The huge-value cell guards the breaker-suppression regression —
+  // honored, it would budget-skip, mark skipped_budget, and zero the breaker
+  // delta on what is really an upstream failure.
+  it("retries a 500 carrying a huge Retry-After with jitter instead of budget-skipping", async () => {
+    const attempt1: Outcome = {
+      kind: "upstream_error",
+      status: 500,
+      body_raw: "internal error",
+      retry_after: "9999", // ~2.8h in delta-seconds; honored, it would exceed any budget
+    };
+    const attempt2: Outcome = {
+      kind: "ok",
+      status: 200,
+      body_parsed: { ok: true },
+    };
+
+    const op = vi
+      .fn<() => Promise<Outcome>>()
+      .mockResolvedValueOnce(attempt1)
+      .mockResolvedValueOnce(attempt2);
+
+    const now = Date.now();
+    const result = retry(op, {
+      signal: new AbortController().signal,
+      deadlineAt: now + 30_000,
+      firstByteFlushed: () => false,
+    });
+
+    await vi.runAllTimersAsync();
+
+    await expect(result).resolves.toEqual(attempt2);
+    expect(op).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits the jittered backoff, not the header, when a 500 carries Retry-After", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+
+    const attempt1: Outcome = {
+      kind: "upstream_error",
+      status: 500,
+      body_raw: "internal error",
+      retry_after: "25", // honored, this would sleep 25s of a 30s budget
+    };
+    const attempt2: Outcome = {
+      kind: "ok",
+      status: 200,
+      body_parsed: { ok: true },
+    };
+
+    const op = vi
+      .fn<() => Promise<Outcome>>()
+      .mockResolvedValueOnce(attempt1)
+      .mockResolvedValueOnce(attempt2);
+
+    const now = Date.now();
+    const result = retry(op, {
+      signal: new AbortController().signal,
+      deadlineAt: now + 30_000,
+      firstByteFlushed: () => false,
+    });
+
+    const expectedBackoff = Math.floor(0.5 * backoffCeiling());
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(op).toHaveBeenCalledTimes(1); // backoff scheduled, not the 25s header
+
+    await vi.advanceTimersByTimeAsync(expectedBackoff + 1);
+    expect(op).toHaveBeenCalledTimes(2); // retry fired within the jitter ceiling
+
+    await expect(result).resolves.toEqual(attempt2);
+  });
+
   it("treats a literal Retry-After: 0 as no usable backoff and jitters instead of retrying immediately", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
 
