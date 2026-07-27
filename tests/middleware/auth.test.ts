@@ -234,6 +234,49 @@ describe("auth middleware — DB-backed verification", () => {
     expect(JSON.parse(res.payload)).toEqual({ error: "Unauthorized" });
   });
 
+  it("4.6b stops accepting a key at the request that follows tenant suspension", async () => {
+    const tenantId = randomUUID();
+    await db
+      .insert(tenants)
+      .values({ id: tenantId, name: "T", status: "active", planTier: "pro" });
+    const key = freshKey();
+    await db.insert(apiKeys).values({
+      id: randomUUID(),
+      tenantId,
+      hashValue: hmacDigest(key),
+      status: "active",
+    });
+
+    const accepted = await app.inject({
+      method: "GET",
+      url: "/protected",
+      headers: { authorization: `Bearer ${key}` },
+    });
+
+    // Load-bearing, not redundant: the 401 below is uniform across every
+    // rejection reason, so observing this key accepted first is what narrows
+    // the cause. The api_keys row stays active for the whole cell, which
+    // isolates the tenant gate from the key gate covered in 4.5b.
+    expect(accepted.statusCode).toBe(200);
+    expect(
+      (JSON.parse(accepted.payload) as { tenantId: string }).tenantId,
+    ).toBe(tenantId);
+
+    await db
+      .update(tenants)
+      .set({ status: "suspended" })
+      .where(eq(tenants.id, tenantId));
+
+    const rejected = await app.inject({
+      method: "GET",
+      url: "/protected",
+      headers: { authorization: `Bearer ${key}` },
+    });
+
+    expect(rejected.statusCode).toBe(401);
+    expect(JSON.parse(rejected.payload)).toEqual({ error: "Unauthorized" });
+  });
+
   it("4.7 returns 200 and attaches tenantId + planTier on valid key and active tenant", async () => {
     const tenantId = randomUUID();
     await db.insert(tenants).values({
