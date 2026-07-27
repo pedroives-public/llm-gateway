@@ -4,7 +4,7 @@ import path from "node:path";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import Fastify, { type FastifyInstance } from "fastify";
 import {
   PostgreSqlContainer,
@@ -162,6 +162,50 @@ describe("auth middleware — DB-backed verification", () => {
 
     expect(res.statusCode).toBe(401);
     expect(JSON.parse(res.payload)).toEqual({ error: "Unauthorized" });
+  });
+
+  it("4.5b stops accepting a key at the request that follows its revocation", async () => {
+    const tenantId = randomUUID();
+    await db
+      .insert(tenants)
+      .values({ id: tenantId, name: "T", status: "active", planTier: "free" });
+    const key = freshKey();
+    const keyId = randomUUID();
+    await db.insert(apiKeys).values({
+      id: keyId,
+      tenantId,
+      hashValue: hmacDigest(key),
+      status: "active",
+    });
+
+    const accepted = await app.inject({
+      method: "GET",
+      url: "/protected",
+      headers: { authorization: `Bearer ${key}` },
+    });
+
+    // Load-bearing, not redundant: the rejection asserted below is uniform for
+    // "revoked" and for "no such key", so it alone cannot attribute a cause.
+    // Observing this exact key accepted on this exact path first leaves the
+    // status column as the only thing that changed between the two outcomes.
+    expect(accepted.statusCode).toBe(200);
+    expect(
+      (JSON.parse(accepted.payload) as { tenantId: string }).tenantId,
+    ).toBe(tenantId);
+
+    await db
+      .update(apiKeys)
+      .set({ status: "revoked" })
+      .where(eq(apiKeys.id, keyId));
+
+    const rejected = await app.inject({
+      method: "GET",
+      url: "/protected",
+      headers: { authorization: `Bearer ${key}` },
+    });
+
+    expect(rejected.statusCode).toBe(401);
+    expect(JSON.parse(rejected.payload)).toEqual({ error: "Unauthorized" });
   });
 
   it("4.6 returns 401 when the tenant is suspended", async () => {
