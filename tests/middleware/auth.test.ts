@@ -15,6 +15,7 @@ import { authPreHandler } from "../../src/middleware/auth.js";
 import { createDb, type DrizzleClient } from "../../src/db/client.js";
 import { apiKeys, tenants } from "../../src/db/schema.js";
 import { TEST_PEPPER } from "../constants.js";
+import { makeLogCapture } from "../log-capture.js";
 
 const MIGRATIONS_FOLDER = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -441,6 +442,56 @@ describe("auth middleware — DB-backed verification", () => {
 
     expect(res.statusCode).toBe(500);
     expect(JSON.parse(res.payload)).toEqual({ error: "Internal Server Error" });
+  });
+});
+
+describe("auth middleware — untrusted key bytes reaching the log stream", () => {
+  // The length gate accepts any 48-char key, so the 8 characters that follow
+  // the lkey_ prefix are attacker-controlled and land in the log through the
+  // 13-char keyPrefix slice. NDJSON is newline-delimited, so an unescaped
+  // newline plus a brace would let a caller forge a log record.
+  const INJECTED = '"}\n{"xyz';
+  const ACCEPTED_KEY_LENGTH = 48; // mirrors the length gate in auth.ts
+
+  it("4.11 escapes NDJSON metacharacters carried by the key prefix", async () => {
+    const capture = makeLogCapture();
+    const loggedApp = Fastify({ logger: capture.logger });
+    loggedApp.decorate("db", db);
+    loggedApp.decorateRequest("tenantId", null);
+    loggedApp.decorateRequest("planTier", null);
+
+    await loggedApp.register(async (scope) => {
+      scope.addHook("onRequest", authPreHandler);
+      scope.get("/protected", async () => ({ ok: true }));
+    });
+
+    await loggedApp.ready();
+
+    const key = `lkey_${INJECTED}${"a".repeat(35)}`;
+    expect(key.length).toBe(ACCEPTED_KEY_LENGTH);
+
+    const res = await loggedApp.inject({
+      method: "GET",
+      url: "/protected",
+      headers: { authorization: `Bearer ${key}` },
+    });
+
+    await loggedApp.close();
+
+    expect(res.statusCode).toBe(401);
+
+    const rejections = capture.logs.filter(
+      (log) => log["msg"] === "Auth rejected",
+    );
+
+    // Load-bearing on both sides: keyPrefix present proves the bytes reached
+    // the serializer (a key rejected before line 55 would leave the stream
+    // clean for the wrong reason), and the exact match proves they survived as
+    // data. Every captured line was JSON.parse'd by the capture helper, so a
+    // forged record would have surfaced as a parse failure or an extra entry.
+    expect(rejections).toHaveLength(1);
+    expect(rejections[0]?.["keyPrefix"]).toBe(`lkey_${INJECTED}...`);
+    expect(capture.logs.some((log) => "xyz" in log)).toBe(false);
   });
 });
 
