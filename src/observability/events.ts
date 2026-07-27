@@ -109,10 +109,19 @@ export function _markFirstRequestCompleted(): void {
   _firstRequestCompleted = true;
 }
 
+/**
+ * Request admitted past auth. Anchor event the other per-request events join
+ * against via `req_id`; carries tenant/plan/stream/cold-start context.
+ */
 export function emitReqStart(log: MinLogger, payload: ReqStartPayload): void {
   log.info({ event: "req_start", ...payload });
 }
 
+/**
+ * Terminal event for a non-streaming request (or a streaming one that failed
+ * before its first SSE token). Input to the success-rate and non-streaming
+ * latency SLIs; also ends the process's cold-start window.
+ */
 export function emitReqComplete(
   log: MinLogger,
   payload: ReqCompletePayload,
@@ -121,6 +130,11 @@ export function emitReqComplete(
   _markFirstRequestCompleted();
 }
 
+/**
+ * Gateway-side rejection before any upstream attempt (schema validation or
+ * cost cap). Its own event so rejections never enter the upstream
+ * success-rate population.
+ */
 export function emitReqRejected(
   log: MinLogger,
   payload: ReqRejectPayload,
@@ -128,6 +142,10 @@ export function emitReqRejected(
   log.info({ event: "req_rejected", ...payload });
 }
 
+/**
+ * First SSE token flushed to the client on a streaming request. Measurement
+ * point for the TTFT percentile SLI (streaming path only).
+ */
 export function emitStreamFirstToken(
   log: MinLogger,
   payload: StreamFirstTokenPayload,
@@ -135,6 +153,11 @@ export function emitStreamFirstToken(
   log.info({ event: "stream_first_token", ...payload });
 }
 
+/**
+ * Terminal event for a streaming request that flushed at least one token
+ * (`completed` marks clean end vs mid-stream break). Input to the streaming
+ * SLIs; also ends the process's cold-start window.
+ */
 export function emitStreamDone(
   log: MinLogger,
   payload: StreamDonePayload,
@@ -143,6 +166,10 @@ export function emitStreamDone(
   _markFirstRequestCompleted();
 }
 
+/**
+ * Circuit-breaker FSM transition (CLOSED/OPEN/HALF_OPEN). Operational
+ * timeline for incidents; not an SLI input.
+ */
 export function emitCbStateChange(
   log: MinLogger,
   payload: CbStateChangePayload,
@@ -150,6 +177,11 @@ export function emitCbStateChange(
   log.info({ event: "cb_state_change", ...payload });
 }
 
+/**
+ * Once-per-process operator alert: the deployment's own upstream credential
+ * was rejected (401). Alerts summon, events describe — later occurrences
+ * stay visible via req_complete's error_class.
+ */
 export function emitUpstreamAuthAlert(
   log: AlertMinLogger,
   payload: UpstreamAuthAlertPayload,
@@ -167,9 +199,15 @@ export function emitUpstreamAuthAlert(
   });
 }
 
-// Deliberate near-duplicate of emitUpstreamAuthAlert: two alerts is below the
-// abstraction threshold, and per-alert Line types keep the log allowlist
-// explicit. Generalize into a single emitter when a third alert lands.
+/**
+ * Once-per-process operator alert: the deployment's upstream account ran out
+ * of quota (429 insufficient_quota). Same summon-once contract as the auth
+ * alert.
+ *
+ * Deliberate near-duplicate of emitUpstreamAuthAlert: two alerts is below the
+ * abstraction threshold, and per-alert Line types keep the log allowlist
+ * explicit. Generalize into a single emitter when a third alert lands.
+ */
 export function emitUpstreamQuotaAlert(
   log: QuotaAlertMinLogger,
   payload: UpstreamQuotaAlertPayload,
