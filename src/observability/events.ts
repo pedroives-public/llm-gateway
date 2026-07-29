@@ -7,7 +7,8 @@ export type ErrorClass =
   | "upstream-retry-exhausted"
   | "upstream-auth-failure"
   | "upstream-access-denied"
-  | "upstream-quota-exhausted";
+  | "upstream-quota-exhausted"
+  | "upstream-redirect-blocked";
 
 // Why a request did or did not retry, reconstructed at wiring time for incident
 // triage. `skipped_budget` means STRICTLY a Retry-After-vs-budget skip; an

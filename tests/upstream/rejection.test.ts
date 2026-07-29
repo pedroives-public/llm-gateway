@@ -194,7 +194,7 @@ describe("resolveRejection", () => {
 
   it("return type admits only the rejection-path outcomes", () => {
     expectTypeOf(resolveRejection).returns.toEqualTypeOf<
-      Extract<Outcome, { kind: "network_failed" | "aborted" }>
+      Extract<Outcome, { kind: "network_failed" | "aborted" | "redirect_blocked" }>
     >();
   });
 });

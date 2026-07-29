@@ -78,6 +78,11 @@ describe("isRetryEligible", () => {
       outcome: { kind: "network_failed", pre_send_proven: false },
       eligible: false,
     },
+    {
+      name: "blocked redirect — structurally not retryable (3xx repeats until config changes)",
+      outcome: { kind: "redirect_blocked" },
+      eligible: false,
+    },
   ];
 
   it.each(cases)("$name", ({ outcome, eligible }) => {

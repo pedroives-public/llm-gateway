@@ -24,6 +24,9 @@ function logUpstreamCause(
   reqId: string,
 ): void {
   switch (outcome.kind) {
+    // A blocked redirect is upstream-sourced (a 3xx answer) with no transport
+    // cause to record; it keeps the one-cause-line-per-upstream-failure join.
+    case "redirect_blocked":
     case "upstream_error":
     case "undecodable":
       log.error({ req_id: reqId, cause_code: null, cause_name: null });
@@ -95,6 +98,15 @@ export function classify(
     case "undecodable":
       return {
         error_class: "upstream-fault",
+        breaker_delta: 1,
+      };
+    // The gateway's own redirect policy refused the upstream's 3xx: every
+    // following call fails with certainty until the deployment endpoint
+    // config changes, so it counts toward the breaker (fail fast for
+    // callers) regardless of upstream health.
+    case "redirect_blocked":
+      return {
+        error_class: "upstream-redirect-blocked",
         breaker_delta: 1,
       };
     case "network_failed":

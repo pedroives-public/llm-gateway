@@ -18,6 +18,10 @@ export function isRetryEligible(outcome: ErrorOutcome): boolean {
       return false;
     case "network_failed":
       return outcome.pre_send_proven;
+    // A blocked redirect cannot clear within the retry budget: the upstream
+    // answers 3xx again until the deployment endpoint config changes.
+    case "redirect_blocked":
+      return false;
     case "aborted":
       return false;
     default:

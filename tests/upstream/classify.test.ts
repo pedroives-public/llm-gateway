@@ -91,6 +91,22 @@ describe("classify", () => {
     });
   });
 
+  it("classifies a blocked redirect as upstream-redirect-blocked, breaker delta 1 (certain failure until config changes)", () => {
+    const log = makeLog();
+    const expected = {
+      error_class: "upstream-redirect-blocked",
+      breaker_delta: 1,
+    };
+
+    const result = classify({ kind: "redirect_blocked" }, log, "req-1");
+    expect(result).toEqual(expected);
+    expect(log.error).toHaveBeenCalledWith({
+      req_id: "req-1",
+      cause_code: null,
+      cause_name: null,
+    });
+  });
+
   it("classifies an upstream 5xx as retryable, terminal-class upstream-retry-exhausted, breaker delta 1", () => {
     const expected = {
       error_class: "upstream-retry-exhausted",
