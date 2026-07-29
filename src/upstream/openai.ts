@@ -37,6 +37,10 @@ export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
           "content-type": "application/json",
         },
         body: JSON.stringify(body),
+        // Fail-closed egress: a 3xx from the configured endpoint is an
+        // operator-config fault; following it would replay the request
+        // (tenant body included) against an unvetted host.
+        redirect: "error",
         signal,
       });
     } catch (err) {
