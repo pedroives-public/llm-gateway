@@ -78,6 +78,36 @@ describe("openai buffered client", () => {
     );
   });
 
+  it("blocks an upstream redirect as redirect_blocked and never contacts the hop target", async () => {
+    let targetHits = 0;
+    await withServer(
+      (_req, res) => {
+        targetHits += 1;
+        res.writeHead(204);
+        res.end();
+      },
+      async (targetURL) => {
+        await withServer(
+          (_req, res) => {
+            res.writeHead(302, { location: targetURL });
+            res.end();
+          },
+          async (baseURL) => {
+            const client = createOpenAIClient({ apiKey: "k", baseURL });
+            const outcome = await client.buffered(
+              reqBody,
+              freshSignal(),
+              silentLog,
+            );
+            expect(outcome).toEqual({ kind: "redirect_blocked" });
+            // The egress defense itself: nothing reached the redirect target.
+            expect(targetHits).toBe(0);
+          },
+        );
+      },
+    );
+  });
+
   it(
     "caps a >1 MiB response as aborted{response_size_cap} and tears the upstream down",
     { timeout: 10_000 },
