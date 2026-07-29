@@ -22,6 +22,11 @@ export type RawFacts =
     }
   | {
       resolved: false;
+      rejection: "redirect";
+      cause_message: string;
+    }
+  | {
+      resolved: false;
       rejection: "abort";
       abort_kind: string;
     };
@@ -33,7 +38,10 @@ export type UnrecognizedRejection = {
 export type RejectionFacts = Extract<RawFacts, { resolved: false }>;
 export type ResponseFacts = Extract<RawFacts, { resolved: true }>;
 export type RejectionRecognition =
-  | Extract<Outcome, { kind: "network_failed" | "aborted" }>
+  | Extract<
+      Outcome,
+      { kind: "network_failed" | "aborted" | "redirect_blocked" }
+    >
   | UnrecognizedRejection;
 export type ResponseRecognition = Extract<
   Outcome,
@@ -54,6 +62,11 @@ const POSSIBLY_POST_SEND_CODES: readonly string[] = [
   "UND_ERR_SOCKET",
 ];
 
+// Free-text internals of undici's redirect:"error" rejection, not a contract.
+// Matched exactly on purpose: if a Node bump rewords it, redirects fall to
+// unrecognized (fail-loud 500 + boundary log) instead of silently matching.
+const REDIRECT_BLOCKED_MESSAGE = "unexpected redirect";
+
 function isSuccessStatus(status: number): boolean {
   return status >= 200 && status < 300;
 }
@@ -64,9 +77,7 @@ function isRecognizedAbortKind(
   return k === "response_size_cap" || k === "wall_clock_expired";
 }
 
-export function recognizeRejection(
-  raw: RejectionFacts,
-): RejectionRecognition {
+export function recognizeRejection(raw: RejectionFacts): RejectionRecognition {
   switch (raw.rejection) {
     case "abort":
       if (isRecognizedAbortKind(raw.abort_kind)) {
@@ -79,6 +90,11 @@ export function recognizeRejection(
       }
       if (POSSIBLY_POST_SEND_CODES.includes(raw.cause_code)) {
         return { kind: "network_failed", pre_send_proven: false };
+      }
+      return { kind: "unrecognized" };
+    case "redirect":
+      if (raw.cause_message === REDIRECT_BLOCKED_MESSAGE) {
+        return { kind: "redirect_blocked" };
       }
       return { kind: "unrecognized" };
     default:

@@ -136,6 +136,26 @@ describe("recognize", () => {
     expect(result).toEqual({ kind: "unrecognized" });
   });
 
+  it("maps the undici redirect rejection message to redirect_blocked", () => {
+    const result = recognize({
+      resolved: false,
+      rejection: "redirect",
+      cause_message: "unexpected redirect",
+    });
+
+    expect(result).toEqual({ kind: "redirect_blocked" });
+  });
+
+  it("returns the unrecognized variant for a redirect cause message outside the exact match (fail-loud on undici rewording)", () => {
+    const result = recognize({
+      resolved: false,
+      rejection: "redirect",
+      cause_message: "Unexpected redirect: blocked by policy",
+    });
+
+    expect(result).toEqual({ kind: "unrecognized" });
+  });
+
   it("keeps the unrecognized variant outside Outcome, so recognize's return cannot reach classify without narrowing", () => {
     expectTypeOf<UnrecognizedRejection>().not.toExtend<Outcome>();
     expectTypeOf<ReturnType<typeof recognize>>().not.toExtend<ErrorOutcome>();
@@ -143,7 +163,10 @@ describe("recognize", () => {
 
   it("exposes branch-specific recognizers with branch-specific return types", () => {
     expectTypeOf<ReturnType<typeof recognizeRejection>>().toEqualTypeOf<
-      | Extract<Outcome, { kind: "network_failed" | "aborted" }>
+      | Extract<
+          Outcome,
+          { kind: "network_failed" | "aborted" | "redirect_blocked" }
+        >
       | UnrecognizedRejection
     >();
     expectTypeOf<ReturnType<typeof recognizeResponse>>().toEqualTypeOf<

@@ -366,6 +366,7 @@ function isSanitizedUpstreamTerminal(errorClass: ErrorClass): boolean {
     // changes, sanitize by default — no unvetted body reaches the consumer.
     case "gateway-fault":
     case "upstream-fault":
+    case "upstream-redirect-blocked":
       return true;
 
     default:
@@ -387,6 +388,10 @@ function statusForErrorOutcome(
       }
       return outcome.status >= 500 ? 502 : outcome.status;
     case "undecodable":
+      return 502;
+    // Proxy-boundary failure on the operator's side (stale endpoint config or
+    // an upstream that started redirecting): 502, never a passthrough.
+    case "redirect_blocked":
       return 502;
     case "network_failed":
       return errorClass === "gateway-fault" ? 504 : 502;
@@ -445,6 +450,15 @@ function bodyForErrorOutcome(
           message: "invalid response from upstream",
           type: "server_error",
           code: "upstream_decode_error",
+        },
+      };
+
+    case "redirect_blocked":
+      return {
+        error: {
+          message: "upstream redirect blocked",
+          type: "server_error",
+          code: "upstream_redirect_blocked",
         },
       };
 

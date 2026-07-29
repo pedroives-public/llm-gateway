@@ -82,7 +82,7 @@ export function resolveRejection(
   err: unknown,
   signal: AbortSignal,
   logger: Logger,
-): Extract<Outcome, { kind: "network_failed" | "aborted" }> {
+): Extract<Outcome, { kind: "network_failed" | "aborted" | "redirect_blocked" }> {
   const abortIdentity = err === signal.reason;
   let arm: RejectionFacts;
   let causeCode: string | undefined;
