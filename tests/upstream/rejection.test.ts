@@ -192,6 +192,65 @@ describe("resolveRejection", () => {
     });
   });
 
+  describe("redirect rejections (no cause.code, undici redirect message)", () => {
+    it("returns redirect_blocked for the undici blocked-redirect shape", () => {
+      const err = new TypeError("fetch failed", {
+        cause: new Error("unexpected redirect"),
+      });
+      const logger = makeLogger();
+
+      const outcome = resolveRejection(
+        err,
+        new AbortController().signal,
+        logger,
+      );
+
+      expect(outcome).toEqual({ kind: "redirect_blocked" });
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
+    it("keeps the NETWORK lane when a cause.code is present, even with the redirect message (code absence is required)", () => {
+      const cause = new Error("unexpected redirect");
+      (cause as Error & { code?: string }).code = "ECONNRESET";
+      const err = new TypeError("fetch failed", { cause });
+      const logger = makeLogger();
+
+      const outcome = resolveRejection(
+        err,
+        new AbortController().signal,
+        logger,
+      );
+
+      expect(outcome).toEqual({
+        kind: "network_failed",
+        pre_send_proven: false,
+        cause_code: "ECONNRESET",
+        cause_name: "Error",
+      });
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
+    it("re-throws and logs the boundary payload when the no-code message is not the redirect one (open class stays out)", () => {
+      const err = new TypeError("fetch failed", {
+        cause: new Error("some future undici failure"),
+      });
+      const logger = makeLogger();
+
+      const caught = catchFrom(() =>
+        resolveRejection(err, new AbortController().signal, logger),
+      );
+
+      expect(caught).toBe(err);
+      const payload = firstErrorPayload(logger);
+      expect(payload).toEqual({
+        cause_code: "UNKNOWN",
+        cause_name: "UNKNOWN",
+        err_name: "TypeError",
+        abort_identity: false,
+      });
+    });
+  });
+
   it("return type admits only the rejection-path outcomes", () => {
     expectTypeOf(resolveRejection).returns.toEqualTypeOf<
       Extract<Outcome, { kind: "network_failed" | "aborted" | "redirect_blocked" }>

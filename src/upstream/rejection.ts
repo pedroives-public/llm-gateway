@@ -35,6 +35,21 @@ function extractCauseCode(err: unknown): string | undefined {
   return undefined;
 }
 
+function extractCauseMessage(err: unknown): string | undefined {
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    "cause" in err &&
+    typeof err.cause === "object" &&
+    err.cause !== null &&
+    "message" in err.cause &&
+    typeof err.cause.message === "string"
+  ) {
+    return err.cause.message;
+  }
+  return undefined;
+}
+
 function extractCauseName(err: unknown): string | undefined {
   if (
     typeof err === "object" &&
@@ -97,15 +112,29 @@ export function resolveRejection(
   } else {
     causeCode = extractCauseCode(err);
     if (causeCode === undefined) {
-      logAndRethrow(err, abortIdentity, logger);
-    }
-    causeName = extractCauseName(err);
+      // Undici's blocked-redirect rejection carries no cause.code (measured
+      // on Node 22), so it must be recognized before the no-code rethrow.
+      // Code absence is one half of the discriminator; the exact message
+      // match in recognizeRejection is the other.
+      const causeMessage = extractCauseMessage(err);
+      if (causeMessage === undefined) {
+        logAndRethrow(err, abortIdentity, logger);
+      }
 
-    arm = {
-      resolved: false,
-      rejection: "network",
-      cause_code: causeCode,
-    };
+      arm = {
+        resolved: false,
+        rejection: "redirect",
+        cause_message: causeMessage,
+      };
+    } else {
+      causeName = extractCauseName(err);
+
+      arm = {
+        resolved: false,
+        rejection: "network",
+        cause_code: causeCode,
+      };
+    }
   }
 
   const outcome = recognizeRejection(arm);
