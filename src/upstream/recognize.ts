@@ -65,7 +65,7 @@ const POSSIBLY_POST_SEND_CODES: readonly string[] = [
 // Free-text internals of undici's redirect:"error" rejection, not a contract.
 // Matched exactly on purpose: if a Node bump rewords it, redirects fall to
 // unrecognized (fail-loud 500 + boundary log) instead of silently matching.
-const REDIRECT_BLOCKED_MESSAGE = "unexpected redirect";
+export const REDIRECT_BLOCKED_MESSAGE = "unexpected redirect";
 
 function isSuccessStatus(status: number): boolean {
   return status >= 200 && status < 300;
