@@ -26,6 +26,12 @@ type UpstreamAuthAlertLine = {
   req_id: string;
 };
 
+type UpstreamRedirectAlertLine = {
+  event: "operational_alert";
+  alert: "upstream_redirect_blocked";
+  req_id: string;
+};
+
 type UpstreamQuotaAlertLine = {
   event: "operational_alert";
   alert: "upstream_quota_exhausted";
@@ -83,6 +89,10 @@ export interface UpstreamAuthAlertPayload {
   req_id: string;
 }
 
+export interface UpstreamRedirectAlertPayload {
+  req_id: string;
+}
+
 export interface UpstreamQuotaAlertPayload {
   req_id: string;
 }
@@ -97,10 +107,14 @@ export interface CbStateChangePayload {
 type MinLogger = { info: (obj: object) => void };
 type AlertMinLogger = { error: (obj: UpstreamAuthAlertLine) => void };
 type QuotaAlertMinLogger = { error: (obj: UpstreamQuotaAlertLine) => void };
+type RedirectAlertMinLogger = {
+  error: (obj: UpstreamRedirectAlertLine) => void;
+};
 
 let _firstRequestCompleted = false;
 let _upstreamAuthAlertFired = false;
 let _upstreamQuotaAlertFired = false;
+let _upstreamRedirectAlertFired = false;
 
 export function wasColdStart(): boolean {
   return !_firstRequestCompleted;
@@ -222,6 +236,29 @@ export function emitUpstreamQuotaAlert(
   log.error({
     event: "operational_alert",
     alert: "upstream_quota_exhausted",
+    ...payload,
+  });
+}
+
+/**
+ * Once-per-process operator alert: the configured upstream endpoint answered
+ * with a redirect the gateway refuses to follow — stale endpoint config or a
+ * misbehaving upstream, either way the operator's to fix. Same summon-once
+ * contract as the auth and quota alerts.
+ */
+export function emitUpstreamRedirectAlert(
+  log: RedirectAlertMinLogger,
+  payload: UpstreamRedirectAlertPayload,
+): void {
+  if (_upstreamRedirectAlertFired) {
+    return;
+  }
+
+  _upstreamRedirectAlertFired = true;
+
+  log.error({
+    event: "operational_alert",
+    alert: "upstream_redirect_blocked",
     ...payload,
   });
 }
