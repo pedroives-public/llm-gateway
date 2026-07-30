@@ -260,9 +260,8 @@ describe("emitUpstreamQuotaAlert", () => {
   });
 
   it("emits exactly-once per process, on its own flag independent of the auth alert", async () => {
-    const { emitUpstreamQuotaAlert, emitUpstreamAuthAlert } = await import(
-      "../../src/observability/events.js"
-    );
+    const { emitUpstreamQuotaAlert, emitUpstreamAuthAlert } =
+      await import("../../src/observability/events.js");
 
     const errorCalls: object[] = [];
     const mockLog = {
@@ -281,6 +280,41 @@ describe("emitUpstreamQuotaAlert", () => {
       event: "operational_alert",
       alert: "upstream_quota_exhausted",
       req_id: "r-1",
+    });
+  });
+});
+
+describe("emitUpstreamRedirectAlert", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it("emits exactly-once per process, on its own flag independent of the auth alert or quota alert", async () => {
+    const {
+      emitUpstreamQuotaAlert,
+      emitUpstreamAuthAlert,
+      emitUpstreamRedirectAlert,
+    } = await import("../../src/observability/events.js");
+
+    const errorCalls: object[] = [];
+    const mockLog = {
+      error: (obj: object) => {
+        errorCalls.push(obj);
+      },
+    };
+
+    // Consuming the auth flag and the quota flag first
+    // Must not consume the redirect flag.
+    emitUpstreamAuthAlert(mockLog, { req_id: "r-0" });
+    emitUpstreamQuotaAlert(mockLog, { req_id: "r-1" });
+    emitUpstreamRedirectAlert(mockLog, { req_id: "r-2" });
+    emitUpstreamRedirectAlert(mockLog, { req_id: "r-3" });
+
+    expect(errorCalls.length).toBe(3);
+    expect(errorCalls[2]).toEqual({
+      event: "operational_alert",
+      alert: "upstream_redirect_blocked",
+      req_id: "r-2",
     });
   });
 });
