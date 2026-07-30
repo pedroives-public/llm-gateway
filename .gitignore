@@ -57,7 +57,8 @@ drizzle/.cache/
 # Local dev tooling (binaries, scripts, IDE/agent configs not shared yet)
 actionlint
 scripts/
-docs/
+docs/*
+!docs/runbooks.md
 openspec/
 .claude/
 .codex/
