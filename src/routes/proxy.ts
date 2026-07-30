@@ -16,9 +16,8 @@ import {
   type RetryDisposition,
   emitReqRejected,
   type ReqRejectedReason,
-  emitUpstreamAuthAlert,
-  emitUpstreamQuotaAlert,
-  emitUpstreamRedirectAlert,
+  emitOperationalAlert,
+  alertFor,
 } from "../observability/events.js";
 import { retry } from "../reliability/retry.js";
 import { armWallClockTimeout } from "../reliability/timeouts.js";
@@ -240,22 +239,9 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         terminal.breaker_delta === 1 ? "FAILURE" : "INCONCLUSIVE",
       );
 
-      if (terminal.error_class === "upstream-auth-failure") {
-        emitUpstreamAuthAlert(request.log, {
-          req_id: request.reqId,
-        });
-      }
-
-      if (terminal.error_class === "upstream-quota-exhausted") {
-        emitUpstreamQuotaAlert(request.log, {
-          req_id: request.reqId,
-        });
-      }
-
-      if (terminal.error_class === "upstream-redirect-blocked") {
-        emitUpstreamRedirectAlert(request.log, {
-          req_id: request.reqId,
-        });
+      const alert = alertFor(terminal.error_class);
+      if (alert !== null) {
+        emitOperationalAlert(request.log, alert, { req_id: request.reqId });
       }
 
       emitReqComplete(request.log, {

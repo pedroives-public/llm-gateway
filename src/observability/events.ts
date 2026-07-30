@@ -1,4 +1,17 @@
 import type { PlanTier } from "../db/schema.js";
+import { assertNever } from "../upstream/assert-never.js";
+
+// Operator-page alert names. The array is the single source: AlertName
+// derives from it, and the unit suite iterates it — an alert added here is
+// covered by the exactly-once and independence cells automatically.
+export const ALERT_NAMES = [
+  // the deployment's own upstream credential was rejected (401)
+  "upstream_auth_failure",
+  // the deployment's upstream account ran out of quota (insufficient_quota)
+  "upstream_quota_exhausted",
+  // the configured endpoint answered 3xx and the gateway refuses to follow it
+  "upstream_redirect_blocked",
+] as const;
 
 export type ErrorClass =
   | "client-fault"
@@ -20,21 +33,11 @@ export type CbState = "CLOSED" | "OPEN" | "HALF_OPEN";
 
 export type ReqRejectedReason = "schema_validation" | "cost_cap_exceeded";
 
-type UpstreamAuthAlertLine = {
-  event: "operational_alert";
-  alert: "upstream_auth_failure";
-  req_id: string;
-};
+export type AlertName = (typeof ALERT_NAMES)[number];
 
-type UpstreamRedirectAlertLine = {
+type OperationalAlertLine = {
   event: "operational_alert";
-  alert: "upstream_redirect_blocked";
-  req_id: string;
-};
-
-type UpstreamQuotaAlertLine = {
-  event: "operational_alert";
-  alert: "upstream_quota_exhausted";
+  alert: AlertName;
   req_id: string;
 };
 
@@ -85,15 +88,7 @@ export interface StreamDonePayload {
   error_class: ErrorClass | null;
 }
 
-export interface UpstreamAuthAlertPayload {
-  req_id: string;
-}
-
-export interface UpstreamRedirectAlertPayload {
-  req_id: string;
-}
-
-export interface UpstreamQuotaAlertPayload {
+export interface OperationalAlertPayload {
   req_id: string;
 }
 
@@ -105,16 +100,10 @@ export interface CbStateChangePayload {
 }
 
 type MinLogger = { info: (obj: object) => void };
-type AlertMinLogger = { error: (obj: UpstreamAuthAlertLine) => void };
-type QuotaAlertMinLogger = { error: (obj: UpstreamQuotaAlertLine) => void };
-type RedirectAlertMinLogger = {
-  error: (obj: UpstreamRedirectAlertLine) => void;
-};
+type OperationalAlertMinLogger = { error: (obj: OperationalAlertLine) => void };
 
 let _firstRequestCompleted = false;
-let _upstreamAuthAlertFired = false;
-let _upstreamQuotaAlertFired = false;
-let _upstreamRedirectAlertFired = false;
+const _firedAlerts = new Set<AlertName>();
 
 export function wasColdStart(): boolean {
   return !_firstRequestCompleted;
@@ -193,72 +182,50 @@ export function emitCbStateChange(
 }
 
 /**
- * Once-per-process operator alert: the deployment's own upstream credential
- * was rejected (401). Alerts summon, events describe — later occurrences
- * stay visible via req_complete's error_class.
+ * Once-per-process operator alert, keyed by alert name: the first occurrence
+ * of each name summons the operator. Alerts summon, events describe — later
+ * occurrences stay visible via req_complete's error_class. What each name
+ * means lives on the ALERT_NAMES entries.
  */
-export function emitUpstreamAuthAlert(
-  log: AlertMinLogger,
-  payload: UpstreamAuthAlertPayload,
+export function emitOperationalAlert(
+  log: OperationalAlertMinLogger,
+  alert: AlertName,
+  payload: OperationalAlertPayload,
 ): void {
-  if (_upstreamAuthAlertFired) {
+  if (_firedAlerts.has(alert)) {
     return;
   }
 
-  _upstreamAuthAlertFired = true;
+  _firedAlerts.add(alert);
 
   log.error({
     event: "operational_alert",
-    alert: "upstream_auth_failure",
+    alert,
     ...payload,
   });
 }
 
 /**
- * Once-per-process operator alert: the deployment's upstream account ran out
- * of quota (429 insufficient_quota). Same summon-once contract as the auth
- * alert.
- *
- * Deliberate near-duplicate of emitUpstreamAuthAlert: two alerts is below the
- * abstraction threshold, and per-alert Line types keep the log allowlist
- * explicit. Generalize into a single emitter when a third alert lands.
+ * Decides which error classes summon the operator. Exhaustive on purpose: a
+ * new ErrorClass refuses to compile until it declares its alert here — an
+ * AlertName or an explicit null.
  */
-export function emitUpstreamQuotaAlert(
-  log: QuotaAlertMinLogger,
-  payload: UpstreamQuotaAlertPayload,
-): void {
-  if (_upstreamQuotaAlertFired) {
-    return;
+export function alertFor(errorClass: ErrorClass): AlertName | null {
+  switch (errorClass) {
+    case "upstream-auth-failure":
+      return "upstream_auth_failure";
+    case "upstream-quota-exhausted":
+      return "upstream_quota_exhausted";
+    case "upstream-redirect-blocked":
+      return "upstream_redirect_blocked";
+
+    case "client-fault":
+    case "gateway-fault":
+    case "upstream-fault":
+    case "upstream-retry-exhausted":
+    case "upstream-access-denied":
+      return null;
+    default:
+      return assertNever(errorClass);
   }
-
-  _upstreamQuotaAlertFired = true;
-
-  log.error({
-    event: "operational_alert",
-    alert: "upstream_quota_exhausted",
-    ...payload,
-  });
-}
-
-/**
- * Once-per-process operator alert: the configured upstream endpoint answered
- * with a redirect the gateway refuses to follow — stale endpoint config or a
- * misbehaving upstream, either way the operator's to fix. Same summon-once
- * contract as the auth and quota alerts.
- */
-export function emitUpstreamRedirectAlert(
-  log: RedirectAlertMinLogger,
-  payload: UpstreamRedirectAlertPayload,
-): void {
-  if (_upstreamRedirectAlertFired) {
-    return;
-  }
-
-  _upstreamRedirectAlertFired = true;
-
-  log.error({
-    event: "operational_alert",
-    alert: "upstream_redirect_blocked",
-    ...payload,
-  });
 }
