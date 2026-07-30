@@ -1,10 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type {
-  ReqStartPayload,
-  ReqCompletePayload,
-  StreamFirstTokenPayload,
-  StreamDonePayload,
-  CbStateChangePayload,
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import {
+  type ReqStartPayload,
+  type ReqCompletePayload,
+  type StreamFirstTokenPayload,
+  type StreamDonePayload,
+  type CbStateChangePayload,
+  ALERT_NAMES,
+  alertFor,
+  type ErrorClass,
+  type AlertName,
 } from "../../src/observability/events.js";
 
 describe("wasColdStart", () => {
@@ -226,95 +230,92 @@ describe("event emitters — field shape", () => {
   });
 });
 
-describe("emitUpstreamAuthAlert", () => {
+describe("emitOperationalAlert", () => {
   beforeEach(() => {
     vi.resetModules();
   });
 
-  it("emits exactly-once per process", async () => {
-    const { emitUpstreamAuthAlert } =
+  it.each(ALERT_NAMES)(
+    "emits exactly-once per process for %s",
+    async (alert) => {
+      const { emitOperationalAlert } =
+        await import("../../src/observability/events.js");
+
+      const errorCalls: object[] = [];
+      const mockLog = { error: (obj: object) => errorCalls.push(obj) };
+
+      emitOperationalAlert(mockLog, alert, { req_id: "r-1" });
+      emitOperationalAlert(mockLog, alert, { req_id: "r-2" });
+
+      expect(errorCalls.length).toBe(1);
+      expect(errorCalls[0]).toEqual({
+        event: "operational_alert",
+        alert,
+        req_id: "r-1",
+      });
+    },
+  );
+
+  it("emits different alerts independently", async () => {
+    const { emitOperationalAlert } =
       await import("../../src/observability/events.js");
 
     const errorCalls: object[] = [];
-    const mockLog = {
-      error: (obj: object) => {
-        errorCalls.push(obj);
-      },
-    };
+    const mockLog = { error: (obj: object) => errorCalls.push(obj) };
 
-    emitUpstreamAuthAlert(mockLog, { req_id: "r-1" });
-    emitUpstreamAuthAlert(mockLog, { req_id: "r-2" });
+    for (const alert of ALERT_NAMES) {
+      emitOperationalAlert(mockLog, alert, { req_id: `r-${alert}` });
+    }
 
-    expect(errorCalls.length).toBe(1);
-    expect(errorCalls[0]).toEqual({
-      event: "operational_alert",
-      alert: "upstream_auth_failure",
-      req_id: "r-1",
-    });
+    expect(errorCalls.length).toEqual(ALERT_NAMES.length);
+    for (const alert of ALERT_NAMES) {
+      expect(errorCalls).toContainEqual({
+        event: "operational_alert",
+        alert,
+        req_id: `r-${alert}`,
+      });
+    }
+
+    for (const alert of ALERT_NAMES) {
+      emitOperationalAlert(mockLog, alert, { req_id: `again-${alert}` });
+    }
+
+    // no re-summon: the count is frozen at one line per name
+    expect(errorCalls.length).toEqual(ALERT_NAMES.length);
   });
 });
 
-describe("emitUpstreamQuotaAlert", () => {
-  beforeEach(() => {
-    vi.resetModules();
+describe("alertFor", () => {
+  // The mapping pairs and the silent list must jointly cover ErrorClass: the
+  // type lock makes the typecheck fail whenever a future ErrorClass is left
+  // out of both, forcing every new class to declare itself summoning or
+  // silent here. Expected values are literal on purpose — a computed oracle
+  // would share its rule with the implementation.
+  const MAPPING_PAIRS = [
+    ["upstream-auth-failure", "upstream_auth_failure"],
+    ["upstream-quota-exhausted", "upstream_quota_exhausted"],
+    ["upstream-redirect-blocked", "upstream_redirect_blocked"],
+  ] as const satisfies readonly [ErrorClass, AlertName][];
+
+  const SILENT_CLASSES = [
+    "client-fault",
+    "gateway-fault",
+    "upstream-fault",
+    "upstream-retry-exhausted",
+    "upstream-access-denied",
+  ] as const satisfies readonly ErrorClass[];
+
+  type Covered =
+    | (typeof MAPPING_PAIRS)[number][0]
+    | (typeof SILENT_CLASSES)[number];
+  type Missing = Exclude<ErrorClass, Covered>;
+  expectTypeOf<Missing>().toEqualTypeOf<never>();
+
+  it.each(MAPPING_PAIRS)("maps %s to %s", (errorClass, expectedAlert) => {
+    expect(alertFor(errorClass)).toBe(expectedAlert);
   });
 
-  it("emits exactly-once per process, on its own flag independent of the auth alert", async () => {
-    const { emitUpstreamQuotaAlert, emitUpstreamAuthAlert } =
-      await import("../../src/observability/events.js");
-
-    const errorCalls: object[] = [];
-    const mockLog = {
-      error: (obj: object) => {
-        errorCalls.push(obj);
-      },
-    };
-
-    // Consuming the auth flag first must not consume the quota flag.
-    emitUpstreamAuthAlert(mockLog, { req_id: "r-0" });
-    emitUpstreamQuotaAlert(mockLog, { req_id: "r-1" });
-    emitUpstreamQuotaAlert(mockLog, { req_id: "r-2" });
-
-    expect(errorCalls.length).toBe(2);
-    expect(errorCalls[1]).toEqual({
-      event: "operational_alert",
-      alert: "upstream_quota_exhausted",
-      req_id: "r-1",
-    });
-  });
-});
-
-describe("emitUpstreamRedirectAlert", () => {
-  beforeEach(() => {
-    vi.resetModules();
-  });
-
-  it("emits exactly-once per process, on its own flag independent of the auth alert or quota alert", async () => {
-    const {
-      emitUpstreamQuotaAlert,
-      emitUpstreamAuthAlert,
-      emitUpstreamRedirectAlert,
-    } = await import("../../src/observability/events.js");
-
-    const errorCalls: object[] = [];
-    const mockLog = {
-      error: (obj: object) => {
-        errorCalls.push(obj);
-      },
-    };
-
-    // Consuming the auth flag and the quota flag first
-    // Must not consume the redirect flag.
-    emitUpstreamAuthAlert(mockLog, { req_id: "r-0" });
-    emitUpstreamQuotaAlert(mockLog, { req_id: "r-1" });
-    emitUpstreamRedirectAlert(mockLog, { req_id: "r-2" });
-    emitUpstreamRedirectAlert(mockLog, { req_id: "r-3" });
-
-    expect(errorCalls.length).toBe(3);
-    expect(errorCalls[2]).toEqual({
-      event: "operational_alert",
-      alert: "upstream_redirect_blocked",
-      req_id: "r-2",
-    });
+  it.each(SILENT_CLASSES)("stays silent for %s", (errorClass) => {
+    expect(alertFor(errorClass)).toBeNull();
   });
 });
