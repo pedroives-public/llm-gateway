@@ -84,23 +84,42 @@ async function authFailureLog(error: Error): Promise<CapturedLog> {
   return failureLog as CapturedLog;
 }
 
-// Each assertion names one thing the probe found in this line: a slice of the
-// caller's key, the database address, and PostgreSQL internals. Serializing the
-// whole record catches a value at any nesting depth, so a field moving deeper
-// into the payload cannot slip past.
-function assertAuthFailureLogIsSafe(log: CapturedLog): void {
-  const line = JSON.stringify(log);
-  expect(line).not.toContain("lkey_");
-  expect(line).not.toContain("10.255.255.1");
-  expect(line).not.toContain("parse_relation.c");
+// Pinned by the full key set, not by a list of forbidden values: a negative
+// check passes both when a value is safe and when the field is absent, so it
+// cannot prove a defence is working. Keys rather than values because time,
+// pid and reqId differ on every run.
+const EMITTED_KEYS = [
+  "cause_code",
+  "cause_name",
+  "hostname",
+  "level",
+  "msg",
+  "pid",
+  "reqId",
+  "time",
+];
+
+function assertAuthFailureLogShape(log: CapturedLog): void {
+  expect(Object.keys(log).sort()).toEqual([...EMITTED_KEYS].sort());
 }
 
 describe("auth middleware — what the DB-failure branch writes to the log", () => {
-  it("connection failure (address/port attached by the driver)", async () => {
-    assertAuthFailureLogIsSafe(await authFailureLog(CONNECTION_ERROR));
+  it("connection failure: reports the code, not the address and port", async () => {
+    const log = await authFailureLog(CONNECTION_ERROR);
+
+    assertAuthFailureLogShape(log);
+    // Naming the surviving values proves the allowlist EXTRACTS the diagnostic
+    // pair, not merely that it drops the rest: an implementation that emitted
+    // both keys as "UNKNOWN" would satisfy the shape check alone.
+    expect(log["cause_code"]).toBe("CONNECT_TIMEOUT");
+    expect(log["cause_name"]).toBe("Error");
   });
 
-  it("server-side failure (PostgresError protocol fields)", async () => {
-    assertAuthFailureLogIsSafe(await authFailureLog(SERVER_ERROR));
+  it("server-side failure: reports the SQLSTATE, not the relation or source file", async () => {
+    const log = await authFailureLog(SERVER_ERROR);
+
+    assertAuthFailureLogShape(log);
+    expect(log["cause_code"]).toBe("42P01");
+    expect(log["cause_name"]).toBe("PostgresError");
   });
 });
