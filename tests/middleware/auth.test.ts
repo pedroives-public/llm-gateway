@@ -504,6 +504,85 @@ describe("auth middleware — untrusted key bytes never reach the log stream", (
   });
 });
 
+describe("auth middleware — every log site emits the key as a digest", () => {
+  // 4.11 covers one site only, the unknown-key rejection, so a regression on
+  // any other would ship unseen: restoring the plaintext slice on the success
+  // path alone leaves the whole suite green. This walks every outcome a stored
+  // row can produce and checks the field each one emits. The invalid-plan-tier
+  // site is absent on purpose — the column refuses a value outside the enum,
+  // so reaching it needs the fake client that 4.10 builds, not this container.
+  const KEY_TRACE = /^[0-9a-f]{8}$/; // mirrors the digest length in auth.ts
+
+  it("4.12 emits a digest on every auth outcome a stored row can reach", async () => {
+    const capture = makeLogCapture();
+    const loggedApp = Fastify({ logger: capture.logger });
+    loggedApp.decorate("db", db);
+    loggedApp.decorateRequest("tenantId", null);
+    loggedApp.decorateRequest("planTier", null);
+
+    await loggedApp.register(async (scope) => {
+      scope.addHook("onRequest", authPreHandler);
+      scope.get("/protected", async () => ({ ok: true }));
+    });
+
+    await loggedApp.ready();
+
+    const call = async (key: string): Promise<number> => {
+      const res = await loggedApp.inject({
+        method: "GET",
+        url: "/protected",
+        headers: { authorization: `Bearer ${key}` },
+      });
+      return res.statusCode;
+    };
+
+    const seedKeyFor = async (
+      tenantStatus: "active" | "suspended",
+    ): Promise<string> => {
+      const tenantId = randomUUID();
+      await db.insert(tenants).values({
+        id: tenantId,
+        name: "T",
+        status: tenantStatus,
+        planTier: "free",
+      });
+      const key = freshKey();
+      await db.insert(apiKeys).values({
+        id: randomUUID(),
+        tenantId,
+        hashValue: hmacDigest(key),
+        status: "active",
+      });
+      return key;
+    };
+
+    // The status codes are load-bearing: each one names the branch the request
+    // took, so a middleware change that collapsed two paths into one would be
+    // caught here rather than silently shrinking what the loop below inspects.
+    expect(await call(freshKey())).toBe(401);
+    expect(await call(await seedKeyFor("suspended"))).toBe(401);
+    expect(await call(await seedKeyFor("active"))).toBe(200);
+
+    await loggedApp.close();
+
+    const authLines = capture.logs.filter(
+      (log) => log["msg"] === "Auth rejected" || log["msg"] === "Auth succeeded",
+    );
+
+    // The count guards the loop: a middleware that stopped logging altogether
+    // would satisfy an empty forEach without emitting anything.
+    expect(authLines).toHaveLength(3);
+    authLines.forEach((line) => {
+      expect(line["keyTrace"]).toMatch(KEY_TRACE);
+    });
+
+    // A net, not the assertion: the checks above prove the shape of the field
+    // this test knows about, while this one covers key material reaching some
+    // other field that no case here enumerates.
+    expect(JSON.stringify(capture.logs)).not.toContain("lkey_");
+  });
+});
+
 describe("GET /health — auth middleware does not apply", () => {
   it("4.9 returns 200 without Authorization header", async () => {
     const { healthRoute } = await import("../../src/routes/health.js");
