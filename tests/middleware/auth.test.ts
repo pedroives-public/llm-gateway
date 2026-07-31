@@ -445,15 +445,18 @@ describe("auth middleware — DB-backed verification", () => {
   });
 });
 
-describe("auth middleware — untrusted key bytes reaching the log stream", () => {
-  // The length gate accepts any 48-char key, so the 8 characters that follow
-  // the lkey_ prefix are attacker-controlled and land in the log through the
-  // 13-char keyPrefix slice. NDJSON is newline-delimited, so an unescaped
-  // newline plus a brace would let a caller forge a log record.
+describe("auth middleware — untrusted key bytes never reach the log stream", () => {
+  // The length gate accepts any 48-char key, so the characters following the
+  // lkey_ prefix are attacker-controlled. NDJSON is newline-delimited, so an
+  // unescaped newline plus a brace would let a caller forge a log record. The
+  // key now reaches the log only as an HMAC digest, whose alphabet cannot
+  // carry either metacharacter, so the forgery is refused by the shape of the
+  // value rather than by correct escaping of a dangerous one.
   const INJECTED = '"}\n{"xyz';
   const ACCEPTED_KEY_LENGTH = 48; // mirrors the length gate in auth.ts
+  const KEY_TRACE = /^[0-9a-f]{8}$/; // mirrors the digest length in auth.ts
 
-  it("4.11 escapes NDJSON metacharacters carried by the key prefix", async () => {
+  it("4.11 logs the key only as a hex digest, so injected metacharacters never reach the stream", async () => {
     const capture = makeLogCapture();
     const loggedApp = Fastify({ logger: capture.logger });
     loggedApp.decorate("db", db);
@@ -484,13 +487,19 @@ describe("auth middleware — untrusted key bytes reaching the log stream", () =
       (log) => log["msg"] === "Auth rejected",
     );
 
-    // Load-bearing on both sides: keyPrefix present proves the bytes reached
-    // the serializer (a key rejected before line 55 would leave the stream
-    // clean for the wrong reason), and the exact match proves they survived as
-    // data. Every captured line was JSON.parse'd by the capture helper, so a
-    // forged record would have surfaced as a parse failure or an extra entry.
+    // Exactly one rejection proves the key passed the length gate and was
+    // rejected by the lookup, so the request travelled the path that logs it.
     expect(rejections).toHaveLength(1);
-    expect(rejections[0]?.["keyPrefix"]).toBe(`lkey_${INJECTED}...`);
+
+    // The anchors carry this assertion. Unanchored, the pattern would also
+    // accept a value that merely CONTAINS hex, which the injected key does in
+    // its 35-character tail — the check would pass with both metacharacters
+    // still present. Anchored, it admits nothing outside the digest alphabet,
+    // and neither metacharacter belongs to it.
+    expect(rejections[0]?.["keyTrace"]).toMatch(KEY_TRACE);
+
+    // Every captured line was JSON.parse'd by the capture helper, so a forged
+    // record would have surfaced as a parse failure or an extra entry.
     expect(capture.logs.some((log) => "xyz" in log)).toBe(false);
   });
 });
