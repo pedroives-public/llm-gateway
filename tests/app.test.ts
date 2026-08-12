@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import type { DrizzleClient } from "../src/db/client.js";
 import { fakeAuthDb } from "./helpers/fake-auth-db.js";
+import { HTTP_SERVER_OPTIONS } from "../src/config.js";
 
 describe("buildApp — pepper boot validation", () => {
   let savedPepper: string | undefined;
@@ -273,5 +274,27 @@ describe("buildApp — protected scope integration", () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe("buildApp — inbound timeout pins", () => {
+  it("sets requestTimeout=20s and headersTimeout=10s on the live server", async () => {
+    const fakeDb = {} as DrizzleClient;
+    const app = await buildApp({ logger: false, db: fakeDb });
+
+    try {
+      const requestTimeout = app.server.requestTimeout;
+      const headersTimeout = app.server.headersTimeout;
+
+      expect(requestTimeout).toBe(20_000);
+      expect(headersTimeout).toBe(10_000);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("pins connectionsCheckingInterval=5s in the constant — no runtime readback exists", () => {
+    // Node.js does not expose a runtime readback for connectionsCheckingInterval, so we assert the constant value directly.
+    expect(HTTP_SERVER_OPTIONS.connectionsCheckingInterval).toBe(5_000);
   });
 });

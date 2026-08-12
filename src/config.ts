@@ -1,5 +1,16 @@
 const KNOWN_DEFAULT_PEPPERS = new Set(["change-me-min-32-chars-recommended"]);
 
+// Inbound time budget. Request cap: 20s = the 256 KiB body limit at a 256 kbps
+// committed-bandwidth floor (8s) with 2x margin; headers (~1 KiB): 10s. Node
+// enforces both via a periodic sweep — a 5s interval bounds the worst-case kill
+// at 25s, under the 30s handler wall-clock, so an upload never outlives its
+// slot. requestTimeout is a top-level Fastify option; the rest createServer-only.
+export const REQUEST_TIMEOUT_MS = 20_000;
+export const HTTP_SERVER_OPTIONS = {
+  headersTimeout: 10_000,
+  connectionsCheckingInterval: 5_000,
+} as const;
+
 export function getOpenAIApiKey(): string {
   const key = process.env["OPENAI_API_KEY"];
   if (!key) {
