@@ -7,7 +7,13 @@ import { createCircuitBreaker } from "./reliability/circuit-breaker.js";
 import { createOpenAIClient } from "./upstream/openai.js";
 import { authPreHandler } from "./middleware/auth.js";
 import { createDb, type DrizzleClient } from "./db/client.js";
-import { getPepper, getOpenAIApiKey, getOpenAIBaseUrl } from "./config.js";
+import {
+  getPepper,
+  getOpenAIApiKey,
+  getOpenAIBaseUrl,
+  REQUEST_TIMEOUT_MS,
+  HTTP_SERVER_OPTIONS,
+} from "./config.js";
 
 interface BuildAppOptions {
   logger?: boolean | Record<string, unknown>;
@@ -28,7 +34,10 @@ export async function buildApp(
     level: process.env["LOG_LEVEL"] ?? "info",
     transport:
       nodeEnv === "development"
-        ? { target: "pino-pretty", options: { translateTime: "HH:mm:ss.l", ignore: "pid,hostname" } }
+        ? {
+            target: "pino-pretty",
+            options: { translateTime: "HH:mm:ss.l", ignore: "pid,hostname" },
+          }
         : nodeEnv === "production"
           ? { target: "pino/file", options: { destination: 1 } }
           : undefined,
@@ -45,7 +54,11 @@ export async function buildApp(
     );
   }
 
-  const app = Fastify({ logger: resolvedLogger });
+  const app = Fastify({
+    logger: resolvedLogger,
+    requestTimeout: REQUEST_TIMEOUT_MS,
+    http: HTTP_SERVER_OPTIONS,
+  });
 
   let db: DrizzleClient;
   let closeDb: (() => Promise<void>) | undefined;
