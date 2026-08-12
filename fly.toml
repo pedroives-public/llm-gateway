@@ -20,6 +20,15 @@ primary_region = 'gru'
   min_machines_running = 0
   processes = ['app']
 
+  # Edge backstop for process memory: floor(117 MiB available / 2.4 MiB per
+  # in-flight buffered request) = 48. App-level gates reject first (41 post-auth);
+  # the edge only interferes at full peak. soft_limit sized just under the
+  # post-auth gate so a future 2nd machine receives spillover before any refusal.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 40
+    hard_limit = 48
+
   [[http_service.checks]]
     grace_period = '10s'
     interval = '15s'
