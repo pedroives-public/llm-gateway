@@ -15,6 +15,7 @@ import {
   REQUEST_TIMEOUT_MS,
   HTTP_SERVER_OPTIONS,
   ADMISSION_CAPACITY_POST_AUTH,
+  ADMISSION_CAPACITY_PRE_AUTH,
 } from "./config.js";
 import {
   createAdmissionGate,
@@ -24,7 +25,8 @@ import {
 interface BuildAppOptions {
   logger?: boolean | Record<string, unknown>;
   db?: DrizzleClient;
-  admissionGate?: AdmissionGate;
+  admissionGatePre?: AdmissionGate;
+  admissionGatePost?: AdmissionGate;
   registerProtected?: (scope: FastifyInstance) => Promise<void>;
 }
 
@@ -98,12 +100,15 @@ export async function buildApp(
   await app.register(healthRoute);
 
   await app.register(async (scope) => {
-    scope.addHook("onRequest", authPreHandler);
-    registerAdmission(
-      scope,
-      options.admissionGate ??
+    registerAdmission(scope, {
+      preGate:
+        options.admissionGatePre ??
+        createAdmissionGate(ADMISSION_CAPACITY_PRE_AUTH),
+      postGate:
+        options.admissionGatePost ??
         createAdmissionGate(ADMISSION_CAPACITY_POST_AUTH),
-    );
+      authenticate: authPreHandler,
+    });
     // Rate-limiter preHandler insertion point (added in a later slice).
     if (options.registerProtected) {
       await options.registerProtected(scope);
