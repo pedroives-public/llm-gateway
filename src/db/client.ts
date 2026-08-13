@@ -3,7 +3,12 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import * as schema from "./schema.js";
 
-const DEFAULT_DB_STATEMENT_TIMEOUT_MS = 2000;
+// K_pre derivation inputs (see ADMISSION_CAPACITY_PRE_AUTH in config.ts),
+// pinned by tests/reliability/admission-derivation-pin.test.ts: changing
+// either re-opens that derivation. max is explicit so the input lives in
+// this repo, not in a library default a version bump can move.
+export const DEFAULT_DB_STATEMENT_TIMEOUT_MS = 2000;
+export const DB_POOL_MAX = 10;
 
 function resolveDbStatementTimeoutMs(): number {
   const rawTimeout = process.env["GATEWAY_DB_STATEMENT_TIMEOUT_MS"];
@@ -37,6 +42,7 @@ export interface CreatedDb {
 // which would include HMAC hash values on auth queries.
 export function createDb(connectionString: string): CreatedDb {
   const client = postgres(connectionString, {
+    max: DB_POOL_MAX,
     connection: {
       statement_timeout: resolveDbStatementTimeoutMs(),
     },
