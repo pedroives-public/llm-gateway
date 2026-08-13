@@ -25,8 +25,9 @@ describe("pre-auth capacity derivation pin", () => {
   it("K_pre equals the derivation recomputed from its inputs", () => {
     const memoryBound = Math.floor((19 * MiB) / (1.38 * MiB));
     // occupancy = throughput x residence: (pool / statement_timeout) x T_pre_max
-    const drainChainBound =
-      DB_POOL_MAX * (T_PRE_MAX_MS / DEFAULT_DB_STATEMENT_TIMEOUT_MS);
+    const drainChainBound = Math.floor(
+      DB_POOL_MAX * (T_PRE_MAX_MS / DEFAULT_DB_STATEMENT_TIMEOUT_MS),
+    );
     const K_pre_derivedCapacity = Math.min(memoryBound, drainChainBound);
     expect(ADMISSION_CAPACITY_PRE_AUTH).toEqual(K_pre_derivedCapacity);
   });
