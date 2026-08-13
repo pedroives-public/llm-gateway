@@ -419,7 +419,16 @@ describe("admission wiring — protected scope", () => {
 
       await parkedSignal;
       req.destroy();
-      await releasedSignal;
+
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const failSafe = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error("the aborted request never released its slot"));
+        }, 2500);
+      });
+
+      await Promise.race([releasedSignal, failSafe]);
+      clearTimeout(timer);
 
       const secondRequest = await app.inject({
         method: "GET",
