@@ -6,6 +6,7 @@ import { proxyRoute } from "./routes/proxy.js";
 import { createCircuitBreaker } from "./reliability/circuit-breaker.js";
 import { createOpenAIClient } from "./upstream/openai.js";
 import { authPreHandler } from "./middleware/auth.js";
+import { registerAdmission } from "./middleware/admission.js";
 import { createDb, type DrizzleClient } from "./db/client.js";
 import {
   getPepper,
@@ -13,11 +14,17 @@ import {
   getOpenAIBaseUrl,
   REQUEST_TIMEOUT_MS,
   HTTP_SERVER_OPTIONS,
+  ADMISSION_CAPACITY_POST_AUTH,
 } from "./config.js";
+import {
+  createAdmissionGate,
+  type AdmissionGate,
+} from "./reliability/admission-gate.js";
 
 interface BuildAppOptions {
   logger?: boolean | Record<string, unknown>;
   db?: DrizzleClient;
+  admissionGate?: AdmissionGate;
   registerProtected?: (scope: FastifyInstance) => Promise<void>;
 }
 
@@ -78,6 +85,7 @@ export async function buildApp(
   app.decorateRequest("tenantId", null);
   app.decorateRequest("planTier", null);
   app.decorateRequest("reqId", "");
+  app.decorateRequest("releaseSlot", null);
   app.addHook("onRequest", async (request) => {
     request.reqId = uuidv7();
   });
@@ -91,6 +99,11 @@ export async function buildApp(
 
   await app.register(async (scope) => {
     scope.addHook("onRequest", authPreHandler);
+    registerAdmission(
+      scope,
+      options.admissionGate ??
+        createAdmissionGate(ADMISSION_CAPACITY_POST_AUTH),
+    );
     // Rate-limiter preHandler insertion point (added in a later slice).
     if (options.registerProtected) {
       await options.registerProtected(scope);

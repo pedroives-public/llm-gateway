@@ -11,6 +11,11 @@ export const HTTP_SERVER_OPTIONS = {
   connectionsCheckingInterval: 5_000,
 } as const;
 
+// Post-auth admission capacity: floor(117 MiB operational MemAvailable on the
+// deploy target x 0.85 safety factor / 2.4 MiB per in-flight buffered request).
+// The Fly edge hard_limit (48) is the blind backstop sitting above this gate.
+export const ADMISSION_CAPACITY_POST_AUTH = 41;
+
 export function getOpenAIApiKey(): string {
   const key = process.env["OPENAI_API_KEY"];
   if (!key) {

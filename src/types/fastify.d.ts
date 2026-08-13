@@ -6,6 +6,7 @@ declare module "fastify" {
     tenantId: string | null;
     planTier: import("../db/schema.ts").PlanTier | null;
     reqId: string;
+    releaseSlot: import("../reliability/admission-gate.ts").ReleaseSlot | null;
   }
 }
 
