@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { randomBytes, randomUUID } from "node:crypto";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import type { AdmissionGate } from "../../src/reliability/admission-gate.js";
 import { buildApp } from "../../src/app.js";
 import { fakeAuthDb } from "../helpers/fake-auth-db.js";
 import { createAdmissionGate } from "../../src/reliability/admission-gate.js";
@@ -346,6 +349,87 @@ describe("admission wiring — protected scope", () => {
         expect(res.statusCode).toBe(200);
       }
     } finally {
+      await app.close();
+    }
+  });
+
+  it("releases the slot when the client aborts mid-flight", async () => {
+    const tenantId = randomUUID();
+    const apiKey = `lkey_${randomBytes(32).toString("base64url")}`;
+    const fakeDb = fakeAuthDb(tenantId);
+
+    let open!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+
+    let signalParked!: () => void;
+    const parkedSignal = new Promise<void>((resolve) => {
+      signalParked = resolve;
+    });
+
+    let signalReleased!: () => void;
+    const releasedSignal = new Promise<void>((resolve) => {
+      signalReleased = resolve;
+    });
+
+    const gate = createAdmissionGate(1);
+    const spyGate: AdmissionGate = {
+      tryAcquire() {
+        const releaseSlot = gate.tryAcquire();
+        if (releaseSlot === null) {
+          return null;
+        }
+
+        return () => {
+          releaseSlot();
+          signalReleased();
+        };
+      },
+    };
+
+    let entries = 0;
+    const app = await buildApp({
+      logger: false,
+      db: fakeDb,
+      admissionGate: spyGate,
+      registerProtected: async (scope) => {
+        scope.get("/probe", async () => {
+          entries++;
+          if (entries === 1) {
+            signalParked();
+            await parked;
+          }
+          return { ok: true };
+        });
+      },
+    });
+
+    try {
+      await app.listen({ port: 0, host: "127.0.0.1" });
+      const { port } = app.server.address() as AddressInfo;
+      const req = http.request({
+        host: "127.0.0.1",
+        port,
+        path: "/probe",
+        headers: { authorization: `Bearer ${apiKey}` },
+      });
+      req.on("error", () => {});
+      req.end();
+
+      await parkedSignal;
+      req.destroy();
+      await releasedSignal;
+
+      const secondRequest = await app.inject({
+        method: "GET",
+        url: "/probe",
+        headers: { authorization: `Bearer ${apiKey}` },
+      });
+
+      expect(secondRequest.statusCode).toBe(200);
+    } finally {
+      open();
       await app.close();
     }
   });
