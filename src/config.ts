@@ -16,6 +16,12 @@ export const HTTP_SERVER_OPTIONS = {
 // The Fly edge hard_limit (48) is the blind backstop sitting above this gate.
 export const ADMISSION_CAPACITY_POST_AUTH = 41;
 
+// Pre-auth admission capacity: min of socket-buffer headroom (floor(19 MiB
+// spare / 1.38 MiB tcp_rmem max) = 13) and the auth-phase drain chain
+// (10 DB connections / 2 s statement_timeout x 2 s residence = 10, binds).
+// Inputs pinned by tests/reliability/admission-derivation-pin.test.ts.
+export const ADMISSION_CAPACITY_PRE_AUTH = 10;
+
 export function getOpenAIApiKey(): string {
   const key = process.env["OPENAI_API_KEY"];
   if (!key) {
