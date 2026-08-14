@@ -82,7 +82,7 @@ jobs:
         run: |
           key="lkey_$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
           body=$(mktemp)
-          code=$(curl -s -o "$body" -w '%{http_code}' --max-time 30 \
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 30 \
             -X POST "$APP_URL/v1/chat/completions" \
             -H "authorization: Bearer $key" \
             -H "content-type: application/json" \
