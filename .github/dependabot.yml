@@ -12,6 +12,12 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # Types must match the Node runtime, which is pinned to 22 (the
+      # outbound fetch relies on dispatcher behavior verified on Node 22).
+      # A runtime upgrade is a deliberate decision, never a routine bump.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -22,3 +28,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # Same reason as @types/node above: the base image major is the Node
+      # runtime version itself.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
