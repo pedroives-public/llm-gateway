@@ -59,8 +59,10 @@ jobs:
 
       # Post-deploy proof of boot. With auto-stop machines, a successful
       # `flyctl deploy` does not prove the app boots: a stopped machine can
-      # mask a crash loop. Proof = a real request that wakes the machine and
-      # gets answered, plus the server's listen line in the logs.
+      # mask a crash loop. Proof = live requests answered by the machines this
+      # deploy just placed in service. Log reads are not used as gates: log
+      # history is uncorrelated with this release, and ingestion lag makes an
+      # empty read meaningless.
       - name: "Smoke: /health answers 200"
         run: |
           for attempt in $(seq 1 10); do
@@ -74,23 +76,19 @@ jobs:
 
       # A well-formed key nobody owns exercises the full auth path (prefix and
       # length gates, then HMAC + database lookup). 32 random bytes, base64url:
-      # the exact key shape the gateway expects. Expected outcome is 401.
+      # the exact key shape the gateway expects. Asserting status AND exact
+      # body proves the rejection came from the gateway's auth lane.
       - name: "Smoke: well-formed unknown key is rejected with 401"
         run: |
           key="lkey_$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+          body=$(mktemp)
+          code=$(curl -s -o "$body" -w '%{http_code}' --max-time 30 \
             -X POST "$APP_URL/v1/chat/completions" \
             -H "authorization: Bearer $key" \
             -H "content-type: application/json" \
             -d '{"model":"smoke","messages":[{"role":"user","content":"smoke"}]}')
-          if [ "$code" != "401" ]; then
-            echo "FAIL: expected 401, got '$code'"
-            exit 1
-          fi
-
-      - name: "Smoke: listen line present in logs"
-        run: |
-          if ! flyctl logs -a "$APP_NAME" --no-tail | grep -F "Server listening at"; then
-            echo "FAIL: no listen line in recent logs"
+          if [ "$code" != "401" ] || [ "$(cat "$body")" != '{"error":"Unauthorized"}' ]; then
+            echo "FAIL: expected 401 with the auth envelope, got '$code' with body:"
+            cat "$body"
             exit 1
           fi
