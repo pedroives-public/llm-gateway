@@ -1,0 +1,24 @@
+# Weekly dependency updates. npm minor/patch arrive grouped in one PR;
+# majors come alone. github-actions bumps the commit-SHA pins in ci.yml.
+# docker tracks the base image in the Dockerfile.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
