@@ -17,6 +17,7 @@ Alerts covered:
 - [`upstream_auth_failure`](#upstream_auth_failure)
 - [`upstream_quota_exhausted`](#upstream_quota_exhausted)
 - [`upstream_redirect_blocked`](#upstream_redirect_blocked)
+- [`auth_db_cause_unknown`](#auth_db_cause_unknown)
 
 ---
 
@@ -229,3 +230,67 @@ is refusing auth as expected). Then send one real request through the
 gateway and confirm `200` plus a quiet log: after the restart the alert is
 re-armed, so a correctly configured deployment emits no new
 `operational_alert`.
+
+---
+
+## auth_db_cause_unknown
+
+**Alert line**
+
+```json
+{"level":50,"event":"operational_alert","alert":"auth_db_cause_unknown","req_id":"..."}
+```
+
+**Impact**
+
+None beyond the failure already underway: requests on this branch were
+already answering `503 {"error":"Service Unavailable"}` (auth DB failure).
+The alert marks a **visibility** gap, not a new outage: at least one auth DB
+failure occurred whose cause the log vocabulary could not identify, so the
+operator cannot tell from the logs WHY auth is failing. Later occurrences of
+the same form stay visible as `Auth DB lookup failed` lines carrying
+`UNKNOWN` fields.
+
+**Meaning**
+
+The auth DB catch logs only the `{cause_code, cause_name}` pair extracted
+from the thrown error (an allowlist — driver detail like addresses, protocol
+fields and stacks is deliberately dropped). This alert means the extraction
+came back with `UNKNOWN` in at least one field: the error's shape is outside
+the vocabulary. The signal is the classification miss itself — there is no
+ErrorClass on this branch, so the catch summons the operator directly. Once
+per process; the intended lifecycle is the natural cycle: extend the
+vocabulary → deploy → fresh process → any remaining unknown form re-alerts.
+
+**Diagnosis**
+
+Start from the adjacent failure line — same `reqId`, msg
+`Auth DB lookup failed` — and read what did survive extraction:
+
+- one field known, the other `UNKNOWN`: the partial identity narrows the
+  family (an SQLSTATE such as `57014` without a name still says
+  "server-side statement timeout").
+- both `UNKNOWN`: the throw did not carry `code`/`name` strings at all —
+  suspect a non-driver throw on the query path.
+
+Correlate the timestamp with what changed around it: a driver or ORM bump
+in a recent deploy (new error shape), a database provider incident window
+(status page), or a new code path touching the auth query. The log
+deliberately carries no further driver detail, so to see the full shape
+reproduce the suspected condition locally (testcontainer or probe script)
+rather than fishing in production.
+
+**Fix**
+
+Extend the vocabulary: teach `authDbCause` (`src/middleware/auth.ts`) the
+observed shape, transcribing it field-for-field into a pinned test the way
+`tests/middleware/auth-log-leak.test.ts` pins the connection and server
+shapes. Deploy.
+
+**Verify**
+
+After the deploy, the same failure condition must produce an
+`Auth DB lookup failed` line with both fields identified. A new
+`auth_db_cause_unknown` alert after the vocabulary extension is the natural
+cycle working, not a regression: another unknown form remains — repeat the
+loop for it.

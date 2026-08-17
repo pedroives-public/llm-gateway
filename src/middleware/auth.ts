@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { apiKeys, planTierValues, tenants } from "../db/schema.js";
 import type { PlanTier } from "../db/schema.js";
 import { getPepper } from "../config.js";
+import { emitOperationalAlert } from "../observability/events.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
 const PEPPER = getPepper();
@@ -152,7 +153,16 @@ export async function authPreHandler(
       "Auth succeeded",
     );
   } catch (error) {
-    request.log.error(authDbCause(error), "Auth DB lookup failed");
+    const cause = authDbCause(error);
+    request.log.error(cause, "Auth DB lookup failed");
+    if (cause.cause_code === "UNKNOWN" || cause.cause_name === "UNKNOWN") {
+      // A shape the vocabulary cannot identify must summon the operator. The
+      // summoning door here is the named site, not an ErrorClass: auth DB
+      // failures answer 503 without entering the proxy's classification.
+      emitOperationalAlert(request.log, "auth_db_cause_unknown", {
+        req_id: request.reqId,
+      });
+    }
     serviceUnavailable(reply);
     return;
   }
