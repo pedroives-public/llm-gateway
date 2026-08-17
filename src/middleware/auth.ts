@@ -3,13 +3,29 @@ import { eq } from "drizzle-orm";
 import { apiKeys, planTierValues, tenants } from "../db/schema.js";
 import type { PlanTier } from "../db/schema.js";
 import { getPepper } from "../config.js";
-import { emitOperationalAlert } from "../observability/events.js";
+import {
+  emitEpisodeAlert,
+  emitOperationalAlert,
+} from "../observability/events.js";
+import { createAuthDbEpisodeDetector } from "../observability/auth-db-episode.js";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
 const PEPPER = getPepper();
 
 const KEY_TRACE_LENGTH = 8;
 const API_KEY_LENGTH = 48; // lkey_ (5) + 43 base64url chars (32 random bytes)
+
+// Provisional values: the derivation from the cold-wake probe series replaces
+// them before this branch merges.
+export const AUTH_DB_EPISODE_THRESHOLD = 3;
+export const AUTH_DB_EPISODE_WINDOW_MS = 60_000;
+
+// Process-wide: episodes span requests. Fed with performance.now() — the
+// window math needs a monotonic clock, and Date.now() jumps under NTP.
+const dbEpisodeDetector = createAuthDbEpisodeDetector({
+  threshold: AUTH_DB_EPISODE_THRESHOLD,
+  windowMs: AUTH_DB_EPISODE_WINDOW_MS,
+});
 
 type AuthDbCause = { cause_code: string; cause_name: string };
 
@@ -107,6 +123,9 @@ export async function authPreHandler(
       .where(eq(apiKeys.hashValue, apiKeyHashValue))
       .limit(1);
 
+    // The lookup answered: recovery evidence, whatever the auth outcome.
+    dbEpisodeDetector.recordSuccess(performance.now());
+
     if (!findKey || findKey.apiKeyStatus !== "active") {
       request.log.warn(
         { keyTrace: keyTraceValue, reason: "unauthorized" },
@@ -160,6 +179,13 @@ export async function authPreHandler(
       // summoning door here is the named site, not an ErrorClass: auth DB
       // failures answer 503 without entering the proxy's classification.
       emitOperationalAlert(request.log, "auth_db_cause_unknown", {
+        req_id: request.reqId,
+      });
+    }
+    // Every failure feeds the detector, unfiltered — protection lives in the
+    // threshold. True is the closed→open transition: the episode's one summons.
+    if (dbEpisodeDetector.recordFailure(performance.now())) {
+      emitEpisodeAlert(request.log, "auth_db_unavailable", {
         req_id: request.reqId,
       });
     }

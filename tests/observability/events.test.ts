@@ -6,6 +6,7 @@ import {
   type StreamDonePayload,
   type CbStateChangePayload,
   ALERT_NAMES,
+  EPISODE_ALERT_NAMES,
   alertFor,
   type ErrorClass,
   type AlertName,
@@ -282,6 +283,39 @@ describe("emitOperationalAlert", () => {
 
     // no re-summon: the count is frozen at one line per name
     expect(errorCalls.length).toEqual(ALERT_NAMES.length);
+  });
+});
+
+describe("emitEpisodeAlert", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it("emits on every call: the caller's episode state is the dedup", async () => {
+    const { emitEpisodeAlert } =
+      await import("../../src/observability/events.js");
+
+    const errorCalls: object[] = [];
+    const mockLog = { error: (obj: object) => errorCalls.push(obj) };
+
+    emitEpisodeAlert(mockLog, "auth_db_unavailable", { req_id: "r-1" });
+    emitEpisodeAlert(mockLog, "auth_db_unavailable", { req_id: "r-2" });
+
+    expect(
+      errorCalls,
+      "a repeated episode alert was swallowed: per-episode names must not pass through the once-per-process set",
+    ).toEqual([
+      { event: "operational_alert", alert: "auth_db_unavailable", req_id: "r-1" },
+      { event: "operational_alert", alert: "auth_db_unavailable", req_id: "r-2" },
+    ]);
+  });
+
+  it("episode names and once-per-process names never overlap", () => {
+    // A name in both lists would carry two contradictory dedup semantics.
+    const overlap = EPISODE_ALERT_NAMES.filter((name) =>
+      (ALERT_NAMES as readonly string[]).includes(name),
+    );
+    expect(overlap).toEqual([]);
   });
 });
 
