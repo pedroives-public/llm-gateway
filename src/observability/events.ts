@@ -11,6 +11,9 @@ export const ALERT_NAMES = [
   "upstream_quota_exhausted",
   // the configured endpoint answered 3xx and the gateway refuses to follow it
   "upstream_redirect_blocked",
+  // the auth DB catch saw an error whose shape the cause vocabulary cannot
+  // identify (cause_code or cause_name fell back to UNKNOWN)
+  "auth_db_cause_unknown",
 ] as const;
 
 export type ErrorClass =
@@ -209,6 +212,11 @@ export function emitOperationalAlert(
  * Decides which error classes summon the operator. Exhaustive on purpose: a
  * new ErrorClass refuses to compile until it declares its alert here — an
  * AlertName or an explicit null.
+ *
+ * This mapping is one of two summoning doors: a named site may call
+ * emitOperationalAlert directly when its signal is not an ErrorClass — the
+ * first such site is the auth DB catch's vocabulary miss
+ * (auth_db_cause_unknown).
  */
 export function alertFor(errorClass: ErrorClass): AlertName | null {
   switch (errorClass) {
