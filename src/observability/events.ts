@@ -16,6 +16,13 @@ export const ALERT_NAMES = [
   "auth_db_cause_unknown",
 ] as const;
 
+// Per-episode alert names, disjoint from ALERT_NAMES: dedup is the caller's
+// episode state (closed→open transition), never the once-per-process set.
+export const EPISODE_ALERT_NAMES = [
+  // auth DB unavailability: failures crossed the threshold inside the window
+  "auth_db_unavailable",
+] as const;
+
 export type ErrorClass =
   | "client-fault"
   | "gateway-fault"
@@ -38,9 +45,11 @@ export type ReqRejectedReason = "schema_validation" | "cost_cap_exceeded";
 
 export type AlertName = (typeof ALERT_NAMES)[number];
 
+export type EpisodeAlertName = (typeof EPISODE_ALERT_NAMES)[number];
+
 type OperationalAlertLine = {
   event: "operational_alert";
-  alert: AlertName;
+  alert: AlertName | EpisodeAlertName;
   req_id: string;
 };
 
@@ -206,6 +215,19 @@ export function emitOperationalAlert(
     alert,
     ...payload,
   });
+}
+
+/**
+ * Per-episode operator alert: logs on EVERY call — dedup lives in the
+ * caller's episode detector, so a new episode may summon again in the same
+ * process (the once-per-process set would swallow it).
+ */
+export function emitEpisodeAlert(
+  log: OperationalAlertMinLogger,
+  alert: EpisodeAlertName,
+  payload: OperationalAlertPayload,
+): void {
+  log.error({ event: "operational_alert", alert, ...payload });
 }
 
 /**

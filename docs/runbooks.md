@@ -1,7 +1,8 @@
 # Operational Runbooks
 
-One entry per `operational_alert` name. Each alert fires **once per process**
-(first occurrence after a deploy/restart); later occurrences of the same
+One entry per `operational_alert` name. Most alerts fire **once per process**
+(first occurrence after a deploy/restart) — `auth_db_unavailable` fires once
+per **episode** instead (its entry explains); later occurrences of the same
 condition stay visible through per-request events — each entry's **Impact**
 describes the exact steady state, because for alerts that open the breaker
 most later lines carry the breaker's fast-fail shape, not this alert's
@@ -18,6 +19,7 @@ Alerts covered:
 - [`upstream_quota_exhausted`](#upstream_quota_exhausted)
 - [`upstream_redirect_blocked`](#upstream_redirect_blocked)
 - [`auth_db_cause_unknown`](#auth_db_cause_unknown)
+- [`auth_db_unavailable`](#auth_db_unavailable)
 
 ---
 
@@ -294,3 +296,57 @@ After the deploy, the same failure condition must produce an
 `auth_db_cause_unknown` alert after the vocabulary extension is the natural
 cycle working, not a regression: another unknown form remains — repeat the
 loop for it.
+
+---
+
+## auth_db_unavailable
+
+**Alert line**
+
+```json
+{"level":50,"event":"operational_alert","alert":"auth_db_unavailable","req_id":"..."}
+```
+
+**Impact**
+
+An episode of auth DB unavailability is underway: failures crossed the
+episode threshold inside its window. While the DB keeps failing, every
+request on the auth path answers `503 {"error":"Service Unavailable"}` — the
+gateway is down for all tenants even though the process itself is healthy
+(`/health` still answers).
+
+**Meaning**
+
+Unlike the other alerts, this one fires once per **episode**, not once per
+process. The detector opens an episode when failures cross the threshold
+inside the trailing window; only a successful auth DB lookup closes it —
+quiet periods close nothing. A second alert in the same process is a NEW
+episode after a recovery, not a duplicate. After a restart the alert may
+repeat for the same outage: at-least-once semantics, because episode state
+lives in memory — the DB being monitored cannot be its own alert store.
+
+**Diagnosis**
+
+The per-failure lines say WHY. Read the adjacent `Auth DB lookup failed`
+lines' `{cause_code, cause_name}`:
+
+- connection-class codes (e.g. `CONNECT_TIMEOUT`): the database is
+  unreachable — provider outage or endpoint/connection-string drift. Check
+  the provider status page and recent config changes.
+- `57014` (server-side statement timeout): the DB is reachable but not
+  answering inside `statement_timeout` — suspect provider degradation or
+  lock contention.
+- `UNKNOWN` fields: see [`auth_db_cause_unknown`](#auth_db_cause_unknown) —
+  both alerts can fire during the same episode.
+
+**Fix**
+
+Cause-dependent: provider incident → follow the provider's status/failover
+path; endpoint or credential drift → fix the deployment config and redeploy;
+sustained timeouts with a healthy provider → investigate DB load.
+
+**Verify**
+
+Auth traffic answers again (200/401 instead of 503) and the failure lines
+stop. A later `auth_db_unavailable` line is a NEW episode — treat it as a
+fresh incident, not noise from this one.
