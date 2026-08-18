@@ -626,6 +626,35 @@ describe("proxy route — error desk (scoped setErrorHandler)", () => {
     }
   });
 
+  it("400 null/empty `model` → code model_empty, no upstream call", async () => {
+    let upstreamCalls = 0;
+    const countingUpstream = (): Promise<Outcome> => {
+      upstreamCalls += 1;
+      return Promise.resolve({ kind: "ok", status: 200, body_parsed: {} });
+    };
+    const { app, apiKey } = await buildWithUpstream(countingUpstream);
+    try {
+      for (const model of [null, ""]) {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: `Bearer ${apiKey}` },
+          payload: { model, messages: [{ role: "user", content: "hi" }] },
+        });
+        expect(res.statusCode, `model -> ${JSON.stringify(model)}`).toBe(400);
+        expect(res.headers["x-gateway-error-class"]).toBe("client-fault");
+        const body = JSON.parse(res.payload) as {
+          error: { type: string; code: string };
+        };
+        expect(body.error.type).toBe("invalid_request_error");
+        expect(body.error.code).toBe("model_empty");
+      }
+      expect(upstreamCalls).toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("400 empty `messages` → code messages_empty", async () => {
     const { app, apiKey } = await buildWithUpstream(stubUpstreamBuffered);
     try {
