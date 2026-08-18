@@ -56,7 +56,7 @@ const chatCompletionsBodySchema = {
   type: "object",
   required: ["model", "messages"],
   properties: {
-    model: { type: "string" },
+    model: { type: "string", minLength: 1 },
     messages: { type: "array", minItems: 1 },
     // Buffered-only V1: reject stream:true at the schema, before it can reach the breaker or upstream; lift when streaming ships.
     stream: { type: "boolean", const: false },
@@ -655,6 +655,7 @@ function deriveValidationRejection(
         code: `${String(validation[0].params.missingProperty)}_missing`,
         reason: "schema_validation",
       };
+    case "minLength":
     case "minItems":
       return {
         code: `${validation[0].instancePath.slice(1)}_empty`,
