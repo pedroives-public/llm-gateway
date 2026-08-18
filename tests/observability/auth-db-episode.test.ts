@@ -56,7 +56,7 @@ describe("auth DB episode detector — open/close state machine", () => {
     const d = makeDetector();
     expect(failures(d, [0, 100, 200])).toEqual([false, false, true]);
 
-    d.recordSuccess(300);
+    d.recordSuccess();
 
     expect(
       failures(d, [400, 500, 600]),
@@ -70,9 +70,9 @@ describe("auth DB episode detector — open/close state machine", () => {
     // Successes close open episodes; they do not erase pre-episode evidence.
     const trace: boolean[] = [];
     trace.push(d.recordFailure(100));
-    d.recordSuccess(150);
+    d.recordSuccess();
     trace.push(d.recordFailure(200));
-    d.recordSuccess(250);
+    d.recordSuccess();
     trace.push(d.recordFailure(300));
 
     expect(

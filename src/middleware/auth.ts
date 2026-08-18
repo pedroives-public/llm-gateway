@@ -124,7 +124,7 @@ export async function authPreHandler(
       .limit(1);
 
     // The lookup answered: recovery evidence, whatever the auth outcome.
-    dbEpisodeDetector.recordSuccess(performance.now());
+    dbEpisodeDetector.recordSuccess();
 
     if (!findKey || findKey.apiKeyStatus !== "active") {
       request.log.warn(
