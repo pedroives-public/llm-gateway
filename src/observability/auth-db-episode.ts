@@ -11,6 +11,10 @@
 // this alert's only dedup. Contract: at-least-once per episode (a duplicate
 // after a restart is accepted noise).
 
+// Compact only when the pruned prefix is both large and the majority of the
+// array: reclaims memory without churning on every prune.
+const COMPACTION_MIN_PRUNED = 1_024;
+
 export interface AuthDbEpisodeOptions {
   /** Failure count inside the trailing window that opens an episode. */
   threshold: number;
@@ -25,29 +29,29 @@ export interface AuthDbEpisodeDetector {
    */
   recordFailure(nowMs: number): boolean;
   /** Recovery evidence (successful lookup): closes an open episode, if any. */
-  recordSuccess(nowMs: number): void;
+  recordSuccess(): void;
 }
 
 export function createAuthDbEpisodeDetector(
   options: AuthDbEpisodeOptions,
 ): AuthDbEpisodeDetector {
   let failures: number[] = [];
-  let firstFailureMs = 0;
+  let firstFailureIdx = 0;
   let isEpisodeOpen = false;
 
   return {
     recordFailure(nowMs: number): boolean {
       const windowStart = nowMs - options.windowMs;
-      while (firstFailureMs < failures.length) {
-        const timestamp = failures[firstFailureMs];
+      while (firstFailureIdx < failures.length) {
+        const timestamp = failures[firstFailureIdx];
         if (timestamp === undefined || timestamp >= windowStart) {
           break;
         }
-        firstFailureMs++;
+        firstFailureIdx++;
       }
       failures.push(nowMs);
 
-      const failuresInWindow = failures.length - firstFailureMs;
+      const failuresInWindow = failures.length - firstFailureIdx;
       if (failuresInWindow >= options.threshold) {
         if (!isEpisodeOpen) {
           isEpisodeOpen = true;
@@ -55,9 +59,12 @@ export function createAuthDbEpisodeDetector(
         }
       }
 
-      if (firstFailureMs > 1_024 && firstFailureMs * 2 > failures.length) {
-        failures = failures.slice(firstFailureMs);
-        firstFailureMs = 0;
+      if (
+        firstFailureIdx > COMPACTION_MIN_PRUNED &&
+        firstFailureIdx * 2 > failures.length
+      ) {
+        failures = failures.slice(firstFailureIdx);
+        firstFailureIdx = 0;
       }
 
       return false;
@@ -71,7 +78,7 @@ export function createAuthDbEpisodeDetector(
       }
       isEpisodeOpen = false;
       failures = [];
-      firstFailureMs = 0;
+      firstFailureIdx = 0;
     },
   };
 }
