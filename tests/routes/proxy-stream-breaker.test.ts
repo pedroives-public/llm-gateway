@@ -59,7 +59,7 @@ describe("stream:true must not open the shared circuit breaker", () => {
           raw += chunk;
         });
         req.on("end", () => {
-          let streamRequested = false;
+          let streamRequested: boolean;
           try {
             streamRequested =
               (JSON.parse(raw) as { stream?: unknown }).stream === true;
