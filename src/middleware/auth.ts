@@ -15,10 +15,14 @@ const PEPPER = getPepper();
 const KEY_TRACE_LENGTH = 8;
 const API_KEY_LENGTH = 48; // lkey_ (5) + 43 base64url chars (32 random bytes)
 
-// Provisional values: the derivation from the cold-wake probe series replaces
-// them before this branch merges.
-export const AUTH_DB_EPISODE_THRESHOLD = 3;
-export const AUTH_DB_EPISODE_WINDOW_MS = 60_000;
+// Derived from the cold-wake probe series (5 runs, 17h to 3 days cold): a
+// cold wake is a slow success — zero DB-failure events — and even a wake
+// whose resume blows the connect budget fails only the single waking
+// request, so threshold 2 tolerates the worst benign wake. The window is
+// sized to the traffic trough: two failures within 10 minutes are the same
+// incident, and a wider window costs correlation looseness, not latency.
+export const AUTH_DB_EPISODE_THRESHOLD = 2;
+export const AUTH_DB_EPISODE_WINDOW_MS = 600_000;
 
 // Process-wide: episodes span requests. Fed with performance.now() — the
 // window math needs a monotonic clock, and Date.now() jumps under NTP.
