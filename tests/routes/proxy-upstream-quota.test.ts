@@ -14,8 +14,9 @@ import { makeLogCapture, type LogCapture } from "../log-capture.js";
 // Quota exhaustion is the deployment operator's account condition, never the
 // consumer's: the upstream 429 body that reveals it (error.code
 // insufficient_quota) is replaced by a deterministic sanitized 502 and never
-// retried. The legitimate rate-limit sibling keeps today's verbatim
-// passthrough and retry behavior — the discrimination must not widen.
+// retried. The legitimate rate-limit sibling keeps its verbatim passthrough
+// (the discrimination must not widen); under default-deny neither
+// sibling retries — the discrimination now lives in status/body/class only.
 
 const SANITIZED_QUOTA_BODY = {
   error: {
@@ -125,7 +126,7 @@ describe("upstream 429 insufficient_quota — sanitized, never passed through", 
   });
 
   it(
-    "keeps the legitimate rate-limit 429 on verbatim passthrough with retry — discrimination does not widen",
+    "keeps the legitimate rate-limit 429 on verbatim passthrough without retry — discrimination does not widen",
     { timeout: 15_000 },
     async () => {
       const rateLimitBody = JSON.stringify({
@@ -135,6 +136,8 @@ describe("upstream 429 insufficient_quota — sanitized, never passed through", 
           code: "rate_limit_exceeded",
         },
       });
+      // A second scripted 429 sits behind the first: an eligibility
+      // regression would fetch it and fail the single-attempt pin below.
       const { res, upstreamCalls, capture } = await injectScripted([
         { kind: "upstream_error", status: 429, body_raw: rateLimitBody },
         { kind: "upstream_error", status: 429, body_raw: rateLimitBody },
@@ -145,15 +148,15 @@ describe("upstream 429 insufficient_quota — sanitized, never passed through", 
         "upstream-retry-exhausted",
       );
       expect(res.payload).toBe(rateLimitBody); // verbatim, byte-identical
-      expect(upstreamCalls).toBe(2); // still retry-eligible
+      expect(upstreamCalls).toBe(1); // default-deny: one attempt only
 
       const complete = capture.byEvent("req_complete");
       expect(complete).toHaveLength(1);
       expect(complete[0]).toMatchObject({
         status: 429,
         error_class: "upstream-retry-exhausted",
-        attempts: 2,
-        retry_disposition: "attempted",
+        attempts: 1,
+        retry_disposition: "ineligible",
       });
     },
   );

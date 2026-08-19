@@ -5,10 +5,14 @@ import {
 } from "../../src/upstream/retry-eligibility.js";
 import type { ErrorOutcome, Outcome } from "../../src/upstream/outcome.js";
 
-// Pure retry-eligibility predicate extracted from classify (design step 1, M-1). It is the SOLE reader of retry-eligibility; the verdicts mirror the
-// `retry_eligible` column the classifier used to return, so retry behavior is
-// unchanged by the extraction. The predicate reads only kind/status/pre_send;
-// it never inspects cause fields or logs.
+// Retry-eligibility is default-deny: retry only when the outcome PROVES the
+// attempt did not cross the inference commit point (acceptance/start of
+// execution, with its quota consumption and billing). The complete allowlist
+// of eligible outcomes is:
+//
+//   { kind: "network_failed", pre_send_proven: true }
+//
+// and nothing else — the per-status derivation lives in retry-eligibility.ts.
 describe("isRetryEligible", () => {
   const cases: ReadonlyArray<{
     name: string;
@@ -26,14 +30,34 @@ describe("isRetryEligible", () => {
       eligible: false,
     },
     {
-      name: "upstream 5xx (503) — retry-eligible",
+      name: "upstream 503 — default-deny: refusal semantics carry no commit-point proof without an adapter contract",
       outcome: { kind: "upstream_error", status: 503, body_raw: "" },
-      eligible: true,
+      eligible: false,
     },
     {
-      name: "upstream 429 — retry-eligible (backpressure)",
+      name: "upstream 500 — default-deny: origin error does not prove the attempt was not accepted",
+      outcome: { kind: "upstream_error", status: 500, body_raw: "" },
+      eligible: false,
+    },
+    {
+      name: "upstream 502 — default-deny: intermediary speech, the origin's state is unknowable",
+      outcome: { kind: "upstream_error", status: 502, body_raw: "" },
+      eligible: false,
+    },
+    {
+      name: "upstream 504 — default-deny: the origin may complete (and bill) after the intermediary gave up",
+      outcome: { kind: "upstream_error", status: 504, body_raw: "" },
+      eligible: false,
+    },
+    {
+      name: "upstream 529 (nonstandard, e.g. Anthropic overloaded) — default-deny: unknown 5xx carries no proof",
+      outcome: { kind: "upstream_error", status: 529, body_raw: "" },
+      eligible: false,
+    },
+    {
+      name: "upstream 429 — default-deny: refusal semantics carry no commit-point proof without an adapter contract",
       outcome: { kind: "upstream_error", status: 429, body_raw: "" },
-      eligible: true,
+      eligible: false,
     },
     {
       name: "upstream 429 carrying insufficient_quota — quota exhaustion, not retryable",
@@ -45,13 +69,13 @@ describe("isRetryEligible", () => {
       eligible: false,
     },
     {
-      name: "upstream 429 with the legitimate rate-limit code — still retry-eligible",
+      name: "upstream 429 with the legitimate rate-limit code — default-deny: a benign body does not resurrect eligibility",
       outcome: {
         kind: "upstream_error",
         status: 429,
         body_raw: JSON.stringify({ error: { code: "rate_limit_exceeded" } }),
       },
-      eligible: true,
+      eligible: false,
     },
     {
       name: "undecodable 2xx body — not retryable",

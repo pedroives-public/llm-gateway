@@ -225,18 +225,16 @@ describe("upstream 403 — sanitized access denial (breaker-neutral)", () => {
 
 describe("retry-then-401 — credential classification survives the retry path", () => {
   it(
-    "500 then 401: terminal 502 upstream-auth-failure, attempts 2, breaker FAILURE",
+    "pre-send failure then 401: terminal 502 upstream-auth-failure, attempts 2, breaker FAILURE",
     { timeout: 15_000 },
     async () => {
       // Guards a composition regression: "retries exhausted" must not become
       // the terminal class when the second attempt is a credential rejection —
       // that would route the 401 through the verbatim-passthrough branch.
+      // Attempt 1 is a pre-send-proven network failure — the sole eligible
+      // outcome under default-deny (a 500 no longer earns a second attempt).
       const scripted: Outcome[] = [
-        {
-          kind: "upstream_error",
-          status: 500,
-          body_raw: '{"error":{"message":"boom"}}',
-        },
+        { kind: "network_failed", pre_send_proven: true },
         {
           kind: "upstream_error",
           status: 401,

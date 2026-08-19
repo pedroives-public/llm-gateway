@@ -12,12 +12,10 @@ describe("retry", () => {
     vi.restoreAllMocks();
   });
 
+  // Machinery cells ride the sole eligible outcome — a pre-send-proven
+  // network failure; upstream errors are default-deny and never reach the backoff.
   it("retries once and returns the second outcome when attempt 1 is retry-eligible and attempt 2 succeeds", async () => {
-    const attempt1: Outcome = {
-      kind: "upstream_error",
-      status: 503,
-      body_raw: "service unavailable",
-    };
+    const attempt1: Outcome = { kind: "network_failed", pre_send_proven: true };
     const attempt2: Outcome = {
       kind: "ok",
       status: 200,
@@ -43,12 +41,15 @@ describe("retry", () => {
     expect(op).toHaveBeenCalledTimes(2);
   });
 
-  it("waits the full Retry-After before the second attempt when the first outcome carries one", async () => {
+  // Default-deny at the flow level: a usable Retry-After has no authority
+  // over an ineligible outcome. The queued 200 makes an eligibility
+  // regression fail loudly (this response would turn 200).
+  it("does not retry a 429 at all, even when it carries a usable Retry-After (default-deny)", async () => {
     const attempt1: Outcome = {
       kind: "upstream_error",
       status: 429,
       body_raw: "rate limited",
-      retry_after: "3", // seconds
+      retry_after: "3", // seconds; honored, this would sleep and then retry
     };
     const attempt2: Outcome = {
       kind: "ok",
@@ -68,23 +69,19 @@ describe("retry", () => {
       firstByteFlushed: () => false,
     });
 
-    // Just before the Retry-After elapses, the second attempt must NOT have fired.
-    await vi.advanceTimersByTimeAsync(2_999);
-    expect(op).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(0);
 
-    // Crossing the 3s mark releases the retry.
-    await vi.advanceTimersByTimeAsync(1);
-    expect(op).toHaveBeenCalledTimes(2);
-
-    await expect(result).resolves.toEqual(attempt2);
+    expect(vi.getTimerCount()).toBe(0); // no Retry-After sleep scheduled
+    expect(op).toHaveBeenCalledTimes(1); // the queued 200 is never fetched
+    await expect(result).resolves.toEqual(attempt1); // passthrough of the 429
   });
 
-  it("skips the retry without sleeping when the Retry-After exceeds the remaining budget", async () => {
+  it("does not retry a 503 at all, even when it carries a usable Retry-After (default-deny)", async () => {
     const attempt1: Outcome = {
       kind: "upstream_error",
       status: 503,
       body_raw: "unavailable",
-      retry_after: "5", // 5s wait
+      retry_after: "5",
     };
     const attempt2: Outcome = {
       kind: "ok",
@@ -100,17 +97,14 @@ describe("retry", () => {
     const now = Date.now();
     const result = retry(op, {
       signal: new AbortController().signal,
-      deadlineAt: now + 2_000, // only 2s of budget; the 5s Retry-After cannot fit
+      deadlineAt: now + 30_000,
       firstByteFlushed: () => false,
     });
 
-    // Let attempt 1 resolve and the skip decision run, without advancing the clock.
     await vi.advanceTimersByTimeAsync(0);
 
-    // Budget skip: no sleep timer scheduled, no second attempt issued...
     expect(vi.getTimerCount()).toBe(0);
     expect(op).toHaveBeenCalledTimes(1);
-    // ...and attempt 1's outcome is returned verbatim (passthrough, not a 504/aborted).
     await expect(result).resolves.toEqual(attempt1);
   });
 
@@ -137,11 +131,7 @@ describe("retry", () => {
   });
 
   it("does not retry when the first byte has already been flushed, even for a retry-eligible outcome", async () => {
-    const attempt1: Outcome = {
-      kind: "upstream_error",
-      status: 503,
-      body_raw: "unavailable",
-    };
+    const attempt1: Outcome = { kind: "network_failed", pre_send_proven: true };
 
     const op = vi.fn<() => Promise<Outcome>>().mockResolvedValue(attempt1);
 
@@ -162,11 +152,7 @@ describe("retry", () => {
   it("resolves to an aborted outcome built from the signal reason when the signal fires during backoff", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5); // deterministic 50ms backoff window
 
-    const attempt1: Outcome = {
-      kind: "upstream_error",
-      status: 503,
-      body_raw: "unavailable",
-    };
+    const attempt1: Outcome = { kind: "network_failed", pre_send_proven: true };
 
     const op = vi.fn<() => Promise<Outcome>>().mockResolvedValue(attempt1);
 
@@ -196,11 +182,7 @@ describe("retry", () => {
   it("re-throws the original reason when the signal fires during backoff with an unrecognized reason", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5); // deterministic 50ms backoff window
 
-    const attempt1: Outcome = {
-      kind: "upstream_error",
-      status: 503,
-      body_raw: "unavailable",
-    };
+    const attempt1: Outcome = { kind: "network_failed", pre_send_proven: true };
 
     const op = vi.fn<() => Promise<Outcome>>().mockResolvedValue(attempt1);
 
@@ -225,14 +207,10 @@ describe("retry", () => {
     expect(op).toHaveBeenCalledTimes(1);
   });
 
-  it("backs off a full-jitter fraction of the ceiling when no Retry-After is present", async () => {
+  it("backs off a full-jitter fraction of the ceiling before the second attempt", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
 
-    const attempt1: Outcome = {
-      kind: "upstream_error",
-      status: 503,
-      body_raw: "unavailable",
-    };
+    const attempt1: Outcome = { kind: "network_failed", pre_send_proven: true };
     const attempt2: Outcome = {
       kind: "ok",
       status: 200,
@@ -266,60 +244,16 @@ describe("retry", () => {
     await expect(result).resolves.toEqual(attempt2);
   });
 
-  it("backs off a full-jitter fraction of the ceiling when the Retry-After is present but empty", async () => {
-    vi.spyOn(Math, "random").mockReturnValue(0.5);
-
-    const attempt1: Outcome = {
-      kind: "upstream_error",
-      status: 429,
-      body_raw: "rate limited",
-      retry_after: "", // header present but empty — Headers.get returns "" for `Retry-After:` with no value
-    };
-    const attempt2: Outcome = {
-      kind: "ok",
-      status: 200,
-      body_parsed: { ok: true },
-    };
-
-    const op = vi
-      .fn<() => Promise<Outcome>>()
-      .mockResolvedValueOnce(attempt1)
-      .mockResolvedValueOnce(attempt2);
-
-    const now = Date.now();
-    const result = retry(op, {
-      signal: new AbortController().signal,
-      deadlineAt: now + 30_000,
-      firstByteFlushed: () => false,
-    });
-
-    // An empty Retry-After must fall back to jittered backoff, NOT an immediate
-    // zero-wait retry. With Math.random pinned to 0.5, that is half the ceiling.
-    const expectedBackoff = Math.floor(0.5 * backoffCeiling());
-
-    await vi.advanceTimersByTimeAsync(0);
-    expect(op).toHaveBeenCalledTimes(1); // backoff scheduled, not fired immediately
-
-    await vi.advanceTimersByTimeAsync(expectedBackoff - 1);
-    expect(op).toHaveBeenCalledTimes(1); // still waiting out the backoff
-
-    await vi.advanceTimersByTimeAsync(2);
-    expect(op).toHaveBeenCalledTimes(2); // retry fires around half the ceiling
-
-    await expect(result).resolves.toEqual(attempt2);
-  });
-
-  // Retry-After has no temporal authority outside 429/503 (see retryAfterMs):
-  // a 5xx carrying the header must behave exactly as if the header were
-  // absent. The huge-value cell guards the breaker-suppression regression —
-  // honored, it would budget-skip, mark skipped_budget, and zero the breaker
-  // delta on what is really an upstream failure.
-  it("retries a 500 carrying a huge Retry-After with jitter instead of budget-skipping", async () => {
+  // The former header-authority flow cells (empty/zero/oversized Retry-After)
+  // lost their subject: under default-deny no upstream error reaches the
+  // sleep. Header parsing stays pinned in retryAfterMs's unit cells; the 500
+  // below pins that ineligibility precedes header authority.
+  it("does not retry a 500 carrying a huge Retry-After (ineligibility precedes header authority)", async () => {
     const attempt1: Outcome = {
       kind: "upstream_error",
       status: 500,
       body_raw: "internal error",
-      retry_after: "9999", // ~2.8h in delta-seconds; honored, it would exceed any budget
+      retry_after: "9999", // honored, this would budget-skip; ineligible, it never gets that far
     };
     const attempt2: Outcome = {
       kind: "ok",
@@ -338,90 +272,12 @@ describe("retry", () => {
       deadlineAt: now + 30_000,
       firstByteFlushed: () => false,
     });
-
-    await vi.runAllTimersAsync();
-
-    await expect(result).resolves.toEqual(attempt2);
-    expect(op).toHaveBeenCalledTimes(2);
-  });
-
-  it("waits the jittered backoff, not the header, when a 500 carries Retry-After", async () => {
-    vi.spyOn(Math, "random").mockReturnValue(0.5);
-
-    const attempt1: Outcome = {
-      kind: "upstream_error",
-      status: 500,
-      body_raw: "internal error",
-      retry_after: "25", // honored, this would sleep 25s of a 30s budget
-    };
-    const attempt2: Outcome = {
-      kind: "ok",
-      status: 200,
-      body_parsed: { ok: true },
-    };
-
-    const op = vi
-      .fn<() => Promise<Outcome>>()
-      .mockResolvedValueOnce(attempt1)
-      .mockResolvedValueOnce(attempt2);
-
-    const now = Date.now();
-    const result = retry(op, {
-      signal: new AbortController().signal,
-      deadlineAt: now + 30_000,
-      firstByteFlushed: () => false,
-    });
-
-    const expectedBackoff = Math.floor(0.5 * backoffCeiling());
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(op).toHaveBeenCalledTimes(1); // backoff scheduled, not the 25s header
 
-    await vi.advanceTimersByTimeAsync(expectedBackoff + 1);
-    expect(op).toHaveBeenCalledTimes(2); // retry fired within the jitter ceiling
-
-    await expect(result).resolves.toEqual(attempt2);
-  });
-
-  it("treats a literal Retry-After: 0 as no usable backoff and jitters instead of retrying immediately", async () => {
-    vi.spyOn(Math, "random").mockReturnValue(0.5);
-
-    const attempt1: Outcome = {
-      kind: "upstream_error",
-      status: 429,
-      body_raw: "rate limited",
-      retry_after: "0", // explicit zero: honoring it would mean a zero-wait retry, so it falls back to jitter
-    };
-    const attempt2: Outcome = {
-      kind: "ok",
-      status: 200,
-      body_parsed: { ok: true },
-    };
-
-    const op = vi
-      .fn<() => Promise<Outcome>>()
-      .mockResolvedValueOnce(attempt1)
-      .mockResolvedValueOnce(attempt2);
-
-    const now = Date.now();
-    const result = retry(op, {
-      signal: new AbortController().signal,
-      deadlineAt: now + 30_000,
-      firstByteFlushed: () => false,
-    });
-
-    const expectedBackoff = Math.floor(0.5 * backoffCeiling());
-
-    await vi.advanceTimersByTimeAsync(0);
-    expect(op).toHaveBeenCalledTimes(1); // not honored as an immediate retry
-
-    await vi.advanceTimersByTimeAsync(expectedBackoff - 1);
-    expect(op).toHaveBeenCalledTimes(1);
-
-    await vi.advanceTimersByTimeAsync(2);
-    expect(op).toHaveBeenCalledTimes(2);
-
-    await expect(result).resolves.toEqual(attempt2);
+    expect(vi.getTimerCount()).toBe(0); // neither the header sleep nor a jitter backoff
+    expect(op).toHaveBeenCalledTimes(1); // the queued 200 is never fetched
+    await expect(result).resolves.toEqual(attempt1);
   });
 
   it("does not retry a network failure that is not proven pre-send (post-send is idempotency-unsafe)", async () => {
@@ -447,11 +303,7 @@ describe("retry", () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
 
     let flushed = false;
-    const attempt1: Outcome = {
-      kind: "upstream_error",
-      status: 503,
-      body_raw: "unavailable",
-    };
+    const attempt1: Outcome = { kind: "network_failed", pre_send_proven: true };
 
     const op = vi.fn<() => Promise<Outcome>>().mockResolvedValue(attempt1);
 
@@ -479,11 +331,7 @@ describe("retry", () => {
   it("skips the retry without sleeping when the jittered backoff alone would cross the deadline", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5); // ~50ms backoff (half the ceiling)
 
-    const attempt1: Outcome = {
-      kind: "upstream_error",
-      status: 503,
-      body_raw: "unavailable",
-    };
+    const attempt1: Outcome = { kind: "network_failed", pre_send_proven: true };
 
     const op = vi.fn<() => Promise<Outcome>>().mockResolvedValue(attempt1);
 
