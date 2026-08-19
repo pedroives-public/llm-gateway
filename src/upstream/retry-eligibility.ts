@@ -1,19 +1,19 @@
 import type { ErrorOutcome, Outcome } from "./outcome.js";
 import { assertNever } from "./assert-never.js";
-import { isInsufficientQuota } from "./quota.js";
 
 const RETRY_AFTER_HONORED_STATUSES: readonly number[] = [429, 503];
 
 export function isRetryEligible(outcome: ErrorOutcome): boolean {
   switch (outcome.kind) {
     case "upstream_error":
-      // Quota exhaustion cannot clear within a retry window; staying
-      // ineligible also keeps the Retry-After budget-skip passthrough
-      // unreachable for quota, so its body never reaches the consumer.
-      if (isInsufficientQuota(outcome)) {
-        return false;
-      }
-      return outcome.status >= 500 || outcome.status === 429;
+      // Default-deny: an upstream error status cannot prove the attempt did
+      // not cross the inference commit point (acceptance/start of execution,
+      // with its quota consumption and billing). Eligibility returns only via
+      // a per-provider adapter contract; the per-status derivation is pinned
+      // in retry-eligibility.test.ts. Quota exhaustion rides on this blanket
+      // deny — a 429 reopening must reinstate its carve-out, and the
+      // insufficient_quota test cell goes red if forgotten.
+      return false;
     case "undecodable":
       return false;
     case "network_failed":

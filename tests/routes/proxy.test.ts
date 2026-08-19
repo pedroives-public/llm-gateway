@@ -196,13 +196,14 @@ describe("proxy route — buffered skeleton", () => {
       );
       expect(res.payload).toBe(upstreamErrorBody);
       expect(recorded).toEqual(["FAILURE"]);
-      expect(upstreamCalls).toBe(2);
+      expect(upstreamCalls).toBe(1); // default-deny: a 5xx never earns a second attempt
 
       const complete = capture.byEvent("req_complete");
       expect(complete).toHaveLength(1);
       expect(complete[0]).toMatchObject({
-        attempts: 2,
+        attempts: 1,
         error_class: "upstream-retry-exhausted",
+        retry_disposition: "ineligible",
       });
     } finally {
       await app.close();
@@ -315,7 +316,7 @@ describe("proxy route — buffered skeleton", () => {
       );
       expect(res.payload).toBe(body429);
       expect(recorded).toEqual(["INCONCLUSIVE"]);
-      expect(upstreamCalls).toBe(2);
+      expect(upstreamCalls).toBe(1); // default-deny: single attempt
     } finally {
       await app.close();
     }
@@ -712,8 +713,9 @@ describe("deriveRetryDisposition — cause discriminant (unit)", () => {
   const notAborted = new AbortController().signal;
 
   it("budget-skip WITHOUT a valid Retry-After is ineligible, not skipped_budget", () => {
-    // Eligible 503, not aborted, but no Retry-After: the skip would be
-    // backoff-driven, not backpressure → ineligible.
+    // Under default-deny every upstream error is ineligible, header or not;
+    // the validity-over-presence discrimination these cells once pinned is
+    // unreachable — re-derive them with any adapter reopening.
     const outcome: Outcome = {
       kind: "upstream_error",
       status: 503,
@@ -723,9 +725,8 @@ describe("deriveRetryDisposition — cause discriminant (unit)", () => {
   });
 
   it("budget-skip with a PRESENT but unparseable Retry-After is ineligible", () => {
-    // Present but unusable (an HTTP-date, not delta-seconds): the case that pins
-    // validity over presence — a `retry_after !== undefined` check mislabels it
-    // skipped_budget.
+    // Present but unusable header (an HTTP-date): still ineligible by the
+    // blanket deny — this cell no longer discriminates validity.
     const outcome: Outcome = {
       kind: "upstream_error",
       status: 503,
@@ -736,8 +737,8 @@ describe("deriveRetryDisposition — cause discriminant (unit)", () => {
   });
 
   it("budget-skip with a non-positive Retry-After is ineligible", () => {
-    // "0"/negative parse but never govern a wait (retry.ts requires > 0), so
-    // they are not a Retry-After skip — pins the positivity half of "valid".
+    // Non-positive header: still ineligible by the blanket deny — this cell
+    // no longer discriminates the positivity half of "valid".
     const outcome: Outcome = {
       kind: "upstream_error",
       status: 503,
@@ -747,16 +748,17 @@ describe("deriveRetryDisposition — cause discriminant (unit)", () => {
     expect(deriveRetryDisposition(1, outcome, notAborted)).toBe("ineligible");
   });
 
-  it("budget-skip WITH a valid Retry-After is skipped_budget", () => {
+  it("a valid Retry-After on a 503 is still ineligible — skipped_budget is unreachable under default-deny", () => {
+    // skipped_budget requires an eligible outcome, so the label survives
+    // only in the disposition vocabulary — re-derive this cell with any
+    // adapter reopening.
     const outcome: Outcome = {
       kind: "upstream_error",
       status: 503,
       body_raw: "{}",
       retry_after: "31",
     };
-    expect(deriveRetryDisposition(1, outcome, notAborted)).toBe(
-      "skipped_budget",
-    );
+    expect(deriveRetryDisposition(1, outcome, notAborted)).toBe("ineligible");
   });
 });
 
@@ -840,12 +842,14 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
     }
   });
 
-  it("8.5 retry-then-success: 503 then 200 → 200, two attempts, breaker not incremented", async () => {
+  it("8.5 default-deny: 503 with a 200 queued behind it → 502 terminal on one attempt, the 200 is never fetched", async () => {
     let calls = 0;
     const okBody = { id: "chatcmpl-retry", choices: [{ index: 0 }] };
+    const transientBody = '{"error":{"message":"transient"}}';
     const recorded: ProbeOutcome[] = [];
     const capture = makeLogCapture();
-    // Sequence fake: attempt 1 fails retry-eligibly (503), attempt 2 succeeds.
+    // Sequence fake: attempt 1 is a 503; a 200 sits behind it, so an
+    // eligibility regression fails loudly here (this response would be 200).
     const upstream = (): Promise<Outcome> => {
       calls += 1;
       return Promise.resolve(
@@ -853,7 +857,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
           ? {
               kind: "upstream_error",
               status: 503,
-              body_raw: '{"error":{"message":"transient"}}',
+              body_raw: transientBody,
             }
           : { kind: "ok", status: 200, body_parsed: okBody },
       );
@@ -870,17 +874,17 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
         headers: { authorization: `Bearer ${apiKey}` },
         payload: validBody,
       });
-      expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.payload)).toEqual(okBody);
-      expect(calls).toBe(2); // retry fired → two upstream attempts
-      expect(recorded).toEqual(["SUCCESS"]); // success-on-retry: breaker not incremented
+      expect(res.statusCode).toBe(502);
+      expect(res.payload).toBe(transientBody); // 5xx passthrough, verbatim
+      expect(calls).toBe(1); // no second attempt: the queued 200 is unreachable
+      expect(recorded).toEqual(["FAILURE"]); // terminal 5xx feeds the breaker
 
       const complete = capture.byEvent("req_complete");
       expect(complete).toHaveLength(1);
       expect(complete[0]).toMatchObject({
-        attempts: 2,
-        error_class: null,
-        retry_disposition: "attempted",
+        attempts: 1,
+        error_class: "upstream-retry-exhausted",
+        retry_disposition: "ineligible",
       });
     } finally {
       await app.close();
@@ -888,7 +892,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
   });
 
   it(
-    "8.7 CB OPEN fast-fail: five retry-exhausted requests open the REAL breaker; the sixth fast-fails with attempts: 0",
+    "8.7 CB OPEN fast-fail: five failed requests open the REAL breaker; the sixth fast-fails with attempts: 0",
     { timeout: 15_000 },
     async () => {
       const capture = makeLogCapture();
@@ -906,8 +910,9 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       const { app, apiKey } = await buildWith(breaker, failing503, capture);
 
       try {
-        // Prime the real FSM: five retry-exhausted requests (two attempts
-        // each), the fifth FAILURE crosses the open threshold.
+        // Prime the real FSM: five failed requests (one attempt each —
+        // 5xx is ineligible by default-deny), the fifth FAILURE crosses the
+        // open threshold.
         for (let i = 1; i <= 5; i++) {
           const res = await app.inject({
             method: "POST",
@@ -917,7 +922,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
           });
           expect(res.statusCode, `priming request ${i}`).toBe(502);
         }
-        expect(upstreamCalls).toBe(10); // two attempts per primed request
+        expect(upstreamCalls).toBe(5); // one attempt per primed request
         expect(breaker.getState()).toBe("OPEN");
 
         const res = await app.inject({
@@ -934,7 +939,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
           error: { code: "circuit_breaker_open" },
         });
 
-        expect(upstreamCalls).toBe(10);
+        expect(upstreamCalls).toBe(5);
 
         expect(cbEvents).toHaveLength(1);
         expect(cbEvents[0]).toMatchObject({
@@ -1171,11 +1176,14 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
     }
   });
 
-  it("8.18 Retry-After honored: 429 + Retry-After:2 then 200 → waits the delay, then 200", async () => {
+  it("8.18 default-deny: 429 + Retry-After is not honored — no wait, no second attempt, verbatim passthrough", async () => {
     let calls = 0;
     const okBody = { id: "chatcmpl-8-18", choices: [{ index: 0 }] };
+    const body429 = '{"error":{"message":"rate limited"}}';
     const recorded: ProbeOutcome[] = [];
     const capture = makeLogCapture();
+    // A 200 sits behind the 429: an eligibility regression would wait the 2s
+    // and serve it — this response turning 200 is the loud failure mode.
     const upstream = (): Promise<Outcome> => {
       calls += 1;
       return Promise.resolve(
@@ -1183,7 +1191,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
           ? {
               kind: "upstream_error",
               status: 429,
-              body_raw: '{"error":{"message":"rate limited"}}',
+              body_raw: body429,
               retry_after: "2",
             }
           : { kind: "ok", status: 200, body_parsed: okBody },
@@ -1194,43 +1202,36 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       upstream,
       capture,
     );
-    // Build under real timers (Fastify boot), then drive the Retry-After wait
-    // with fake timers so the 2s delay is deterministic, not wall-clock.
-    vi.useFakeTimers();
     try {
-      const injected = app.inject({
+      const res = await app.inject({
         method: "POST",
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
         payload: validBody,
       });
-      // The second attempt must not fire until the full Retry-After elapses.
-      await vi.advanceTimersByTimeAsync(1999);
-      expect(calls).toBe(1); // still waiting out the 2s
-      await vi.advanceTimersByTimeAsync(1);
-      const res = await injected;
-      // 200 (not 504) proves the 2s wait fit the 30s budget — wall-clock never fired.
-      expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.payload)).toEqual(okBody);
-      expect(calls).toBe(2);
-      expect(recorded).toEqual(["SUCCESS"]); // 429-then-200 is a success, no breaker delta
+      expect(res.statusCode).toBe(429); // verbatim, first and only attempt
+      expect(res.payload).toBe(body429);
+      expect(calls).toBe(1); // the Retry-After never governs a wait
+      expect(recorded).toEqual(["INCONCLUSIVE"]); // backpressure is not availability failure
       expect(capture.byEvent("req_complete")[0]).toMatchObject({
-        attempts: 2,
-        error_class: null,
-        retry_disposition: "attempted",
+        attempts: 1,
+        error_class: "upstream-retry-exhausted",
+        retry_disposition: "ineligible",
       });
     } finally {
-      vi.useRealTimers();
       await app.close();
     }
   });
 
-  it("8.43 Retry-After budget-skip: 503 + Retry-After exceeding the wall-clock → passthrough 503, single attempt, breaker not incremented", async () => {
+  // The 8.43 budget-skip family lost its subject: under default-deny the
+  // skipped_budget lane (verbatim passthrough + zero breaker delta) is
+  // structurally unreachable. These cells pin the terminal that replaced it;
+  // re-derive them with any adapter reopening of 429/503.
+  it("8.43 default-deny: 503 + Retry-After exceeding the wall-clock → terminal 502, single attempt, breaker FAILURE", async () => {
     const recorded: ProbeOutcome[] = [];
     const capture = makeLogCapture();
     const body503 = '{"error":{"message":"overloaded","type":"server_error"}}';
     let calls = 0;
-    // Retry-After "31" can't fit the 30s budget → retry skipped, attempt one stands.
     const upstream = (): Promise<Outcome> => {
       calls += 1;
       return Promise.resolve({
@@ -1252,35 +1253,33 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
         headers: { authorization: `Bearer ${apiKey}` },
         payload: validBody,
       });
-      // Passthrough verbatim — not a normalized 502, not a manufactured 504.
-      expect(res.statusCode).toBe(503);
+      // Terminal 5xx: normalized to 502, body verbatim, one attempt, and the
+      // 503 counts as availability failure evidence (no skip lane to shield it).
+      expect(res.statusCode).toBe(502);
       expect(res.payload).toBe(body503);
-      expect(res.headers["retry-after"]).toBe("31");
-      // The terminator is upstream backpressure, not the gateway clock.
-      expect(res.headers["x-gateway-error-class"]).not.toBe("gateway-fault");
-      expect(calls).toBe(1); // retry skipped → no second billable attempt
-      // A budget-skip is not failure evidence — the breaker must not count it.
-      expect(recorded).toEqual(["INCONCLUSIVE"]);
+      expect(res.headers["x-gateway-error-class"]).toBe(
+        "upstream-retry-exhausted",
+      );
+      expect(calls).toBe(1);
+      expect(recorded).toEqual(["FAILURE"]);
 
       const complete = capture.byEvent("req_complete");
       expect(complete).toHaveLength(1);
       expect(complete[0]).toMatchObject({
         attempts: 1,
-        retry_disposition: "skipped_budget",
+        retry_disposition: "ineligible",
       });
     } finally {
       await app.close();
     }
   });
 
-  it("8.43 status-agnostic — 429 budget-skip: Retry-After beyond the wall-clock → passthrough 429, single attempt, breaker not incremented", async () => {
+  it("8.43 status-agnostic — 429 + oversized Retry-After: verbatim 429, single attempt, breaker INCONCLUSIVE", async () => {
     const recorded: ProbeOutcome[] = [];
     const capture = makeLogCapture();
     const body429 =
       '{"error":{"message":"rate limited","type":"rate_limit_error"}}';
     let calls = 0;
-    // A second budget-skip status the 503 case can't witness: pins that the
-    // policy passes the upstream status through verbatim, not a fixed value.
     const upstream = (): Promise<Outcome> => {
       calls += 1;
       return Promise.resolve({
@@ -1302,31 +1301,33 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
         headers: { authorization: `Bearer ${apiKey}` },
         payload: validBody,
       });
-      expect(res.statusCode).toBe(429); // verbatim upstream status, not a fixed value
+      expect(res.statusCode).toBe(429); // 4xx terminal keeps the verbatim status
       expect(res.payload).toBe(body429);
+      // Non-sanitized upstream terminals echo Retry-After verbatim — the
+      // only remaining pin of that echo.
       expect(res.headers["retry-after"]).toBe("31");
-      expect(res.headers["x-gateway-error-class"]).not.toBe("gateway-fault");
       expect(calls).toBe(1);
-      expect(recorded).toEqual(["INCONCLUSIVE"]);
+      expect(recorded).toEqual(["INCONCLUSIVE"]); // backpressure, not availability failure
 
       const complete = capture.byEvent("req_complete");
       expect(complete).toHaveLength(1);
       expect(complete[0]).toMatchObject({
         attempts: 1,
-        retry_disposition: "skipped_budget",
+        retry_disposition: "ineligible",
       });
     } finally {
       await app.close();
     }
   });
 
-  it("8.43 sibling — Retry-After within budget retries: 503 + Retry-After:1 then 200 → 200, two attempts", async () => {
+  it("8.43 sibling — 503 + Retry-After that would fit the budget: still no retry, the queued 200 is never fetched", async () => {
     let calls = 0;
     const okBody = { id: "chatcmpl-8-43-fits", choices: [{ index: 0 }] };
+    const body503 = '{"error":{"message":"overloaded"}}';
     const recorded: ProbeOutcome[] = [];
     const capture = makeLogCapture();
-    // Same 503 + Retry-After path as the budget-skip above, but a wait that FITS
-    // the budget, so the retry fires — isolating the boundary as the difference.
+    // Before default-deny, a 1s Retry-After inside the 30s budget fired the
+    // retry and served this 200 — the loud failure mode of a regression here.
     const upstream = (): Promise<Outcome> => {
       calls += 1;
       return Promise.resolve(
@@ -1334,7 +1335,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
           ? {
               kind: "upstream_error",
               status: 503,
-              body_raw: '{"error":{"message":"overloaded"}}',
+              body_raw: body503,
               retry_after: "1",
             }
           : { kind: "ok", status: 200, body_parsed: okBody },
@@ -1345,28 +1346,22 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       upstream,
       capture,
     );
-    // Fake timers drive the 1s Retry-After wait deterministically (app booted on
-    // real timers).
-    vi.useFakeTimers();
     try {
-      const injected = app.inject({
+      const res = await app.inject({
         method: "POST",
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
         payload: validBody,
       });
-      await vi.advanceTimersByTimeAsync(1000); // honor the 1s Retry-After
-      const res = await injected;
-      expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.payload)).toEqual(okBody);
-      expect(calls).toBe(2); // the 1s wait fit the budget → retry fired
-      expect(recorded).toEqual(["SUCCESS"]); // 503-then-200 is a success
+      expect(res.statusCode).toBe(502);
+      expect(res.payload).toBe(body503);
+      expect(calls).toBe(1); // no wait honored, no second attempt
+      expect(recorded).toEqual(["FAILURE"]);
       expect(capture.byEvent("req_complete")[0]).toMatchObject({
-        attempts: 2,
-        retry_disposition: "attempted",
+        attempts: 1,
+        retry_disposition: "ineligible",
       });
     } finally {
-      vi.useRealTimers();
       await app.close();
     }
   });
