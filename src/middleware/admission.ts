@@ -3,8 +3,9 @@
 // budgets are separate because the anonymous population is adversary-sized
 // while tenants are operator-provisioned: an anonymous flood can exhaust
 // only the pre-auth budget. Refusal never touches the circuit breaker. The
-// held slot's release closure lives on the request and is wired to every
-// terminal event; its idempotent flag makes multi-event wiring safe.
+// held slot's release closure lives on the request, anchored on the
+// socket-level close plus a destroyed check at the post-auth acquisition;
+// its idempotent flag makes the redundant framework hooks harmless.
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AdmissionGate } from "../reliability/admission-gate.js";
@@ -44,6 +45,14 @@ export function registerAdmission(
     }
 
     request.releaseSlot = releasePreSlot;
+
+    // Socket-level close fires on every termination; the hooks below do
+    // not (onResponse needs a finished response, onRequestAbort an unread
+    // body). Read request.releaseSlot at event time: after the handoff it
+    // is the POST slot. Covers a close that happens AFTER this point.
+    reply.raw.on("close", () => {
+      request.releaseSlot?.();
+    });
   });
 
   scope.addHook("onRequest", policy.authenticate);
@@ -57,6 +66,14 @@ export function registerAdmission(
 
     request.releaseSlot?.();
     request.releaseSlot = releasePostSlot;
+
+    // A socket that died during auth has already emitted close: a listener
+    // attached now never fires, but the destroyed flag persists. Keep this
+    // check synchronous with the acquisition: the release is guaranteed
+    // here, not when some later await returns.
+    if (reply.raw.destroyed) {
+      request.releaseSlot?.();
+    }
   });
 
   scope.addHook("onResponse", async (request) => {
