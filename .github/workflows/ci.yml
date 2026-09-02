@@ -99,3 +99,29 @@ jobs:
             cat "$body"
             exit 1
           fi
+
+      # Neither smoke above crosses the post-auth admission gate (/health is
+      # outside both gates; the 401 dies at the pre-auth one), so a wedged
+      # gate passed both on 2026-08-29. This is the smallest paid request the
+      # schema allows, from a dedicated smoke tenant whose key lives next to
+      # the deploy token. 200 proves auth, both gates and the upstream path;
+      # anything else fails the deploy.
+      - name: "Smoke: authenticated request crosses the post-auth gate"
+        env:
+          SMOKE_API_KEY: ${{ secrets.SMOKE_API_KEY }}
+        run: |
+          if [ -z "$SMOKE_API_KEY" ]; then
+            echo "FAIL: SMOKE_API_KEY is not set on the production environment"
+            exit 1
+          fi
+          body=$(mktemp)
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 60 \
+            -X POST "$APP_URL/v1/chat/completions" \
+            -H "authorization: Bearer $SMOKE_API_KEY" \
+            -H "content-type: application/json" \
+            -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"smoke"}],"max_tokens":1,"stream":false}')
+          if [ "$code" != "200" ]; then
+            echo "FAIL: expected 200 from an authenticated request, got '$code' with body:"
+            cat "$body"
+            exit 1
+          fi
