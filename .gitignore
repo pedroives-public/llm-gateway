@@ -66,6 +66,8 @@ openspec/
 .github/prompts/
 .github/skills/
 
+.gstack/
+
 # >>> harness >>>
 # Local AI/tool memory
 .remember/
