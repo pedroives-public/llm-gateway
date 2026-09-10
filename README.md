@@ -125,9 +125,9 @@ spread. Overhead = gateway path minus direct path at the same delay (both
 paths reach the mock over its public hostname, so edge and TLS cost
 cancels). 503 `admission_full` refusals are counted apart, never mixed
 into latency. Staging Postgres is Fly Postgres in gru; production is Neon
-in sa-east-1, so the tracking write's share of the overhead is not
-identical to production's. Tooling is local operator scripts, not part of
-the repository.
+in sa-east-1, so the auth lookup's share of the overhead (the only database
+access on the request path) is not identical to production's. Tooling is
+local operator scripts, not part of the repository.
 
 ### 2026-08-29, release v27: the gate wedges
 
@@ -187,8 +187,8 @@ Readings:
   concurrent requests, with a spread under 1 ms at 41. The gateway's own
   handler clock (38 095 `req_complete` events harvested from the logs, a
   lossy capture) puts the in-handler overhead at 0 ms p50 and 1 ms p99:
-  the 6 to 8 ms live outside the handler, in the auth lookup, the tracking
-  write and the edge hop.
+  the 6 to 8 ms live outside the handler, in the auth lookup and the edge
+  hop.
 - The 41-VU ceiling refuses about 2% at exactly 41 VUs (a slot is
   returned one tick after the response leaves, and a VU with no think time
   can arrive inside that tick); it oscillates, it does not accumulate.
