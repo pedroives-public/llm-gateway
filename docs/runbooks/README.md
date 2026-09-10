@@ -21,6 +21,10 @@ Alerts covered:
 - [`auth_db_cause_unknown`](#auth_db_cause_unknown)
 - [`auth_db_unavailable`](#auth_db_unavailable)
 
+Scheduled operations (not alert-driven) have their own files:
+
+- [Rotating the Fly deploy token](fly-deploy-token-rotation.md) — monthly, two days before expiry.
+
 ---
 
 ## upstream_auth_failure
