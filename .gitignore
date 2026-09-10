@@ -58,7 +58,7 @@ drizzle/.cache/
 actionlint
 scripts/
 docs/*
-!docs/runbooks.md
+!docs/runbooks/
 openspec/
 .claude/
 .codex/
