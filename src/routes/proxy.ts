@@ -35,9 +35,9 @@ const MAX_OUTPUT_TOKENS_CAP = 16_384;
 export interface ChatCompletionsBody {
   model: string;
   messages: unknown[];
-  // Buffered-only V1: the schema rejects stream:true, so the type carries the
-  // same pin; widen back to `boolean` when streaming ships.
-  stream?: false;
+  // `true` is reachable only when the streaming flag is ON; with the flag OFF
+  // the schema rejects it before the handler runs.
+  stream?: boolean;
   [key: string]: unknown;
 }
 
@@ -45,6 +45,11 @@ export interface ChatCompletionsBody {
 // The client returns an Outcome, so it composes directly under retry().
 export interface ProxyRouteOptions {
   breaker: CircuitBreaker;
+  // Boot-time streaming flag, read once by config validation. It reaches the
+  // route only through this option: the route never reads process.env, so no
+  // request can influence which path it takes. Omitted means OFF, the same
+  // fail-closed default as an unset environment variable.
+  streamingEnabled?: boolean;
   upstreamBuffered: (
     body: ChatCompletionsBody,
     signal: AbortSignal,
@@ -58,7 +63,8 @@ const chatCompletionsBodySchema = {
   properties: {
     model: { type: "string", minLength: 1 },
     messages: { type: "array", minItems: 1 },
-    // Buffered-only V1: reject stream:true at the schema, before it can reach the breaker or upstream; lift when streaming ships.
+    // Flag-OFF form: reject stream:true at the schema, before it can reach the
+    // breaker or the upstream. The flag-ON form drops the `const`.
     stream: { type: "boolean", const: false },
     // Cost cap: the upstream honors either field (max_completion_tokens succeeds max_tokens),
     // so both carry the same ceiling on purpose — capping only one leaves the other as a bypass.
@@ -74,6 +80,24 @@ const chatCompletionsBodySchema = {
   additionalProperties: true,
 };
 
+// Called once per route registration, never per request. The ON form is a copy:
+// the shared OFF schema is never mutated, so two apps in one process can hold
+// different flag states. Overriding `stream` in place keeps it ahead of `n`,
+// and that order is load-bearing: Ajv stops at the first violation and
+// deriveValidationRejection reads only validation[0].
+function buildChatCompletionsBodySchema(streamingEnabled: boolean) {
+  if (streamingEnabled) {
+    return {
+      ...chatCompletionsBodySchema,
+      properties: {
+        ...chatCompletionsBodySchema.properties,
+        stream: { type: "boolean" },
+      },
+    };
+  }
+  return chatCompletionsBodySchema;
+}
+
 export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
   fastify,
   opts,
@@ -85,11 +109,13 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
     sendProxyError(error, request, reply);
   });
 
+  const streamingEnabled = opts.streamingEnabled ?? false;
+
   fastify.post<{ Body: ChatCompletionsBody }>(
     "/v1/chat/completions",
     {
       bodyLimit: BODY_LIMIT_BYTES,
-      schema: { body: chatCompletionsBodySchema },
+      schema: { body: buildChatCompletionsBodySchema(streamingEnabled) },
     },
     async (request, reply) => {
       // Identity guard: missing tenant/plan is an auth misconfiguration, not a
@@ -638,7 +664,8 @@ function deriveValidationRejection(
     };
   }
 
-  // Remove this branch when streaming ships.
+  // Fires only with the streaming flag OFF: the flag-ON schema has no `const`
+  // on `stream`. Remove it together with the flag-OFF form.
   if (
     validation[0]?.keyword === "const" &&
     validation[0].instancePath === "/stream"

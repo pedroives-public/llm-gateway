@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import type { DrizzleClient } from "../src/db/client.js";
-import { fakeAuthDb } from "./helpers/fake-auth-db.js";
+import { bearer, fakeAuthDb } from "./helpers/fake-auth-db.js";
 import { HTTP_SERVER_OPTIONS } from "../src/config.js";
 
 describe("buildApp — pepper boot validation", () => {
@@ -168,6 +168,53 @@ describe("buildApp — STREAMING_ENABLED boot validation", () => {
         await bootOutcome(),
         "boot validation: unset, 'true' and 'false' are the only accepted states and each must boot",
       ).toBe("booted");
+    },
+  );
+
+  // Wiring pin: buildApp() must hand the accessor's value to the proxy route.
+  // The body also carries `n: 2`, which the schema rejects AFTER `stream`, so
+  // the request never passes validation and the real upstream client is never
+  // reached, not even when a regression flips the flag. OFF reports the
+  // `stream` violation first; ON has no `stream` violation left, so the first
+  // one reported is `n`.
+  it.each([
+    { value: undefined, code: "stream_not_supported" },
+    { value: "false", code: "stream_not_supported" },
+    { value: "true", code: "n_not_supported" },
+  ])(
+    "STREAMING_ENABLED $value reaches the route: first rejection is $code",
+    async ({ value, code }) => {
+      if (value === undefined) {
+        delete process.env["STREAMING_ENABLED"];
+      } else {
+        process.env["STREAMING_ENABLED"] = value;
+      }
+
+      const app = await buildApp({
+        logger: false,
+        db: fakeAuthDb(randomUUID()),
+      });
+
+      try {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: bearer() },
+          payload: {
+            model: "gpt-4o",
+            messages: [{ role: "user", content: "hi" }],
+            stream: true,
+            n: 2,
+          },
+        });
+
+        expect(
+          { status: res.statusCode, code: res.json().error?.code },
+          "streaming flag wiring: unset and 'false' keep rejecting stream:true at the schema; only 'true' lifts it, and the default when unset is OFF",
+        ).toStrictEqual({ status: 400, code });
+      } finally {
+        await app.close();
+      }
     },
   );
 });
