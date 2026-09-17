@@ -59,3 +59,18 @@ export function getPepper(): string {
 
   return pepper;
 }
+
+export function getStreamingEnabled(): boolean {
+  const value = process.env["STREAMING_ENABLED"];
+  if (value === undefined) {
+    return false;
+  } else if (value === "true") {
+    return true;
+  } else if (value === "false") {
+    return false;
+  } else {
+    throw new Error(
+      `STREAMING_ENABLED must be either "true" or "false", got: ${value}`,
+    );
+  }
+}
