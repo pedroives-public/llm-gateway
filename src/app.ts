@@ -35,7 +35,7 @@ export async function buildApp(
   options: BuildAppOptions = {},
 ): Promise<FastifyInstance> {
   getPepper();
-  getStreamingEnabled();
+  const streamingEnabled = getStreamingEnabled();
   const openaiApiKey = getOpenAIApiKey();
   const openaiBaseUrl = getOpenAIBaseUrl();
 
@@ -122,6 +122,7 @@ export async function buildApp(
       });
       await scope.register(proxyRoute, {
         breaker,
+        streamingEnabled,
         upstreamBuffered: upstream.buffered,
       });
     }
