@@ -69,8 +69,8 @@ export function getStreamingEnabled(): boolean {
   } else if (value === "false") {
     return false;
   } else {
-    throw new Error(
-      `STREAMING_ENABLED must be either "true" or "false", got: ${value}`,
-    );
+    // The received value is left out on purpose: a secret pasted into the
+    // wrong variable must not reach the boot log.
+    throw new Error('STREAMING_ENABLED must be either "true" or "false"');
   }
 }

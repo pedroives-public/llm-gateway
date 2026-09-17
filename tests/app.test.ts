@@ -149,10 +149,13 @@ describe("buildApp — STREAMING_ENABLED boot validation", () => {
   ])("refuses to boot when STREAMING_ENABLED is %j", async (value) => {
     process.env["STREAMING_ENABLED"] = value;
 
+    // The whole message is pinned, not a fragment: it names the variable and
+    // the accepted spellings and carries nothing of the received value, so a
+    // secret pasted into the wrong variable never reaches the boot log.
     expect(
       await bootOutcome(),
-      "boot validation: a STREAMING_ENABLED value other than 'true' or 'false' must fail boot naming the variable, never be read as OFF",
-    ).toContain("STREAMING_ENABLED");
+      "boot validation: a STREAMING_ENABLED value other than 'true' or 'false' must fail boot with the exact message, never be read as OFF and never echo the received value",
+    ).toBe('STREAMING_ENABLED must be either "true" or "false"');
   });
 
   it.each([[undefined], ["true"], ["false"]])(
