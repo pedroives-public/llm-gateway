@@ -220,6 +220,59 @@ describe("buildApp — STREAMING_ENABLED boot validation", () => {
       }
     },
   );
+
+  describe("production guard", () => {
+    let savedNodeEnv: string | undefined;
+
+    beforeEach(() => {
+      savedNodeEnv = process.env["NODE_ENV"];
+    });
+
+    afterEach(() => {
+      if (savedNodeEnv !== undefined) {
+        process.env["NODE_ENV"] = savedNodeEnv;
+      } else {
+        delete process.env["NODE_ENV"];
+      }
+    });
+
+    // No streaming branch exists yet: with the flag ON a stream:true body
+    // would reach the buffered read and count against the shared breaker. ON
+    // is therefore refused in production, and only there. Remove this block
+    // together with the guard in the change that turns streaming on.
+    it.each([
+      {
+        nodeEnv: "production",
+        value: "true",
+        outcome:
+          'STREAMING_ENABLED must not be "true" when NODE_ENV=production: the streaming path is not complete',
+      },
+      { nodeEnv: "production", value: "false", outcome: "booted" },
+      { nodeEnv: "production", value: undefined, outcome: "booted" },
+      {
+        nodeEnv: "production",
+        value: "TRUE",
+        outcome: 'STREAMING_ENABLED must be either "true" or "false"',
+      },
+      { nodeEnv: "test", value: "true", outcome: "booted" },
+      { nodeEnv: "development", value: "true", outcome: "booted" },
+    ])(
+      "NODE_ENV $nodeEnv with STREAMING_ENABLED $value -> $outcome",
+      async ({ nodeEnv, value, outcome }) => {
+        process.env["NODE_ENV"] = nodeEnv;
+        if (value === undefined) {
+          delete process.env["STREAMING_ENABLED"];
+        } else {
+          process.env["STREAMING_ENABLED"] = value;
+        }
+
+        expect(
+          await bootOutcome(),
+          "production guard: STREAMING_ENABLED=true must fail boot under NODE_ENV=production and nowhere else, and an invalid spelling still reports the spelling error first",
+        ).toBe(outcome);
+      },
+    );
+  });
 });
 
 describe("buildApp — production pino.transport assertion", () => {

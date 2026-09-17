@@ -65,6 +65,15 @@ export function getStreamingEnabled(): boolean {
   if (value === undefined) {
     return false;
   } else if (value === "true") {
+    // No streaming branch exists yet: with the flag ON a stream:true body
+    // would reach the buffered read, whose SSE answer is undecodable and
+    // counts against the shared circuit breaker. ON is therefore refused in
+    // production. Remove this guard in the change that turns streaming on.
+    if (process.env["NODE_ENV"] === "production") {
+      throw new Error(
+        'STREAMING_ENABLED must not be "true" when NODE_ENV=production: the streaming path is not complete',
+      );
+    }
     return true;
   } else if (value === "false") {
     return false;
