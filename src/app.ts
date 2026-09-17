@@ -10,6 +10,7 @@ import { registerAdmission } from "./middleware/admission.js";
 import { createDb, type DrizzleClient } from "./db/client.js";
 import {
   getPepper,
+  getStreamingEnabled,
   getOpenAIApiKey,
   getOpenAIBaseUrl,
   REQUEST_TIMEOUT_MS,
@@ -34,6 +35,7 @@ export async function buildApp(
   options: BuildAppOptions = {},
 ): Promise<FastifyInstance> {
   getPepper();
+  getStreamingEnabled();
   const openaiApiKey = getOpenAIApiKey();
   const openaiBaseUrl = getOpenAIBaseUrl();
 

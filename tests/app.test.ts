@@ -108,6 +108,70 @@ describe("buildApp — OPENAI_BASE_URL boot validation", () => {
   });
 });
 
+describe("buildApp — STREAMING_ENABLED boot validation", () => {
+  let saved: string | undefined;
+
+  beforeEach(() => {
+    saved = process.env["STREAMING_ENABLED"];
+  });
+
+  afterEach(() => {
+    if (saved !== undefined) {
+      process.env["STREAMING_ENABLED"] = saved;
+    } else {
+      delete process.env["STREAMING_ENABLED"];
+    }
+  });
+
+  // Resolves to "booted" or to the boot error's message. The app is closed on
+  // the boot path so a failing run never leaks a Fastify instance.
+  async function bootOutcome(): Promise<string> {
+    try {
+      const app = await buildApp({ logger: false, db: {} as DrizzleClient });
+      await app.close();
+      return "booted";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  it.each([
+    ["TRUE"],
+    ["False"],
+    ["1"],
+    ["0"],
+    ["yes"],
+    ["on"],
+    ["off"],
+    [" true"],
+    ["true "],
+    [""],
+  ])("refuses to boot when STREAMING_ENABLED is %j", async (value) => {
+    process.env["STREAMING_ENABLED"] = value;
+
+    expect(
+      await bootOutcome(),
+      "boot validation: a STREAMING_ENABLED value other than 'true' or 'false' must fail boot naming the variable, never be read as OFF",
+    ).toContain("STREAMING_ENABLED");
+  });
+
+  it.each([[undefined], ["true"], ["false"]])(
+    "boots when STREAMING_ENABLED is %j",
+    async (value) => {
+      if (value === undefined) {
+        delete process.env["STREAMING_ENABLED"];
+      } else {
+        process.env["STREAMING_ENABLED"] = value;
+      }
+
+      expect(
+        await bootOutcome(),
+        "boot validation: unset, 'true' and 'false' are the only accepted states and each must boot",
+      ).toBe("booted");
+    },
+  );
+});
+
 describe("buildApp — production pino.transport assertion", () => {
   let savedEnv: string | undefined;
 
