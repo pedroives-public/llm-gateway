@@ -86,6 +86,10 @@ export interface ReqRejectPayload {
   status: number;
 }
 
+export interface UpstreamCancelRejectedPayload {
+  site: "upstream_adapter" | "proxy_route";
+  cause_name: string;
+}
 export interface StreamFirstTokenPayload {
   req_id: string;
   ttft_ms: number;
@@ -114,7 +118,7 @@ export interface CbStateChangePayload {
   window_start_ms: number;
 }
 
-type MinLogger = { info: (obj: object) => void };
+export type MinLogger = { info: (obj: object) => void };
 type OperationalAlertMinLogger = { error: (obj: OperationalAlertLine) => void };
 
 let _firstRequestCompleted = false;
@@ -183,6 +187,18 @@ export function emitStreamDone(
 ): void {
   log.info({ event: "stream_done", ...payload });
   _markFirstRequestCompleted();
+}
+
+/**
+ * A cancel() that rejects because the body already errored (the wall clock
+ * or the peer closed it first). The body is closed either way, so this
+ * describes a cleanup that found nothing to do; it never summons.
+ */
+export function emitUpstreamCancelRejected(
+  log: MinLogger,
+  payload: UpstreamCancelRejectedPayload,
+): void {
+  log.info({ event: "upstream_cancel_rejected", ...payload });
 }
 
 /**
