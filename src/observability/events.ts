@@ -88,7 +88,7 @@ export interface ReqRejectPayload {
 
 export interface UpstreamCancelRejectedPayload {
   site: "upstream_adapter" | "proxy_route";
-  cause_name: string;
+  err_name: string;
 }
 export interface StreamFirstTokenPayload {
   req_id: string;
@@ -193,6 +193,9 @@ export function emitStreamDone(
  * A cancel() that rejects because the body already errored (the wall clock
  * or the peer closed it first). The body is closed either way, so this
  * describes a cleanup that found nothing to do; it never summons.
+ * `err_name` is the `name` of the error cancel() rejected with, the same
+ * source as the boundary lines' err_name; cause_name is reserved for
+ * error.cause.name, and the error message never reaches the line.
  */
 export function emitUpstreamCancelRejected(
   log: MinLogger,
