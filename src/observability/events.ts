@@ -47,6 +47,8 @@ export type AlertName = (typeof ALERT_NAMES)[number];
 
 export type EpisodeAlertName = (typeof EPISODE_ALERT_NAMES)[number];
 
+export type ReqCompleteTerminal = "STREAM_NOT_DELIVERED";
+
 type OperationalAlertLine = {
   event: "operational_alert";
   alert: AlertName | EpisodeAlertName;
@@ -73,6 +75,7 @@ export interface ReqCompletePayload {
   gateway_overhead_ms: number;
   attempts: number;
   retry_disposition: RetryDisposition;
+  terminal?: ReqCompleteTerminal;
 }
 
 export interface ReqRejectPayload {
