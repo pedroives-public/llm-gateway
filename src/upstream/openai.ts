@@ -27,22 +27,25 @@ type CappedRead = { capped: true } | { capped: false; bodyText: string };
 export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
   const endpoint = `${config.baseURL}/chat/completions`;
 
+  const fetchUpstream = (body: unknown, signal: AbortSignal) =>
+    fetch(endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${config.apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+      // Fail-closed egress: a 3xx from the configured endpoint is an
+      // operator-config fault; following it would replay the request
+      // (tenant body included) against an unvetted host.
+      redirect: "error",
+      signal,
+    });
+
   const buffered: BufferedUpstream = async (body, signal, log) => {
     let response: Response;
     try {
-      response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${config.apiKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(body),
-        // Fail-closed egress: a 3xx from the configured endpoint is an
-        // operator-config fault; following it would replay the request
-        // (tenant body included) against an unvetted host.
-        redirect: "error",
-        signal,
-      });
+      response = await fetchUpstream(body, signal);
     } catch (err) {
       // resolveRejection owns rejections: network/abort → Outcome, else re-throw.
       return resolveRejection(err, signal, log);
