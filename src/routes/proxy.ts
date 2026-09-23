@@ -18,6 +18,7 @@ import {
   type ReqRejectedReason,
   emitOperationalAlert,
   alertFor,
+  type MinLogger,
 } from "../observability/events.js";
 import { retry } from "../reliability/retry.js";
 import { armWallClockTimeout } from "../reliability/timeouts.js";
@@ -27,6 +28,12 @@ import {
   isRetryEligible,
   retryAfterMs,
 } from "../upstream/retry-eligibility.js";
+import {
+  isAcceptedStream,
+  type AttemptResult,
+  type StreamingAdapter,
+  cancelStream,
+} from "../upstream/stream.js";
 
 const WALL_CLOCK_MS = 30_000;
 const BODY_LIMIT_BYTES = 262_144;
@@ -55,6 +62,11 @@ export interface ProxyRouteOptions {
     signal: AbortSignal,
     log: Logger,
   ) => Promise<Outcome>;
+  upstreamStreaming?: (
+    body: ChatCompletionsBody,
+    signal: AbortSignal,
+    log: Logger & MinLogger,
+  ) => Promise<StreamingAdapter>;
 }
 
 const chatCompletionsBodySchema = {
@@ -98,6 +110,27 @@ function buildChatCompletionsBodySchema(streamingEnabled: boolean) {
   return chatCompletionsBodySchema;
 }
 
+function resolveStreamingUpstream(
+  enabled: boolean,
+  upstream: ProxyRouteOptions["upstreamStreaming"],
+): NonNullable<ProxyRouteOptions["upstreamStreaming"]> {
+  if (upstream !== undefined) {
+    return upstream;
+  }
+
+  if (enabled) {
+    throw new Error(
+      "Streaming is enabled but no upstreamStreaming function was provided to the proxy route",
+    );
+  }
+
+  return async () => {
+    throw new Error(
+      "Streaming was requested without the streaming flag enabled on the route",
+    );
+  };
+}
+
 export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
   fastify,
   opts,
@@ -110,6 +143,10 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
   });
 
   const streamingEnabled = opts.streamingEnabled ?? false;
+  const streamingUpstream = resolveStreamingUpstream(
+    streamingEnabled,
+    opts.upstreamStreaming,
+  );
 
   fastify.post<{ Body: ChatCompletionsBody }>(
     "/v1/chat/completions",
@@ -192,27 +229,30 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         : { ...request.body, max_tokens: MAX_OUTPUT_TOKENS_CAP };
 
       const upstreamLog = request.log.child({ req_id: request.reqId });
-      const callUpstream = async (): Promise<Outcome> => {
+      const callUpstream = async (): Promise<AttemptResult> => {
         attempts += 1;
         const attemptStartedAt = Date.now();
+
+        const upstream =
+          request.body.stream === true
+            ? streamingUpstream
+            : opts.upstreamBuffered;
+
         try {
-          return await opts.upstreamBuffered(
-            forwardedBody,
-            timeout.signal,
-            upstreamLog,
-          );
+          return await upstream(forwardedBody, timeout.signal, upstreamLog);
         } finally {
           upstreamDurationMs += Date.now() - attemptStartedAt;
         }
       };
 
-      let outcome: Outcome;
+      let outcome: AttemptResult;
       try {
         outcome = await retry(callUpstream, {
           signal: timeout.signal,
           deadlineAt,
-          // Buffered-only V1: nothing is flushed before the terminal; replace
-          // with the real first-byte marker when streaming ships.
+          // No byte reaches the client before the terminal is decided: an
+          // accepted stream is closed without forwarding any frame, so this
+          // stays false until frames are forwarded.
           firstByteFlushed: () => false,
         });
       } catch (error) {
@@ -224,6 +264,49 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
 
       const durationMs = Date.now() - requestStartedAt;
       const gatewayOverheadMs = Math.max(0, durationMs - upstreamDurationMs);
+
+      if (isAcceptedStream(outcome)) {
+        const status = 500;
+        const errorClass: ErrorClass = "gateway-fault";
+
+        try {
+          opts.breaker.recordResult("INCONCLUSIVE");
+        } finally {
+          await cancelStream(outcome.reader, upstreamLog, "proxy_route");
+        }
+
+        const terminalDurationMs = Date.now() - requestStartedAt;
+        const terminalGatewayOverheadMs = Math.max(
+          0,
+          terminalDurationMs - upstreamDurationMs,
+        );
+
+        emitReqComplete(request.log, {
+          req_id: request.reqId,
+          status,
+          error_class: errorClass,
+          stream: true,
+          attempts,
+          duration_ms: terminalDurationMs,
+          upstream_duration_ms: upstreamDurationMs,
+          gateway_overhead_ms: terminalGatewayOverheadMs,
+          retry_disposition: deriveRetryDisposition(
+            attempts,
+            outcome,
+            timeout.signal,
+          ),
+          terminal: "STREAM_NOT_DELIVERED",
+        });
+
+        reply.code(status).header("x-gateway-error-class", errorClass);
+        return {
+          error: {
+            message: "streaming response was not delivered",
+            type: "internal_error",
+            code: "stream_not_delivered",
+          },
+        };
+      }
 
       if (outcome.kind === "ok") {
         opts.breaker.recordResult("SUCCESS");
@@ -312,14 +395,14 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
 // budget-skip, a path unreachable end-to-end.
 export function deriveRetryDisposition(
   attempts: number,
-  outcome: Outcome,
+  outcome: AttemptResult,
   signal: AbortSignal,
 ): RetryDisposition {
   if (attempts === 2) {
     return "attempted";
   }
 
-  if (outcome.kind === "ok") {
+  if (isAcceptedStream(outcome) || outcome.kind === "ok") {
     return "ineligible";
   }
 

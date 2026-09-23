@@ -1,5 +1,9 @@
 import type { ErrorOutcome, Outcome } from "../upstream/outcome.js";
-import { isRetryEligible, retryAfterMs } from "../upstream/retry-eligibility.js";
+import {
+  isRetryEligible,
+  retryAfterMs,
+} from "../upstream/retry-eligibility.js";
+import { isAcceptedStream, type AttemptResult } from "../upstream/stream.js";
 
 const RETRY_BACKOFF_MS = 100;
 
@@ -22,13 +26,12 @@ export type RetryOptions = {
 };
 
 // Performs at most one retry per logical request (two attempts maximum).
-// Consumes and returns an Outcome; it never throws to express a retry, budget,
-// or abort decision. The only rejection that may escape is a re-thrown
-// out-of-contract abort reason.
+// It never throws to express a retry, budget, or abort decision. The only
+// rejection that may escape is a re-thrown out-of-contract abort reason.
 export async function retry(
-  op: () => Promise<Outcome>,
+  op: () => Promise<AttemptResult>,
   opts: RetryOptions,
-): Promise<Outcome> {
+): Promise<AttemptResult> {
   const first = await op();
 
   if (!shouldRetry(first, opts)) {
@@ -63,9 +66,13 @@ export async function retry(
 }
 
 function shouldRetry(
-  outcome: Outcome,
+  outcome: AttemptResult,
   opts: RetryOptions,
 ): outcome is ErrorOutcome {
+  if (isAcceptedStream(outcome)) {
+    return false;
+  }
+
   return (
     outcome.kind !== "ok" &&
     !opts.signal.aborted &&

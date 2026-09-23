@@ -8,7 +8,7 @@ export type Logger = {
 
 const UNKNOWN = "UNKNOWN";
 
-function extractErrName(err: unknown): string {
+export function extractErrName(err: unknown): string {
   if (
     typeof err === "object" &&
     err !== null &&
@@ -97,7 +97,10 @@ export function resolveRejection(
   err: unknown,
   signal: AbortSignal,
   logger: Logger,
-): Extract<Outcome, { kind: "network_failed" | "aborted" | "redirect_blocked" }> {
+): Extract<
+  Outcome,
+  { kind: "network_failed" | "aborted" | "redirect_blocked" }
+> {
   const abortIdentity = err === signal.reason;
   let arm: RejectionFacts;
   let causeCode: string | undefined;

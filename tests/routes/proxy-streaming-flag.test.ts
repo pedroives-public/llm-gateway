@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CircuitBreaker } from "../../src/reliability/circuit-breaker.js";
+import type { ProxyRouteOptions } from "../../src/routes/proxy.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
 import { bearer } from "../helpers/fake-auth-db.js";
 import { stubBreaker } from "../helpers/breaker-stubs.js";
@@ -9,10 +10,10 @@ import { buildProxyApp } from "../helpers/proxy-app.js";
 // OFF keeps the buffered-only contract: `stream: true` is rejected at the
 // schema. ON accepts a boolean `stream`.
 //
-// No streaming branch exists yet, so the ON cells stop the request at the
-// circuit breaker: a breaker that refuses admission answers 503 before any
-// upstream call. That proves the body passed the schema without sending a
-// `stream: true` body down the buffered path.
+// The ON cells stop the request at the circuit breaker: a breaker that
+// refuses admission answers 503 before any upstream call. That proves the
+// body passed the schema without reaching either upstream seam; the
+// streaming seam injected below throws if a cell ever reaches it.
 
 const validBody = {
   model: "gpt-4o",
@@ -45,6 +46,15 @@ function countingUpstream(): {
   };
 }
 
+// No cell in this file sends a `stream: true` body past the breaker, so the
+// streaming seam must never run; reaching it is a visible failure.
+const streamingSeamMustNotRun: ProxyRouteOptions["upstreamStreaming"] =
+  () => {
+    throw new Error(
+      "upstreamStreaming must not run: every cell here stops at the schema or the breaker",
+    );
+  };
+
 async function post(
   options: { streamingEnabled: boolean; breaker: CircuitBreaker },
   payload: Record<string, unknown>,
@@ -54,6 +64,7 @@ async function post(
     breaker: options.breaker,
     streamingEnabled: options.streamingEnabled,
     upstreamBuffered: upstream.buffered,
+    upstreamStreaming: streamingSeamMustNotRun,
   });
 
   try {

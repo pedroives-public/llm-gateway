@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   createCircuitBreaker,
   type CircuitBreaker,
+  type ProbeOutcome,
 } from "../../src/reliability/circuit-breaker.js";
 import { createOpenAIClient } from "../../src/upstream/openai.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
@@ -10,6 +11,11 @@ import { bearer } from "../helpers/fake-auth-db.js";
 import { stubBreaker } from "../helpers/breaker-stubs.js";
 import { listenEphemeral } from "../helpers/ephemeral-server.js";
 import { buildProxyApp } from "../helpers/proxy-app.js";
+import {
+  UPSTREAM_CLOSE_DEADLINE_MS,
+  bufferedTripwire,
+  withinDeadline,
+} from "../helpers/streaming-seams.js";
 
 // One client must not open the process-wide circuit breaker for everyone else
 // by sending `stream: true`: a streaming upstream answers it 200 + SSE, which
@@ -41,7 +47,7 @@ const noopLog = { info: () => {} };
 
 describe("stream:true must not open the shared circuit breaker", () => {
   it(
-    "stream:true (SSE-shaped 200) does not open the shared breaker for another client",
+    "stream:true (SSE-shaped 200) does not open the shared breaker for another client, with streaming ON",
     { timeout: 30_000 },
     async () => {
       // >= FAILURE_LIMIT (5) with margin; the exact threshold is pinned in
@@ -49,9 +55,11 @@ describe("stream:true must not open the shared circuit breaker", () => {
       const ATTACKER_REQUESTS = 7;
 
       // Fake upstream: a real streaming provider answers `stream: true` with an
-      // SSE body (unparseable as JSON) and a normal request with JSON. It MUST
-      // end each response — a held-open stream would block the reader to the
-      // wall-clock and open the breaker for the wrong vector.
+      // SSE head and frames, and a normal request with JSON. The SSE body is
+      // never ended, so its connection closes only when the gateway cancels
+      // its read: each close is the evidence of one cancel. The victim's JSON
+      // body is ended normally.
+      const streamCloses: Promise<boolean>[] = [];
       const server = http.createServer((req, res) => {
         res.on("error", () => {});
         let raw = "";
@@ -67,9 +75,16 @@ describe("stream:true must not open the shared circuit breaker", () => {
             streamRequested = false;
           }
           if (streamRequested) {
+            streamCloses.push(
+              new Promise<boolean>((resolve) => {
+                res.on("close", () => {
+                  resolve(res.writableFinished);
+                });
+              }),
+            );
             res.writeHead(200, { "content-type": "text/event-stream" });
-            res.end(
-              'data: {"id":"chatcmpl-x","choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n',
+            res.write(
+              'data: {"id":"chatcmpl-x","choices":[{"delta":{"content":"hi"}}]}\n\n',
             );
           } else {
             res.writeHead(200, { "content-type": "application/json" });
@@ -80,16 +95,30 @@ describe("stream:true must not open the shared circuit breaker", () => {
       const { port, close } = await listenEphemeral(server);
 
       // Real breaker + real client (pointed at the fake) wired through the real
-      // route. Holding the breaker lets us read its state directly; injecting
-      // the client avoids mutating OPENAI_BASE_URL.
+      // route. The breaker is wrapped only to record each vote before it
+      // reaches the real state machine; injecting the client avoids mutating
+      // OPENAI_BASE_URL. The buffered seam guards the forbidden pattern and
+      // otherwise delegates to the real client, which serves the victim.
       const heldBreaker = createCircuitBreaker(noopLog);
+      const recorded: ProbeOutcome[] = [];
+      const votingBreaker: CircuitBreaker = {
+        tryAcquire: () => heldBreaker.tryAcquire(),
+        recordResult: (outcome) => {
+          recorded.push(outcome);
+          heldBreaker.recordResult(outcome);
+        },
+        getState: () => heldBreaker.getState(),
+      };
       const client = createOpenAIClient({
         apiKey: "gateway-key",
         baseURL: `http://127.0.0.1:${port}`,
       });
+      const violations: string[] = [];
       const app = await buildProxyApp({
-        breaker: heldBreaker,
-        upstreamBuffered: client.buffered,
+        breaker: votingBreaker,
+        streamingEnabled: true,
+        upstreamBuffered: bufferedTripwire(violations, client.buffered).seam,
+        upstreamStreaming: client.streaming,
       });
 
       const attackerAuth = bearer();
@@ -98,12 +127,18 @@ describe("stream:true must not open the shared circuit breaker", () => {
       try {
         // Attacker: one client hammers `stream: true`, serially (parallel would
         // race the 5th FAILURE against the victim's admission).
+        const attackerAnswers: unknown[] = [];
         for (let i = 0; i < ATTACKER_REQUESTS; i++) {
-          await app.inject({
+          const res = await app.inject({
             method: "POST",
             url: "/v1/chat/completions",
             headers: { authorization: attackerAuth },
             payload: { ...validBody, stream: true },
+          });
+          attackerAnswers.push({
+            status: res.statusCode,
+            errorClass: res.headers["x-gateway-error-class"],
+            code: (res.json() as { error?: { code?: unknown } }).error?.code,
           });
         }
 
@@ -117,11 +152,53 @@ describe("stream:true must not open the shared circuit breaker", () => {
           payload: validBody,
         });
 
-        expect(victim.statusCode).toBe(200);
+        expect(violations).toStrictEqual([]);
+        // The votes come before the answers: a FAILURE vote opens the breaker
+        // and changes the later answers too, and only this assertion names why.
+        expect(
+          recorded,
+          "an accepted stream that delivered nothing votes INCONCLUSIVE, never SUCCESS (a HALF_OPEN probe would close the breaker on an upstream that may die on the next byte) and never FAILURE (one client would open the breaker for everyone)",
+        ).toStrictEqual([
+          "INCONCLUSIVE",
+          "INCONCLUSIVE",
+          "INCONCLUSIVE",
+          "INCONCLUSIVE",
+          "INCONCLUSIVE",
+          "INCONCLUSIVE",
+          "INCONCLUSIVE",
+          "SUCCESS",
+        ]);
+        expect(
+          attackerAnswers,
+          "a head recognized as SSE is not delivered in slice 1: the gap is the gateway's own, so 500 gateway-fault stream_not_delivered, never a 502 that blames the upstream",
+        ).toStrictEqual(
+          Array.from({ length: ATTACKER_REQUESTS }, () => ({
+            status: 500,
+            errorClass: "gateway-fault",
+            code: "stream_not_delivered",
+          })),
+        );
+        expect(
+          victim.statusCode,
+          "stream: true from one client opened the shared breaker for another client",
+        ).toBe(200);
         expect(victim.json()).toStrictEqual(VICTIM_BODY);
         expect(heldBreaker.getState()).toBe("CLOSED");
+
+        const finished = await withinDeadline(
+          Promise.all(streamCloses),
+          UPSTREAM_CLOSE_DEADLINE_MS,
+          "an accepted stream's upstream body was not cancelled: the fake saw no close before the deadline",
+        );
+        expect(
+          finished,
+          "an upstream connection closed only after the fake ended the body, not by a cancel",
+        ).toStrictEqual(Array.from({ length: ATTACKER_REQUESTS }, () => false));
       } finally {
         await app.close();
+        // A failed cell leaves held SSE responses open; close() would wait for
+        // them forever.
+        server.closeAllConnections();
         await close();
       }
     },
