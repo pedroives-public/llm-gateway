@@ -124,6 +124,7 @@ export async function buildApp(
         breaker,
         streamingEnabled,
         upstreamBuffered: upstream.buffered,
+        upstreamStreaming: upstream.streaming,
       });
     }
   });
