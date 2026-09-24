@@ -28,7 +28,8 @@ Two identities, as everywhere in this repository:
 
 | Token | Created | Expires (UTC) | Rotate by |
 |---|---|---|---|
-| `BgRyRGOe…` (current) | 2026-08-27 | 2026-09-26 17:02 | **2026-09-24** |
+| `1wDMDnOq…` (current) | 2026-09-24 | 2026-10-24 17:49 | **2026-10-22** |
+| `BgRyRGOe…` | 2026-08-27 | 2026-09-26 17:02 | rotated 2026-09-24 (revoked 17:59 UTC) |
 | next | day of rotation | +720 h | expiry − 2 days |
 
 Rotate two days before expiry so a failed attempt still has a working token
