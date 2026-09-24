@@ -433,8 +433,13 @@ describe.each([
 ])(
   "streaming flag ON, $transport: a non-2xx head gets the buffered recognition",
   ({ stream }) => {
+    // Twice the 1 MiB response cap, so the cap fires whatever the chunking.
+    const OVER_CAP_BODY_BYTES = 2 * 1024 * 1024;
+
     // One literal answer per upstream head, identical for both transports:
     // the streaming attempt reaches the same recognition as the buffered one.
+    // The over-cap row pins the path of a read that ends before recognition:
+    // it must pass through as the capped terminal, never as a thrown error.
     it.each([
       {
         upstreamStatus: 500,
@@ -465,6 +470,17 @@ describe.each([
           status: 400,
           errorClass: "client-fault",
           body: '{"error":{"code":"invalid_value"}}',
+          upstreamCalls: 1,
+          votes: ["INCONCLUSIVE"],
+        },
+      },
+      {
+        upstreamStatus: 500,
+        upstreamBody: "x".repeat(OVER_CAP_BODY_BYTES),
+        expected: {
+          status: 502,
+          errorClass: "upstream-fault",
+          body: '{"error":{"message":"upstream response too large","type":"server_error","code":"response_too_large"}}',
           upstreamCalls: 1,
           votes: ["INCONCLUSIVE"],
         },
