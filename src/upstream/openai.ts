@@ -67,23 +67,7 @@ export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
       return resolveRejection(err, signal, log);
     }
 
-    let read: CappedRead;
-    try {
-      read = await readBodyWithCap(response);
-    } catch (err) {
-      // A mid-body read rejection (e.g. the wall-clock abort) is the same boundary.
-      return resolveRejection(err, signal, log);
-    }
-
-    if (read.capped) {
-      // Synthesized terminal, not a rejection: the client stopped its own read.
-      return { kind: "aborted", abort_kind: "response_size_cap" };
-    }
-
-    const retryAfter = response.headers.get("retry-after") ?? undefined;
-    return recognizeResponse(
-      toResponseFacts(response.status, read.bodyText, retryAfter),
-    );
+    return readAndRecognize(response, signal, log);
   };
 
   const streaming: StreamingUpstream = async (body, signal, log) => {
@@ -96,25 +80,11 @@ export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
     }
 
     if (response.status < 200 || response.status >= 300) {
-      let read: CappedRead;
-      try {
-        read = await readBodyWithCap(response);
-      } catch (err) {
-        // A mid-body read rejection (e.g. the wall-clock abort) is the same boundary.
-        return resolveRejection(err, signal, log);
-      }
+      const recognized = await readAndRecognize(response, signal, log);
 
-      if (read.capped) {
-        // Synthesized terminal, not a rejection: the client stopped its own read.
-        return { kind: "aborted", abort_kind: "response_size_cap" };
-      }
-
-      const retryAfter = response.headers.get("retry-after") ?? undefined;
-      const recognized = recognizeResponse(
-        toResponseFacts(response.status, read.bodyText, retryAfter),
-      );
-
-      if (recognized.kind !== "upstream_error") {
+      // A rejected or capped read passes through as it is; only recognition
+      // itself must never answer a non-2xx as a success or as undecodable.
+      if (recognized.kind === "ok" || recognized.kind === "undecodable") {
         throw new Error(
           "Every non-2xx response must be recognized as an upstream_error",
         );
@@ -143,6 +113,32 @@ export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
   };
 
   return { buffered, streaming };
+}
+
+// Reads the body under the size cap and recognizes the response. Both
+// transports use it, so a non-2xx head gets the same recognition on either.
+async function readAndRecognize(
+  response: Response,
+  signal: AbortSignal,
+  log: Logger,
+): Promise<Outcome> {
+  let read: CappedRead;
+  try {
+    read = await readBodyWithCap(response);
+  } catch (err) {
+    // A mid-body read rejection (e.g. the wall-clock abort) is the same boundary.
+    return resolveRejection(err, signal, log);
+  }
+
+  if (read.capped) {
+    // Synthesized terminal, not a rejection: the client stopped its own read.
+    return { kind: "aborted", abort_kind: "response_size_cap" };
+  }
+
+  const retryAfter = response.headers.get("retry-after") ?? undefined;
+  return recognizeResponse(
+    toResponseFacts(response.status, read.bodyText, retryAfter),
+  );
 }
 
 // Parse only a 2xx; a non-2xx is forwarded verbatim as body_raw, and a 2xx that
