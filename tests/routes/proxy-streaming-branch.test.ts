@@ -74,6 +74,9 @@ async function holdOpenUpstream(
     req.resume();
     req.on("end", () => {
       res.writeHead(status, headers);
+      // Send the head now: for a 204 the server drops body writes, and
+      // without an explicit flush its head would never leave.
+      res.flushHeaders();
       res.write(firstBytes);
     });
   });
@@ -339,9 +342,11 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
     "a 2xx that is not SSE breaks the upstream's own claim of success: 502 upstream-fault with a FAILURE vote";
 
   // Every row sends the same body bytes, a valid SSE frame; only the head
-  // changes, so the head alone decides each answer.
+  // changes, so the head alone decides each answer. A 204 or 205 cannot carry
+  // them: the server drops the bytes and fetch exposes no body at all.
   it.each([
     {
+      status: 200,
       head: "text/event-stream",
       contentType: "text/event-stream",
       expected: SSE_TERMINAL,
@@ -349,6 +354,7 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       because: "a 2xx head declaring text/event-stream is recognized as SSE",
     },
     {
+      status: 200,
       head: "text/event-stream with a charset parameter",
       contentType: "text/event-stream; charset=utf-8",
       expected: SSE_TERMINAL,
@@ -357,6 +363,7 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
         "the comparison is by media type, the part before the first ';', so a parameter does not change the answer",
     },
     {
+      status: 200,
       head: "text/event-stream in upper case",
       contentType: "TEXT/EVENT-STREAM",
       expected: SSE_TERMINAL,
@@ -364,6 +371,7 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       because: "media types compare case-insensitively",
     },
     {
+      status: 200,
       head: "application/json",
       contentType: "application/json",
       expected: UNDECODABLE_TERMINAL,
@@ -371,6 +379,7 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       because: "a 2xx whose media type is not text/event-stream is undecodable",
     },
     {
+      status: 200,
       head: "no content-type",
       contentType: undefined,
       expected: UNDECODABLE_TERMINAL,
@@ -378,11 +387,29 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       because:
         "a 2xx without content-type makes no SSE claim, so it is not SSE (fail-closed)",
     },
+    {
+      status: 204,
+      head: "text/event-stream and a status that cannot carry a body",
+      contentType: "text/event-stream",
+      expected: UNDECODABLE_TERMINAL,
+      terminalReason: UNDECODABLE_TERMINAL_REASON,
+      because:
+        "a 2xx status that cannot carry a body can never carry a frame: it is the end-of-body-before-the-first-frame terminal, known at the head",
+    },
+    {
+      status: 205,
+      head: "text/event-stream and a status that cannot carry a body",
+      contentType: "text/event-stream",
+      expected: UNDECODABLE_TERMINAL,
+      terminalReason: UNDECODABLE_TERMINAL_REASON,
+      because:
+        "a 2xx status that cannot carry a body can never carry a frame: it is the end-of-body-before-the-first-frame terminal, known at the head",
+    },
   ])(
-    "200 with $head → $expected.code",
-    async ({ contentType, expected, because, terminalReason }) => {
+    "$status with $head → $expected.code",
+    async ({ status, contentType, expected, because, terminalReason }) => {
     const upstream = await holdOpenUpstream(
-      200,
+      status,
       contentType === undefined ? {} : { "content-type": contentType },
       'data: {"id":"chatcmpl-x","choices":[{"delta":{"content":"hi"}}]}\n\n',
     );
