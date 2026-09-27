@@ -308,7 +308,11 @@ describe("streaming flag ON: the fork reads the stream value Ajv coerced", () =>
 async function answeringUpstream(
   status: number,
   body: string,
-): Promise<{ port: number; requests: () => number; close: () => Promise<void> }> {
+): Promise<{
+  port: number;
+  requests: () => number;
+  close: () => Promise<void>;
+}> {
   let requests = 0;
   const server = http.createServer((req, res) => {
     requests += 1;
@@ -408,49 +412,49 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
   ])(
     "$status with $head → $expected.code",
     async ({ status, contentType, expected, because, terminalReason }) => {
-    const upstream = await holdOpenUpstream(
-      status,
-      contentType === undefined ? {} : { "content-type": contentType },
-      'data: {"id":"chatcmpl-x","choices":[{"delta":{"content":"hi"}}]}\n\n',
-    );
-    const client = createOpenAIClient({
-      apiKey: "gateway-key",
-      baseURL: `http://127.0.0.1:${upstream.port}`,
-    });
-    const violations: string[] = [];
-    const { breaker, recorded } = recordingBreaker();
-    const app = await buildProxyApp({
-      breaker,
-      streamingEnabled: true,
-      upstreamBuffered: bufferedTripwire(violations).seam,
-      upstreamStreaming: client.streaming,
-    });
-
-    try {
-      const res = await app.inject({
-        method: "POST",
-        url: "/v1/chat/completions",
-        headers: { authorization: bearer() },
-        payload: { ...validBody, stream: true },
+      const upstream = await holdOpenUpstream(
+        status,
+        contentType === undefined ? {} : { "content-type": contentType },
+        'data: {"id":"chatcmpl-x","choices":[{"delta":{"content":"hi"}}]}\n\n',
+      );
+      const client = createOpenAIClient({
+        apiKey: "gateway-key",
+        baseURL: `http://127.0.0.1:${upstream.port}`,
+      });
+      const violations: string[] = [];
+      const { breaker, recorded } = recordingBreaker();
+      const app = await buildProxyApp({
+        breaker,
+        streamingEnabled: true,
+        upstreamBuffered: bufferedTripwire(violations).seam,
+        upstreamStreaming: client.streaming,
       });
 
-      expect(violations).toStrictEqual([]);
-      const answer = {
-        status: res.statusCode,
-        errorClass: res.headers["x-gateway-error-class"],
-        code: (res.json() as { error?: { code?: unknown } }).error?.code,
-        votes: recorded,
-      };
-      // Two questions, two assertions: the verdict on the head carries the
-      // row's reason, and the terminal that verdict leads to carries its own,
-      // so a defect in one never fails naming the other.
-      expect(answer.code, because).toBe(expected.code);
-      expect(answer, terminalReason).toStrictEqual(expected);
-    } finally {
-      await app.close();
-      await upstream.close();
-    }
-  },
+      try {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: bearer() },
+          payload: { ...validBody, stream: true },
+        });
+
+        expect(violations).toStrictEqual([]);
+        const answer = {
+          status: res.statusCode,
+          errorClass: res.headers["x-gateway-error-class"],
+          code: (res.json() as { error?: { code?: unknown } }).error?.code,
+          votes: recorded,
+        };
+        // Two questions, two assertions: the verdict on the head carries the
+        // row's reason, and the terminal that verdict leads to carries its own,
+        // so a defect in one never fails naming the other.
+        expect(answer.code, because).toBe(expected.code);
+        expect(answer, terminalReason).toStrictEqual(expected);
+      } finally {
+        await app.close();
+        await upstream.close();
+      }
+    },
   );
 });
 
