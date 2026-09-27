@@ -12,7 +12,9 @@ export const STREAMING_SEAM_REACHED_WITHOUT_STREAM =
 // A measurement of the fetch body's cancel() on loopback saw the server
 // observe the close within 300 ms (three runs). Three times that window and
 // well under the runner's 5 s timeout, so a missing cancel fails with its own
-// sentence instead of a runner timeout.
+// sentence instead of a runner timeout. The same bound covers an answer the
+// response head decides alone: it reads no body, and each cell of the head
+// table took at most 30 ms end to end over three runs, far inside the window.
 export const UPSTREAM_CLOSE_DEADLINE_MS = 1_000;
 
 type BufferedSeam = ProxyRouteOptions["upstreamBuffered"];
