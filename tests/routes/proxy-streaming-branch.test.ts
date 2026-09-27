@@ -392,6 +392,15 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
         "a 2xx without content-type makes no SSE claim, so it is not SSE (fail-closed)",
     },
     {
+      status: 201,
+      head: "text/event-stream and a 2xx that is not 200",
+      contentType: "text/event-stream",
+      expected: SSE_TERMINAL,
+      terminalReason: SSE_TERMINAL_REASON,
+      because:
+        "the 2xx filter is the range 200-299, as the official SDK's response.ok: the browser EventSource's 200-only rule binds the head the gateway sends its own client, not the upstream head it consumes as a fetch client",
+    },
+    {
       status: 204,
       head: "text/event-stream and a status that cannot carry a body",
       contentType: "text/event-stream",
@@ -431,12 +440,16 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       });
 
       try {
-        const res = await app.inject({
-          method: "POST",
-          url: "/v1/chat/completions",
-          headers: { authorization: bearer() },
-          payload: { ...validBody, stream: true },
-        });
+        const res = await withinDeadline(
+          app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            headers: { authorization: bearer() },
+            payload: { ...validBody, stream: true },
+          }),
+          UPSTREAM_CLOSE_DEADLINE_MS,
+          "the head alone must decide the answer: the gateway sent no response before the deadline",
+        );
 
         expect(violations).toStrictEqual([]);
         const answer = {
