@@ -6,10 +6,11 @@ import {
 import { withinDeadline } from "../helpers/streaming-seams.js";
 
 // For a body that stays open, the cells whose answer is decided from bytes
-// already in memory (the cap, a lone CR followed by another byte): nothing the
-// decision needs is still in flight. One second is far above that and well
-// under the runner's 5 s timeout, so a reader that keeps waiting for more
-// bytes fails with its own sentence instead of a runner timeout.
+// already in memory (the cap, a lone CR followed by another byte, a second
+// frame already held): nothing the decision needs is still in flight. One
+// second is far above that and well under the runner's 5 s timeout, so a
+// reader that keeps waiting for more bytes fails with its own sentence
+// instead of a runner timeout.
 const IN_MEMORY_DECISION_DEADLINE_MS = 1_000;
 
 const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
@@ -301,5 +302,24 @@ describe("createSseFrameReader", () => {
       settled,
       "a transport failure stays a rejection carrying its own error, which the caller classifies as it does the buffered read's; it is never turned into an end such as eof_partial",
     ).toStrictEqual({ outcome: "rejected", same: true });
+  });
+
+  it("a complete frame already held comes out without another read while the body is still open", async () => {
+    const reader = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encode("data: a\n\ndata: b\n\n"));
+      },
+    }).getReader();
+
+    const nextFrame = createSseFrameReader(reader);
+
+    expect(
+      await withinDeadline(
+        pullTimes(nextFrame, 2),
+        IN_MEMORY_DECISION_DEADLINE_MS,
+        "a complete frame already held must come out without another read: no frame came before the deadline",
+      ),
+      "the search runs before the read, so each complete frame comes out as soon as it is held, without waiting for more bytes: one chunk carrying two frames yields both while the body is still open",
+    ).toStrictEqual([frame("data: a\n\n", "a"), frame("data: b\n\n", "b")]);
   });
 });
