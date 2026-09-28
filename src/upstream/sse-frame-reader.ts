@@ -134,16 +134,19 @@ function findFrameEnd(bytes: Uint8Array, bodyClosed: boolean): FrameEnd {
 
 type LineEnd = 0 | 1 | 2 | "undecided";
 
+const CR = 0x0d;
+const LF = 0x0a;
+
 function lineEndLengthAt(
   bytes: Uint8Array,
   index: number,
   bodyClosed: boolean,
 ): LineEnd {
-  if (bytes[index] === 0x0a) {
+  if (bytes[index] === LF) {
     return 1;
   }
 
-  if (bytes[index] === 0x0d) {
+  if (bytes[index] === CR) {
     if (index === bytes.length - 1) {
       if (bodyClosed) {
         return 1;
@@ -152,7 +155,7 @@ function lineEndLengthAt(
       return "undecided";
     }
 
-    if (index + 1 < bytes.length && bytes[index + 1] === 0x0a) {
+    if (index + 1 < bytes.length && bytes[index + 1] === LF) {
       return 2;
     }
 
