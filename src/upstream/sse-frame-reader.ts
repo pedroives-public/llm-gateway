@@ -74,10 +74,6 @@ export function createSseFrameReader(
         return { kind: "cap" };
       }
 
-      if (!value || value.length === 0) {
-        continue;
-      }
-
       const newStored = new Uint8Array(stored.length + value.length);
       newStored.set(stored, 0);
       newStored.set(value, stored.length);
