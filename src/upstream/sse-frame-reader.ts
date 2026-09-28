@@ -34,7 +34,7 @@ export function createSseFrameReader(
     while (true) {
       const end = findFrameEnd(stored, bodyClosed);
 
-      if (end !== -1) {
+      if (end !== "none") {
         const frame = stored.slice(0, end);
         stored = stored.slice(end);
 
@@ -86,7 +86,15 @@ export function createSseFrameReader(
   };
 }
 
-function findFrameEnd(bytes: Uint8Array, bodyClosed: boolean): number {
+// A frame end is a position in the held bytes, or "none". The brand makes a
+// bare number, such as a -1 meant as "not found", a compile error wherever a
+// FrameEnd is expected: only the cast in findFrameEnd turns a number into a
+// FrameEndIndex. That cast is not checked, at compile time or at runtime, so
+// a wrong number passed through it is caught only by the reader's tests.
+type FrameEndIndex = number & { readonly __brand: "FrameEndIndex" };
+type FrameEnd = FrameEndIndex | "none";
+
+function findFrameEnd(bytes: Uint8Array, bodyClosed: boolean): FrameEnd {
   let lineStart = 0;
   let i = 0;
 
@@ -98,20 +106,20 @@ function findFrameEnd(bytes: Uint8Array, bodyClosed: boolean): number {
     }
 
     if (lineEndLength === "undecided") {
-      return -1;
+      return "none";
     }
 
     const lineEnd = i + lineEndLength;
 
     if (i === lineStart) {
-      return lineEnd;
+      return lineEnd as FrameEndIndex;
     }
 
     i = lineEnd;
     lineStart = i;
   }
 
-  return -1;
+  return "none";
 }
 
 type LineEnd = 0 | 1 | 2 | "undecided";
