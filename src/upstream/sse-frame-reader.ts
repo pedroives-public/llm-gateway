@@ -41,7 +41,7 @@ export function createSseFrameReader(
         const text = decoder.decode(frame);
         const validData = text
           .split(/\r\n|\r|\n/)
-          .filter((line) => (line.startsWith("data:") ? line : null));
+          .filter((line) => line.startsWith("data:") || line === "data");
 
         if (validData.length === 0) {
           return { kind: "frame", bytes: frame, data: null };

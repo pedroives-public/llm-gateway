@@ -214,6 +214,13 @@ describe("createSseFrameReader", () => {
       because:
         "bytes without their empty line never form a frame: the end is eof_partial, and the incomplete bytes are never yielded",
     },
+    {
+      name: "a data field with no colon",
+      chunks: [encode("data\n\n")],
+      expected: [frame("data\n\n", ""), { kind: "eof" }],
+      because:
+        "a line without a colon is a field whose name is the whole line and whose value is empty (WHATWG HTML, 'Interpreting an event stream'): a line that is exactly data yields the empty text, as data: does",
+    },
   ])("$name", async ({ chunks, expected, because }) => {
     const nextFrame = createSseFrameReader(closedBody(chunks));
 
