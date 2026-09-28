@@ -5,6 +5,13 @@
 // with the largest legitimate frame the provider can send (tool-call arguments
 // chunk, final `usage` chunk, error event) once that probe exists.
 //
+// What it bounds: the bytes still held without a frame after the newest chunk
+// has been searched for frame ends, not the held bytes plus that chunk. The
+// check runs after the chunk is joined, just before the next read, so held
+// memory can briefly reach the cap plus one chunk: the largest chunk Node fetch
+// delivered in a local probe was 64 KiB, and an OpenAI stream measured the same
+// day gave at most 6 KiB (Node 22.22.3, undici 6.24.1).
+//
 // Not the buffered 1 MiB response cap: that cap fires on a response the parser
 // would accept and that is merely large, which is no evidence against the
 // upstream. This one fires when bytes never form a frame, the same evidence
@@ -63,15 +70,15 @@ export function createSseFrameReader(
         return { kind: "eof" };
       }
 
+      if (stored.length > PARSER_BUFFER_CAP) {
+        return { kind: "cap" };
+      }
+
       const { value, done } = await reader.read();
 
       if (done) {
         bodyClosed = true;
         continue;
-      }
-
-      if (stored.length + value.length > PARSER_BUFFER_CAP) {
-        return { kind: "cap" };
       }
 
       const newStored = new Uint8Array(stored.length + value.length);
