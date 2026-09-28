@@ -97,7 +97,7 @@ function findFrameEnd(bytes: Uint8Array, bodyClosed: boolean): number {
       continue;
     }
 
-    if (lineEndLength === -1) {
+    if (lineEndLength === "undecided") {
       return -1;
     }
 
@@ -114,11 +114,13 @@ function findFrameEnd(bytes: Uint8Array, bodyClosed: boolean): number {
   return -1;
 }
 
+type LineEnd = 0 | 1 | 2 | "undecided";
+
 function lineEndLengthAt(
   bytes: Uint8Array,
   index: number,
   bodyClosed: boolean,
-): number {
+): LineEnd {
   if (bytes[index] === 0x0a) {
     return 1;
   }
@@ -129,7 +131,7 @@ function lineEndLengthAt(
         return 1;
       }
 
-      return -1;
+      return "undecided";
     }
 
     if (index + 1 < bytes.length && bytes[index + 1] === 0x0a) {
