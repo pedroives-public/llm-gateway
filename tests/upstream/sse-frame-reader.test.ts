@@ -232,6 +232,13 @@ describe("createSseFrameReader", () => {
       because:
         "only one leading byte-order mark is stripped, at the start of the stream (WHATWG HTML, 'Interpreting an event stream'): later it is an ordinary character, so the line names the field U+FEFF data, not data, and the frame yields no text while its bytes stay intact",
     },
+    {
+      name: "a bare empty line before a frame",
+      chunks: [encode("\ndata: a\n\n")],
+      expected: [frame("\n", null), frame("data: a\n\n", "a"), { kind: "eof" }],
+      because:
+        "an empty line with no field before it still ends a frame: the reader yields its line-end bytes with no text, so no byte is dropped or moved into the next frame; WHATWG dispatches nothing for it, and what that frame means is the caller's decision",
+    },
   ])("$name", async ({ chunks, expected, because }) => {
     const nextFrame = createSseFrameReader(closedBody(chunks));
 
