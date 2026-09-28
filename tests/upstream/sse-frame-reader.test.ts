@@ -329,4 +329,25 @@ describe("createSseFrameReader", () => {
       "the search runs before the read, so each complete frame comes out as soon as it is held, without waiting for more bytes: one chunk carrying two frames yields both while the body is still open",
     ).toStrictEqual([frame("data: a\n\n", "a"), frame("data: b\n\n", "b")]);
   });
+
+  it("a chunk that completes a held frame is searched before PARSER_BUFFER_CAP is checked", async () => {
+    const reader = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encode(`data: ${"x".repeat(PARSER_BUFFER_CAP / 2)}\n`),
+        );
+        controller.enqueue(
+          encode(`\ndata: ${"y".repeat(PARSER_BUFFER_CAP / 2)}\n\n`),
+        );
+        controller.close();
+      },
+    }).getReader();
+
+    const nextFrame = createSseFrameReader(reader);
+
+    expect(
+      (await pullTimes(nextFrame, 3)).map((result) => result.kind),
+      "PARSER_BUFFER_CAP bounds the bytes still without a frame after the new chunk is searched, not the held bytes plus the chunk: two frames under the cap whose sum passes it come out as two frames",
+    ).toStrictEqual(["frame", "frame", "eof"]);
+  });
 });
