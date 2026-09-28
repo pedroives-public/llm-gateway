@@ -33,9 +33,10 @@ export type SseFrame = Frame | End;
 export function createSseFrameReader(
   reader: ReadableStreamDefaultReader<Uint8Array>,
 ): () => Promise<SseFrame> {
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
   let stored = new Uint8Array(0);
   let bodyClosed = false;
+  let leadingBOMChecked = false;
 
   return async function nextFrame(): Promise<SseFrame> {
     while (true) {
@@ -45,7 +46,13 @@ export function createSseFrameReader(
         const frame = stored.slice(0, end);
         stored = stored.slice(end);
 
-        const text = decoder.decode(frame);
+        const decoded = decoder.decode(frame);
+        const text =
+          !leadingBOMChecked && decoded.startsWith("\uFEFF")
+            ? decoded.slice(1)
+            : decoded;
+        leadingBOMChecked = true;
+
         const validData = text
           .split(/\r\n|\r|\n/)
           .filter((line) => line.startsWith("data:") || line === "data");

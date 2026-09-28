@@ -221,6 +221,17 @@ describe("createSseFrameReader", () => {
       because:
         "a line without a colon is a field whose name is the whole line and whose value is empty (WHATWG HTML, 'Interpreting an event stream'): a line that is exactly data yields the empty text, as data: does",
     },
+    {
+      name: "a byte-order mark after the first frame",
+      chunks: [encode("data: a\n\n\uFEFFdata: b\n\n")],
+      expected: [
+        frame("data: a\n\n", "a"),
+        frame("\uFEFFdata: b\n\n", null),
+        { kind: "eof" },
+      ],
+      because:
+        "only one leading byte-order mark is stripped, at the start of the stream (WHATWG HTML, 'Interpreting an event stream'): later it is an ordinary character, so the line names the field U+FEFF data, not data, and the frame yields no text while its bytes stay intact",
+    },
   ])("$name", async ({ chunks, expected, because }) => {
     const nextFrame = createSseFrameReader(closedBody(chunks));
 
