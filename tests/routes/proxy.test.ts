@@ -1006,6 +1006,61 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
     }
   });
 
+  it("8.10 wall-clock on the REAL breaker: six concurrent expiries in one window leave it CLOSED and the next request reaches the upstream", async () => {
+    const breaker = createCircuitBreaker({ info: () => {} });
+    let calls = 0;
+    // The first six calls hang until the gateway's own deadline fires; the
+    // seventh answers at once, so it only succeeds if the breaker let it in.
+    const upstream = (
+      _b: ChatCompletionsBody,
+      signal: AbortSignal,
+    ): Promise<Outcome> => {
+      calls += 1;
+      if (calls > 6) {
+        return Promise.resolve({ kind: "ok", status: 200, body_parsed: {} });
+      }
+      return new Promise((resolve) => {
+        signal.addEventListener(
+          "abort",
+          () => resolve({ kind: "aborted", abort_kind: "wall_clock_expired" }),
+          { once: true },
+        );
+      });
+    };
+    const { app, apiKey } = await buildWith(breaker, upstream);
+    const send = () =>
+      app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: `Bearer ${apiKey}` },
+        payload: validBody,
+      });
+    vi.useFakeTimers();
+    try {
+      // Concurrent, so all six expiries land inside one 30 s breaker window.
+      const pending = Array.from({ length: 6 }, () => send());
+      await vi.advanceTimersByTimeAsync(30_000);
+      const statuses = (await Promise.all(pending)).map((r) => r.statusCode);
+      expect(statuses).toEqual([504, 504, 504, 504, 504, 504]);
+      expect(
+        breaker.getState(),
+        "slow requests must not open the shared breaker",
+      ).toBe("CLOSED");
+
+      // Under fake timers the inject pipeline advances only when timers run.
+      const seventh = send();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(
+        (await seventh).statusCode,
+        "the next request must reach the upstream, not fast-fail",
+      ).toBe(200);
+      expect(calls).toBe(7);
+    } finally {
+      vi.useRealTimers();
+      await app.close();
+    }
+  });
+
   it("8.15 at-most-once: post-send network failure → 504, single attempt (no retry)", async () => {
     let calls = 0;
     const recorded: ProbeOutcome[] = [];
