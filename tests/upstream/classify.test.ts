@@ -179,11 +179,11 @@ describe("classify", () => {
     expect(result).toEqual(expected);
   });
 
-  it("classifies a wall-clock abort as gateway-fault, non-retryable, breaker delta 1 (class and breaker are independent axes)", () => {
+  it("classifies a wall-clock abort as gateway-fault, non-retryable, breaker delta 0 (the expiry proves occupancy was exceeded, never proof of an upstream failure)", () => {
     const log = makeLog();
     const expected = {
       error_class: "gateway-fault",
-      breaker_delta: 1,
+      breaker_delta: 0,
     };
 
     const result = classify(

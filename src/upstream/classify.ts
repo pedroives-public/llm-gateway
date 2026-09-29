@@ -128,9 +128,13 @@ export function classify(
             breaker_delta: 0,
           };
         case "wall_clock_expired":
+          // The expiry proves the request outlived its absolute budget, not
+          // that the upstream failed: the tenant chooses the workload (model,
+          // reasoning effort, output size), so slow legitimate requests would
+          // otherwise open the shared breaker for every tenant.
           return {
             error_class: "gateway-fault",
-            breaker_delta: 1,
+            breaker_delta: 0,
           };
         default:
           return assertNever(outcome.abort_kind);
