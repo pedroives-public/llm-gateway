@@ -463,7 +463,7 @@ describe("proxy route — buffered skeleton", () => {
     expect(recorded).toEqual(["FAILURE"]);
   });
 
-  it("aborted wall_clock_expired → 504 gateway-fault + FAILURE (spec-pinned body)", async () => {
+  it("aborted wall_clock_expired → 504 gateway-fault + INCONCLUSIVE (spec-pinned body)", async () => {
     const { res, recorded } = await runBuffered(() =>
       Promise.resolve({ kind: "aborted", abort_kind: "wall_clock_expired" }),
     );
@@ -476,7 +476,7 @@ describe("proxy route — buffered skeleton", () => {
         code: "wall_clock_exceeded",
       },
     });
-    expect(recorded).toEqual(["FAILURE"]);
+    expect(recorded).toEqual(["INCONCLUSIVE"]);
   });
 
   it("aborted response_size_cap → 502 upstream-fault + INCONCLUSIVE (proposed body)", async () => {
@@ -961,7 +961,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
     },
   );
 
-  it("8.10 wall-clock: upstream hangs past 30s → 504 gateway-fault", async () => {
+  it("8.10 wall-clock: upstream hangs past 30s → 504 gateway-fault, breaker INCONCLUSIVE", async () => {
     const recorded: ProbeOutcome[] = [];
     // Hangs until the gateway's own AbortSignal fires, then resolves to the
     // aborted Outcome the real client would synthesize (mirrors openai.ts).
@@ -997,7 +997,9 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       expect(
         (JSON.parse(res.payload) as { error: { code: string } }).error.code,
       ).toBe("wall_clock_exceeded");
-      expect(recorded).toEqual(["FAILURE"]); // wall-clock abort increments the breaker
+      // The silence may be a tenant's legitimately slow request, so the
+      // expiry carries no evidence about upstream availability.
+      expect(recorded).toEqual(["INCONCLUSIVE"]);
     } finally {
       vi.useRealTimers();
       await app.close();
@@ -1558,7 +1560,8 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       await vi.advanceTimersByTimeAsync(30_000);
       const res = await injected;
 
-      // Dead-weight: a signal.aborted shortcut also yields 504/gateway-fault/FAILURE.
+      // Discriminant: a signal.aborted shortcut also yields 504/gateway-fault,
+      // but as a wall-clock expiry it records INCONCLUSIVE, not FAILURE.
       expect(res.statusCode).toBe(504);
       expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
       expect(recorded).toEqual(["FAILURE"]);
