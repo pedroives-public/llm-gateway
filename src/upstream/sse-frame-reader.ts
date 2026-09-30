@@ -6,11 +6,12 @@
 // chunk, final `usage` chunk, error event) once that probe exists.
 //
 // What it bounds: the bytes still held without a frame after the newest chunk
-// has been searched for frame ends, not the held bytes plus that chunk. The
-// check runs after the chunk is joined, just before the next read, so held
-// memory can briefly reach the cap plus one chunk: the largest chunk Node fetch
-// delivered in a local probe was 64 KiB, and an OpenAI stream measured the same
-// day gave at most 6 KiB (Node 22.22.3, undici 6.24.1).
+// has been searched, never the capacity of the buffer that holds them. The
+// check runs just before the next read, so held bytes can briefly reach the cap
+// plus one chunk (largest measured locally: 64 KiB; Node 22.22.3, undici
+// 6.24.1). The buffer doubles when a chunk does not fit, so one stream holds up
+// to 1 MiB, and 1.5 MiB for an instant while it is copied into a larger one:
+// about 62 MiB across ADMISSION_CAPACITY_POST_AUTH (41) streams.
 //
 // Not the buffered 1 MiB response cap: that cap fires on a response the parser
 // would accept and that is merely large, which is no evidence against the
@@ -39,19 +40,34 @@ export function createSseFrameReader(
   reader: ReadableStreamDefaultReader<Uint8Array>,
 ): () => Promise<SseFrame> {
   const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
-  let stored = new Uint8Array(0);
+  let stored = new Uint8Array(1);
+  let usage = 0;
+
   let bodyClosed = false;
   let leadingBOMChecked = false;
   let scanCursor: ScanCursor = { index: 0, lineStart: 0 };
 
   return async function nextFrame(): Promise<SseFrame> {
     while (true) {
-      const search = findFrameEnd(stored, scanCursor, bodyClosed);
+      const search = findFrameEnd(
+        stored.subarray(0, usage),
+        scanCursor,
+        bodyClosed,
+      );
       scanCursor = search.cursor;
 
       if (search.end !== "none") {
         const frame = stored.slice(0, search.end);
-        stored = stored.slice(search.end);
+        // The remainder is copied into an array of its own size: positions keep
+        // starting at zero, and a buffer grown for a large frame is released
+        // with the frame. The copy costs the size of the remainder once per
+        // frame, which only shows when one chunk carries many frames (a 64 KiB
+        // chunk of bare line ends took about 0.3 s, measured 2026-09-30, mostly
+        // the fixed cost per frame). Move to a start offset over a retained
+        // buffer, as openai-node's iterSSEChunks does, if a load probe shows
+        // this copy in the CPU profile.
+        stored = stored.slice(search.end, usage);
+        usage -= search.end;
 
         const decoded = decoder.decode(frame);
         const text =
@@ -77,14 +93,14 @@ export function createSseFrameReader(
       }
 
       if (bodyClosed) {
-        if (stored.length > 0) {
+        if (usage > 0) {
           return { kind: "eof_partial" };
         }
 
         return { kind: "eof" };
       }
 
-      if (stored.length > PARSER_BUFFER_CAP) {
+      if (usage > PARSER_BUFFER_CAP) {
         return { kind: "cap" };
       }
 
@@ -95,10 +111,16 @@ export function createSseFrameReader(
         continue;
       }
 
-      const newStored = new Uint8Array(stored.length + value.length);
-      newStored.set(stored, 0);
-      newStored.set(value, stored.length);
-      stored = newStored;
+      if (usage + value.length > stored.length) {
+        const newStored = new Uint8Array(
+          Math.max(stored.length * 2, usage + value.length),
+        );
+        newStored.set(stored.subarray(0, usage));
+        stored = newStored;
+      }
+
+      stored.set(value, usage);
+      usage += value.length;
     }
   };
 }
