@@ -46,6 +46,18 @@ async function pullTimes<T>(
   return [head, ...(await pullTimes(nextFrame, count - 1))];
 }
 
+// Splits bytes into consecutive pieces of at most `size` bytes.
+function splitInto(bytes: Uint8Array, size: number): Uint8Array[] {
+  return Array.from({ length: Math.ceil(bytes.length / size) }, (_, k) =>
+    bytes.slice(k * size, (k + 1) * size),
+  );
+}
+
+// Under PARSER_BUFFER_CAP (500 KiB) but past half of it, so doubling the
+// buffer while it arrives takes the capacity past the cap. 64 KiB is the
+// largest chunk Node fetch delivered in a local probe.
+const nearCapFrame = `data: ${"x".repeat(450 * 1024 - 8)}\n\n`;
+
 describe("createSseFrameReader", () => {
   it("a frame split across two chunks comes out whole, with its original bytes", async () => {
     const reader = new ReadableStream<Uint8Array>({
@@ -246,6 +258,23 @@ describe("createSseFrameReader", () => {
       because:
         "a search that resumes after a read must remember where the current line began: the LF that opens the next chunk ends the line 'data: ab', and only the second LF, at the start of its own line, ends the frame; taking the resume point for a line start would cut the frame at the first LF and leave an empty frame behind",
     },
+    {
+      name: "a CR that is the last byte held waits for the next byte even when the buffer has room after it",
+      chunks: [
+        encode("data: " + "a".repeat(1000) + "\n"),
+        encode("data: b\r"),
+        encode("\n\n"),
+      ],
+      expected: [
+        frame(
+          "data: " + "a".repeat(1000) + "\n" + "data: b\r\n\n",
+          "a".repeat(1000) + "\nb",
+        ),
+        { kind: "eof" },
+      ],
+      because:
+        "the search looks only at the bytes held, not at the buffer's spare room: a CR that is the last byte held waits for the next byte, even when the buffer has grown and the bytes after it are unused zeros",
+    },
   ])("$name", async ({ chunks, expected, because }) => {
     const nextFrame = createSseFrameReader(closedBody(chunks));
 
@@ -374,5 +403,23 @@ describe("createSseFrameReader", () => {
       (await pullTimes(nextFrame, 3)).map((result) => result.kind),
       "PARSER_BUFFER_CAP bounds the bytes still without a frame after the new chunk is searched, not the held bytes plus the chunk: two frames under the cap whose sum passes it come out as two frames",
     ).toStrictEqual(["frame", "frame", "eof"]);
+  });
+
+  it("a frame under PARSER_BUFFER_CAP comes out whole after the buffer has grown past the cap", async () => {
+    const nextFrame = createSseFrameReader(
+      closedBody(splitInto(encode(nearCapFrame), 64 * 1024)),
+    );
+
+    const [first, second] = await pullTimes(nextFrame, 2);
+
+    expect(
+      second,
+      "a 450 KiB frame is under PARSER_BUFFER_CAP: the reader must yield it as a frame and then end in eof, not in cap",
+    ).toStrictEqual({ kind: "eof" });
+
+    expect(
+      first?.kind === "frame" ? new TextDecoder().decode(first.bytes) : first,
+      "PARSER_BUFFER_CAP bounds the bytes held without a frame, never the room the buffer has grown to: a 450 KiB frame whose growth doubles the buffer past the cap is still under it and must come out whole",
+    ).toBe(nearCapFrame);
   });
 });
