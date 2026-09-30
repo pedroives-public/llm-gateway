@@ -30,6 +30,11 @@ export type End = {
 
 export type SseFrame = Frame | End;
 
+type ScanCursor = {
+  index: number;
+  lineStart: number;
+};
+
 export function createSseFrameReader(
   reader: ReadableStreamDefaultReader<Uint8Array>,
 ): () => Promise<SseFrame> {
@@ -37,14 +42,16 @@ export function createSseFrameReader(
   let stored = new Uint8Array(0);
   let bodyClosed = false;
   let leadingBOMChecked = false;
+  let scanCursor: ScanCursor = { index: 0, lineStart: 0 };
 
   return async function nextFrame(): Promise<SseFrame> {
     while (true) {
-      const end = findFrameEnd(stored, bodyClosed);
+      const search = findFrameEnd(stored, scanCursor, bodyClosed);
+      scanCursor = search.cursor;
 
-      if (end !== "none") {
-        const frame = stored.slice(0, end);
-        stored = stored.slice(end);
+      if (search.end !== "none") {
+        const frame = stored.slice(0, search.end);
+        stored = stored.slice(search.end);
 
         const decoded = decoder.decode(frame);
         const text =
@@ -104,32 +111,47 @@ export function createSseFrameReader(
 type FrameEndIndex = number & { readonly __brand: "FrameEndIndex" };
 type FrameEnd = FrameEndIndex | "none";
 
-function findFrameEnd(bytes: Uint8Array, bodyClosed: boolean): FrameEnd {
-  let lineStart = 0;
-  let i = 0;
+type FrameSearch = {
+  end: FrameEnd;
+  cursor: ScanCursor;
+};
 
-  while (i < bytes.length) {
-    const lineEndLength = lineEndLengthAt(bytes, i, bodyClosed);
+function findFrameEnd(
+  bytes: Uint8Array,
+  cursor: ScanCursor,
+  bodyClosed: boolean,
+): FrameSearch {
+  let lineStart = cursor.lineStart;
+  let index = cursor.index;
+
+  while (index < bytes.length) {
+    const lineEndLength = lineEndLengthAt(bytes, index, bodyClosed);
     if (lineEndLength === 0) {
-      i++;
+      index++;
       continue;
     }
 
     if (lineEndLength === "undecided") {
-      return "none";
+      return { end: "none", cursor: { index, lineStart } };
     }
 
-    const lineEnd = i + lineEndLength;
+    const lineEnd = index + lineEndLength;
 
-    if (i === lineStart) {
-      return lineEnd as FrameEndIndex;
+    if (index === lineStart) {
+      return {
+        end: lineEnd as FrameEndIndex,
+        cursor: { index: 0, lineStart: 0 },
+      };
     }
 
-    i = lineEnd;
-    lineStart = i;
+    index = lineEnd;
+    lineStart = index;
   }
 
-  return "none";
+  return {
+    end: "none",
+    cursor: { index, lineStart },
+  };
 }
 
 type LineEnd = 0 | 1 | 2 | "undecided";
