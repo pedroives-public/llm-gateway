@@ -239,6 +239,13 @@ describe("createSseFrameReader", () => {
       because:
         "an empty line with no field before it still ends a frame: the reader yields its line-end bytes with no text, so no byte is dropped or moved into the next frame; WHATWG dispatches nothing for it, and what that frame means is the caller's decision",
     },
+    {
+      name: "a line split across chunks just before the LF that ends it",
+      chunks: [encode("data: ab"), encode("\n\n")],
+      expected: [frame("data: ab\n\n", "ab"), { kind: "eof" }],
+      because:
+        "a search that resumes after a read must remember where the current line began: the LF that opens the next chunk ends the line 'data: ab', and only the second LF, at the start of its own line, ends the frame; taking the resume point for a line start would cut the frame at the first LF and leave an empty frame behind",
+    },
   ])("$name", async ({ chunks, expected, because }) => {
     const nextFrame = createSseFrameReader(closedBody(chunks));
 
