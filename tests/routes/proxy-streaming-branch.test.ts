@@ -448,7 +448,10 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
             payload: { ...validBody, stream: true },
           }),
           UPSTREAM_CLOSE_DEADLINE_MS,
-          "the head alone must decide the answer: the gateway sent no response before the deadline",
+          // The upstream holds its body open, so a head misread as non-2xx
+          // waits on that body and fails here: the row's reason goes in the
+          // sentence, or this RED would never name the rule the row pins.
+          `the head alone must decide the answer: the gateway sent no response before the deadline (${because})`,
         );
 
         expect(violations).toStrictEqual([]);
