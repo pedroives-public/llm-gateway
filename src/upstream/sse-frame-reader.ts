@@ -41,7 +41,7 @@ export function createSseFrameReader(
 ): () => Promise<SseFrame> {
   const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
   let stored = new Uint8Array(1);
-  let usage = 0;
+  let filled = 0;
 
   let bodyClosed = false;
   let leadingBOMChecked = false;
@@ -50,7 +50,7 @@ export function createSseFrameReader(
   return async function nextFrame(): Promise<SseFrame> {
     while (true) {
       const search = findFrameEnd(
-        stored.subarray(0, usage),
+        stored.subarray(0, filled),
         scanCursor,
         bodyClosed,
       );
@@ -66,8 +66,8 @@ export function createSseFrameReader(
         // the fixed cost per frame). Move to a start offset over a retained
         // buffer, as openai-node's iterSSEChunks does, if a load probe shows
         // this copy in the CPU profile.
-        stored = stored.slice(search.end, usage);
-        usage -= search.end;
+        stored = stored.slice(search.end, filled);
+        filled -= search.end;
 
         const decoded = decoder.decode(frame);
         const text =
@@ -93,14 +93,14 @@ export function createSseFrameReader(
       }
 
       if (bodyClosed) {
-        if (usage > 0) {
+        if (filled > 0) {
           return { kind: "eof_partial" };
         }
 
         return { kind: "eof" };
       }
 
-      if (usage > PARSER_BUFFER_CAP) {
+      if (filled > PARSER_BUFFER_CAP) {
         return { kind: "cap" };
       }
 
@@ -111,16 +111,16 @@ export function createSseFrameReader(
         continue;
       }
 
-      if (usage + value.length > stored.length) {
+      if (filled + value.length > stored.length) {
         const newStored = new Uint8Array(
-          Math.max(stored.length * 2, usage + value.length),
+          Math.max(stored.length * 2, filled + value.length),
         );
-        newStored.set(stored.subarray(0, usage));
+        newStored.set(stored.subarray(0, filled));
         stored = newStored;
       }
 
-      stored.set(value, usage);
-      usage += value.length;
+      stored.set(value, filled);
+      filled += value.length;
     }
   };
 }
