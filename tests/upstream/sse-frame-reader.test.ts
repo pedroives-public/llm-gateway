@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   PARSER_BUFFER_CAP,
   createSseFrameReader,
@@ -52,6 +52,68 @@ function splitInto(bytes: Uint8Array, size: number): Uint8Array[] {
     bytes.slice(k * size, (k + 1) * size),
   );
 }
+
+// A body that hands over one chunk per read and closes after the last. Unlike
+// closedBody, it never queues all the chunks up front: with thousands of tiny
+// chunks, a pre-filled queue spends time of its own and would hide the
+// reader's cost behind it.
+//
+// The deadline is checked here, on every read, and not with a timer: this body
+// and the reader talk only through promise callbacks, which run before any
+// timer, so a setTimeout deadline fires only after the frame is out (measured
+// 2026-10-01: a 1 s timer fired at 2.6 s, right after a slow search finished).
+// Failing the body makes the reader's pending read reject with the sentence.
+function pulledBody(
+  chunks: readonly Uint8Array[],
+  deadlineMs: number,
+  sentence: string,
+): ReadableStreamDefaultReader<Uint8Array> {
+  const startedAt = performance.now();
+  let next = 0;
+  return new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        if (performance.now() - startedAt > deadlineMs) {
+          controller.error(new Error(sentence));
+          return;
+        }
+        const chunk = chunks[next];
+        next += 1;
+        if (chunk === undefined) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+    },
+    { highWaterMark: 0 },
+  ).getReader();
+}
+
+// One 256 KiB frame in 16-byte chunks: 16,384 reads of one incomplete frame,
+// the shape that made the reader's cost quadratic when every read redid the
+// search and the copy over all the bytes held. Real upstream chunks are
+// larger (642 B to 6 KB, measured against OpenAI 2026-09-28); small chunks
+// multiply the reads, so a per-read cost over the held bytes shows here first.
+const COST_PROBE_FRAME = `data: ${"x".repeat(256 * 1024 - 8)}\n\n`;
+const COST_PROBE_CHUNK_BYTES = 16;
+
+// Measured 2026-10-01 (Node 22.22.3, local): the reader yields that frame in
+// 21-43 ms; a search that restarts at byte 0 on every read takes 2.8-3.0 s.
+// One second is over 20 times the reader's time and about a third of the
+// restarting search, and under the runner's 5 s timeout, so a search that
+// re-examines what it already searched fails with its own sentence.
+const SEARCH_COST_DEADLINE_MS = 1_000;
+const SEARCH_COST_SENTENCE =
+  "the search must resume where the last read stopped: one 256 KiB frame in 16-byte chunks did not come out before the deadline, the cost of searching from byte 0 on every read";
+
+// Every chunk is copied into the buffer once: 1x the stream. Each growth
+// copies the bytes held, and because the buffer doubles, those copies add up
+// to less than 2x for any frame size: 1x when the frame is a power of two, as
+// this one is, and just under 2x right past one (measured 2026-10-01). So a
+// doubling reader copies strictly less than 3x; a growth that does not double
+// copies 8192x for this frame.
+const MAX_COPY_RATIO = 3;
 
 // Under PARSER_BUFFER_CAP (500 KiB) but past half of it, so doubling the
 // buffer while it arrives takes the capacity past the cap. 64 KiB is the
@@ -421,5 +483,69 @@ describe("createSseFrameReader", () => {
       first?.kind === "frame" ? new TextDecoder().decode(first.bytes) : first,
       "PARSER_BUFFER_CAP bounds the bytes held without a frame, never the room the buffer has grown to: a 450 KiB frame whose growth doubles the buffer past the cap is still under it and must come out whole",
     ).toBe(nearCapFrame);
+  });
+
+  it("the frame search resumes where the last read stopped instead of re-examining the held bytes", async () => {
+    const stream = encode(COST_PROBE_FRAME);
+    const nextFrame = createSseFrameReader(
+      pulledBody(
+        splitInto(stream, COST_PROBE_CHUNK_BYTES),
+        SEARCH_COST_DEADLINE_MS,
+        SEARCH_COST_SENTENCE,
+      ),
+    );
+
+    const result = await nextFrame();
+
+    expect(
+      result.kind === "frame" ? result.bytes.length : result,
+      "the frame comes out whole: the deadline above is the cell's real assertion, and this one only proves the probe read the frame it timed",
+    ).toBe(stream.length);
+  });
+
+  it("growing the buffer copies each held byte a bounded number of times", async () => {
+    const stream = encode(COST_PROBE_FRAME);
+    const bound = MAX_COPY_RATIO * stream.length;
+    const realSet = Uint8Array.prototype.set;
+    let copied = 0;
+    // Counts every byte the reader copies with set(): each chunk copied in,
+    // and the held bytes copied into a larger buffer when it grows. Throwing
+    // at the bound fails at once; a growth that copies everything held on
+    // every read would otherwise copy about 2 GB for this frame.
+    const spy = vi
+      .spyOn(Uint8Array.prototype, "set")
+      .mockImplementation(function (
+        this: Uint8Array,
+        source: ArrayLike<number>,
+        offset?: number,
+      ) {
+        copied += source.length;
+        if (copied > bound) {
+          throw new Error(
+            `growing the buffer must double it: ${copied} bytes copied for a ${stream.length}-byte stream passes MAX_COPY_RATIO (${MAX_COPY_RATIO})`,
+          );
+        }
+        realSet.call(this, source, offset);
+      });
+
+    try {
+      // The same deadline keeps a slow search from reaching the runner's
+      // timeout here too; this cell's own subject is the copy count.
+      const nextFrame = createSseFrameReader(
+        pulledBody(
+          splitInto(stream, COST_PROBE_CHUNK_BYTES),
+          SEARCH_COST_DEADLINE_MS,
+          SEARCH_COST_SENTENCE,
+        ),
+      );
+      await nextFrame();
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(
+      copied >= stream.length,
+      "control: every chunk is copied in once, so at least the stream's own bytes pass through set(); fewer means the spy no longer sees the reader's copies and the bound above measured nothing",
+    ).toBe(true);
   });
 });
