@@ -1,22 +1,18 @@
-// Provisional upper bound BY CONSTRUCTION, not a measured frame size: no
-// single SSE frame can exceed the byte total of the stream that carries it,
-// and the largest stream measured so far totalled 445 KB (33k-token probe,
-// 2026-09-09), rounded up to 500 KiB. Loose by orders of magnitude. Replace
-// with the largest legitimate frame the provider can send (tool-call arguments
-// chunk, final `usage` chunk, error event) once that probe exists.
+// Provisional bound by construction, not a measured frame size: no frame can
+// exceed the stream that carries it, and the largest stream measured totalled
+// 445 KB (2026-09-09), rounded up to 500 KiB. Replace it with the largest
+// legitimate frame the provider sends (tool-call arguments, final `usage`
+// chunk, error event) once that is measured.
 //
-// What it bounds: the bytes still held without a frame after the newest chunk
-// has been searched, never the capacity of the buffer that holds them. The
-// check runs just before the next read, so held bytes can briefly reach the cap
-// plus one chunk (largest measured locally: 64 KiB; Node 22.22.3, undici
-// 6.24.1). The buffer doubles when a chunk does not fit, so one stream holds up
-// to 1 MiB, and 1.5 MiB for an instant while it is copied into a larger one:
-// about 62 MiB across ADMISSION_CAPACITY_POST_AUTH (41) streams.
+// It bounds the bytes held without a frame after each chunk is searched, not
+// the buffer's capacity: held bytes can reach the cap plus one chunk (64 KiB
+// at most, measured locally), and doubling keeps the capacity under twice
+// that: about 1.1 MiB per stream, briefly 1.65 MiB while it grows, about
+// 68 MiB across ADMISSION_CAPACITY_POST_AUTH (41) streams.
 //
-// Not the buffered 1 MiB response cap: that cap fires on a response the parser
-// would accept and that is merely large, which is no evidence against the
-// upstream. This one fires when bytes never form a frame, the same evidence
-// class as a 2xx that is not SSE.
+// Unlike the buffered response cap, which fires on a large but valid response,
+// this one fires on bytes that never form a frame: evidence against the
+// upstream, like a 2xx that is not SSE.
 export const PARSER_BUFFER_CAP = 500 * 1024;
 
 export type Frame = {
@@ -58,12 +54,11 @@ export function createSseFrameReader(
 
       if (search.end !== "none") {
         const frame = stored.slice(0, search.end);
-        // The remainder is copied into an array of its own size: positions keep
-        // starting at zero, and a buffer grown for a large frame is released
-        // with the frame. The copy costs the size of the remainder once per
-        // frame, which only shows when one chunk carries many frames (a 64 KiB
-        // chunk of bare line ends took about 0.3 s, measured 2026-09-30, mostly
-        // the fixed cost per frame). Move to a start offset over a retained
+        // The remainder is copied into an array of its own size, so positions
+        // restart at zero and a buffer grown for a large frame is released
+        // with it. When one chunk carries many frames this copy is most of the
+        // cost (bare line ends: about 4 microseconds per frame, 0.4 without
+        // it, measured 2026-10-01). Switch to a start offset over a retained
         // buffer, as openai-node's iterSSEChunks does, if a load probe shows
         // this copy in the CPU profile.
         stored = stored.slice(search.end, filled);
