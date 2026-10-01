@@ -337,12 +337,56 @@ describe("createSseFrameReader", () => {
       because:
         "the search looks only at the bytes held, not at the buffer's spare room: a CR that is the last byte held waits for the next byte, even when the buffer has grown and the bytes after it are unused zeros",
     },
+    {
+      name: "a byte that is never valid UTF-8 inside a data field",
+      chunks: [Uint8Array.of(...encode("data: "), 0xff, ...encode("\n\n"))],
+      expected: [
+        {
+          kind: "frame",
+          bytes: Uint8Array.of(...encode("data: "), 0xff, ...encode("\n\n")),
+          data: "\uFFFD",
+        },
+        { kind: "eof" },
+      ],
+      because:
+        "bytes that are not valid UTF-8 never make the reader throw: the forwarded bytes stay the upstream's own, and only the text replaces the invalid byte with one U+FFFD (WHATWG Encoding, 'UTF-8 decode')",
+    },
+    {
+      name: "a two-byte character cut short right before the line end",
+      chunks: [Uint8Array.of(...encode("data: "), 0xc3, ...encode("\n\n"))],
+      expected: [
+        {
+          kind: "frame",
+          bytes: Uint8Array.of(...encode("data: "), 0xc3, ...encode("\n\n")),
+          data: "\uFFFD",
+        },
+        { kind: "eof" },
+      ],
+      because:
+        "a lead byte whose continuation never arrives becomes one U+FFFD and claims no byte after it: the LF that follows still ends the line, so a broken character can never hide the end of a frame",
+    },
+    {
+      name: "a field whose name only starts with data",
+      chunks: [encode("datax: 1\n\n")],
+      expected: [frame("datax: 1\n\n", null), { kind: "eof" }],
+      because:
+        "the field name is everything before the first colon (WHATWG HTML, 'Interpreting an event stream'), so datax is an unknown field, not data: the text stays null while the line stays in the forwarded bytes",
+    },
   ])("$name", async ({ chunks, expected, because }) => {
     const nextFrame = createSseFrameReader(closedBody(chunks));
 
-    expect(await pullTimes(nextFrame, expected.length), because).toStrictEqual(
-      expected,
+    // A rejection skips the assertion below, so it becomes an error that
+    // carries the row's reason: a reader that throws on the row's bytes would
+    // otherwise fail without naming the rule the row pins.
+    const results = await pullTimes(nextFrame, expected.length).catch(
+      (error: unknown) => {
+        throw new Error(
+          `${because}: the reader rejected instead (${String(error)})`,
+        );
+      },
     );
+
+    expect(results, because).toStrictEqual(expected);
   });
 
   it("bytes that pass PARSER_BUFFER_CAP without an empty line end in cap while the body is still open", async () => {
