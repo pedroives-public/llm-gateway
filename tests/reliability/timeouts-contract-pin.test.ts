@@ -13,14 +13,40 @@ describe("timeouts module — public contract pin", () => {
     }>();
   });
 
+  it("armTotalDurationTimeout's return type is EXACTLY { signal, clear }", () => {
+    expectTypeOf(timeouts.armTotalDurationTimeout).returns.toEqualTypeOf<{
+      signal: AbortSignal;
+      clear: () => void;
+    }>();
+  });
+
   it("the module's runtime export surface is exactly the intended names", () => {
-    expect(Object.keys(timeouts)).toEqual(["armWallClockTimeout"]);
+    // A set, not a list: the contract is which names exist, not the order
+    // the module declares them in.
+    expect(new Set(Object.keys(timeouts))).toEqual(
+      new Set(["armWallClockTimeout", "armTotalDurationTimeout"]),
+    );
   });
 
   // The type pin above guards the DECLARED contract; this guards the runtime
   // object — a leak smuggled past tsc via a cast still fails here.
   it("the returned object carries exactly the { signal, clear } keys at runtime", () => {
     const armedTimeout = timeouts.armWallClockTimeout(60_000);
+
+    try {
+      expect(new Set(Object.keys(armedTimeout))).toEqual(
+        new Set(["signal", "clear"]),
+      );
+    } finally {
+      armedTimeout.clear();
+    }
+  });
+
+  it("armTotalDurationTimeout's returned object carries exactly the { signal, clear } keys at runtime", () => {
+    const armedTimeout = timeouts.armTotalDurationTimeout(
+      Date.now() + 60_000,
+      () => false,
+    );
 
     try {
       expect(new Set(Object.keys(armedTimeout))).toEqual(
