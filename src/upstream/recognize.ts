@@ -73,8 +73,12 @@ function isSuccessStatus(status: number): boolean {
 
 function isRecognizedAbortKind(
   k: string,
-): k is "response_size_cap" | "wall_clock_expired" {
-  return k === "response_size_cap" || k === "wall_clock_expired";
+): k is "response_size_cap" | "wall_clock_expired" | "total_timeout" {
+  return (
+    k === "response_size_cap" ||
+    k === "wall_clock_expired" ||
+    k === "total_timeout"
+  );
 }
 
 export function recognizeRejection(raw: RejectionFacts): RejectionRecognition {

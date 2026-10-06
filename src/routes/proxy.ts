@@ -42,6 +42,13 @@ import { STREAM_TOTAL_DURATION_MS } from "../config.js";
 const WALL_CLOCK_MS = 30_000;
 const BODY_LIMIT_BYTES = 262_144;
 const MAX_OUTPUT_TOKENS_CAP = 16_384;
+const TOTAL_TIMEOUT_BODY = {
+  error: {
+    message: "stream exceeded the total duration limit",
+    type: "gateway_timeout",
+    code: "total_timeout_exceeded",
+  },
+};
 
 export interface ChatCompletionsBody {
   model: string;
@@ -317,13 +324,7 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         });
 
         reply.code(status).header("x-gateway-error-class", errorClass);
-        return {
-          error: {
-            message: "stream exceeded the total duration limit",
-            type: "gateway_timeout",
-            code: "total_timeout_exceeded",
-          },
-        };
+        return TOTAL_TIMEOUT_BODY;
       }
 
       if (isAcceptedStream(outcome)) {
@@ -561,6 +562,7 @@ function statusForErrorOutcome(
     case "aborted":
       switch (outcome.abort_kind) {
         case "wall_clock_expired":
+        case "total_timeout":
           return 504;
         case "response_size_cap":
           return 502;
@@ -662,6 +664,8 @@ function bodyForErrorOutcome(
               code: "wall_clock_exceeded",
             },
           };
+        case "total_timeout":
+          return TOTAL_TIMEOUT_BODY;
         default:
           return assertNever(outcome.abort_kind);
       }

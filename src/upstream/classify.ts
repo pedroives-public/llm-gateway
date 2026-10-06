@@ -136,6 +136,11 @@ export function classify(
             error_class: "gateway-fault",
             breaker_delta: 0,
           };
+        case "total_timeout":
+          return {
+            error_class: "gateway-fault",
+            breaker_delta: 0,
+          };
         default:
           return assertNever(outcome.abort_kind);
       }

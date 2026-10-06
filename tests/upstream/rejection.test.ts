@@ -33,7 +33,11 @@ function catchFrom(fn: () => unknown): unknown {
 
 describe("resolveRejection", () => {
   describe("gateway-initiated aborts (rejection IS the signal reason)", () => {
-    it.each(["wall_clock_expired", "response_size_cap"] as const)(
+    it.each([
+      "wall_clock_expired",
+      "response_size_cap",
+      "total_timeout",
+    ] as const)(
       "returns aborted{%s} when the rejection is identical to a recognized typed reason",
       (kind) => {
         const controller = new AbortController();
@@ -253,7 +257,10 @@ describe("resolveRejection", () => {
 
   it("return type admits only the rejection-path outcomes", () => {
     expectTypeOf(resolveRejection).returns.toEqualTypeOf<
-      Extract<Outcome, { kind: "network_failed" | "aborted" | "redirect_blocked" }>
+      Extract<
+        Outcome,
+        { kind: "network_failed" | "aborted" | "redirect_blocked" }
+      >
     >();
   });
 });

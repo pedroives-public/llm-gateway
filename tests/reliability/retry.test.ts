@@ -179,6 +179,36 @@ describe("retry", () => {
     });
   });
 
+  it("resolves to an aborted outcome when the streaming deadline's abort fires during backoff", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5); // deterministic 50ms backoff window
+
+    const attempt1: Outcome = { kind: "network_failed", pre_send_proven: true };
+
+    const op = vi.fn<() => Promise<Outcome>>().mockResolvedValue(attempt1);
+
+    const controller = new AbortController();
+    const now = Date.now();
+    const result = retry(op, {
+      signal: controller.signal,
+      deadlineAt: now + 280_000,
+      firstByteFlushed: () => false,
+    });
+
+    // Attempt 1 resolves and the backoff sleep is scheduled.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(1);
+
+    // The streaming deadline fires mid-backoff.
+    controller.abort({ kind: "total_timeout" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(op).toHaveBeenCalledTimes(1); // no second attempt
+    await expect(result).resolves.toEqual({
+      kind: "aborted",
+      abort_kind: "total_timeout",
+    });
+  });
+
   it("re-throws the original reason when the signal fires during backoff with an unrecognized reason", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5); // deterministic 50ms backoff window
 
@@ -281,7 +311,10 @@ describe("retry", () => {
   });
 
   it("does not retry a network failure that is not proven pre-send (post-send is idempotency-unsafe)", async () => {
-    const attempt1: Outcome = { kind: "network_failed", pre_send_proven: false };
+    const attempt1: Outcome = {
+      kind: "network_failed",
+      pre_send_proven: false,
+    };
 
     const op = vi.fn<() => Promise<Outcome>>().mockResolvedValue(attempt1);
 
