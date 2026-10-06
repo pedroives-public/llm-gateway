@@ -16,6 +16,7 @@ import {
   streamingTripwire,
   withinDeadline,
 } from "../helpers/streaming-seams.js";
+import type { StreamingAdapter } from "../../src/upstream/stream.js";
 
 // With the streaming flag ON, a `stream: true` attempt is decided by the
 // upstream response HEAD alone: status plus the `content-type` media type.
@@ -656,6 +657,223 @@ describe("streaming flag ON: the total-duration deadline bounds a stream: true r
         attempts: 1,
         retry_disposition: "ineligible",
         terminal: "TOTAL_TIMEOUT",
+      });
+    } finally {
+      vi.useRealTimers();
+      await app.close();
+    }
+  });
+
+  it("ends as TOTAL_TIMEOUT when the clock is past the deadline, its timer has not fired and the upstream answers 502", async () => {
+    let calls = 0;
+    let resolveUpstream: ((result: StreamingAdapter) => void) | undefined;
+    let receivedSignal: AbortSignal | undefined;
+
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+
+    const app = await buildProxyApp({
+      breaker: breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: (_body, signal) => {
+        calls += 1;
+        receivedSignal = signal;
+
+        return new Promise<StreamingAdapter>((resolve) => {
+          resolveUpstream = resolve;
+        });
+      },
+    });
+
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+
+    try {
+      const req = app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: bearer() },
+        payload: { ...validBody, stream: true },
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(violations).toStrictEqual([]);
+      expect(
+        calls,
+        "the scene's premise: the request is in flight, the streaming upstream was called once and has not answered",
+      ).toBe(1);
+      expect(receivedSignal).toBeDefined();
+      expect(
+        receivedSignal?.aborted,
+        "the scene's premise: the deadline's timer has not fired, so the request signal is not aborted",
+      ).toBe(false);
+
+      const pendingTimers = vi.getTimerCount();
+      expect(
+        pendingTimers,
+        "the scene's premise: the deadline's timer is still armed",
+      ).toBe(1);
+
+      vi.setSystemTime(startedAt + 280_020);
+
+      if (resolveUpstream === undefined) {
+        throw new Error("resolveUpstream is undefined");
+      }
+
+      resolveUpstream({
+        kind: "upstream_error",
+        status: 502,
+        body_raw: "upstream failure",
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      const res = await req;
+      expect(
+        res.statusCode,
+        "the deadline is a value read at the terminal decision: past the deadline the request ends as TOTAL_TIMEOUT, a 504, whatever the upstream answered",
+      ).toBe(504);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(
+        res.json(),
+        "the deadline is a value read at the terminal decision: past the deadline the client gets the deadline's own 504 body, not the upstream's 502",
+      ).toStrictEqual({
+        error: {
+          message: "stream exceeded the total duration limit",
+          type: "gateway_timeout",
+          code: "total_timeout_exceeded",
+        },
+      });
+      expect(
+        recorded,
+        "the deadline is a value read at the terminal decision: a 502 that arrives past the deadline is not evidence about the upstream, so the breaker result is INCONCLUSIVE",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+
+      const complete = capture.byEvent("req_complete");
+      expect(complete).toHaveLength(1);
+      expect(
+        complete[0],
+        "the deadline is a value read at the terminal decision: req_complete names TOTAL_TIMEOUT, not the upstream's error",
+      ).toMatchObject({
+        status: 504,
+        error_class: "gateway-fault",
+        stream: true,
+        attempts: 1,
+        retry_disposition: "ineligible",
+        terminal: "TOTAL_TIMEOUT",
+      });
+    } finally {
+      vi.useRealTimers();
+      await app.close();
+    }
+  });
+
+  it("ends with the upstream's own 502 when it arrives after 30 seconds and before the deadline", async () => {
+    let calls = 0;
+    let resolveUpstream: ((result: StreamingAdapter) => void) | undefined;
+    let receivedSignal: AbortSignal | undefined;
+
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+
+    const app = await buildProxyApp({
+      breaker: breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: (_body, signal) => {
+        calls += 1;
+        receivedSignal = signal;
+
+        return new Promise<StreamingAdapter>((resolve) => {
+          resolveUpstream = resolve;
+        });
+      },
+    });
+
+    vi.useFakeTimers();
+
+    try {
+      const req = app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: bearer() },
+        payload: { ...validBody, stream: true },
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(99_000);
+
+      expect(violations).toStrictEqual([]);
+      expect(
+        calls,
+        "the scene's premise: the request is in flight, the streaming upstream was called once and has not answered",
+      ).toBe(1);
+      expect(receivedSignal).toBeDefined();
+      expect(
+        receivedSignal?.aborted,
+        "the scene's premise: the deadline's timer has not fired, so the request signal is not aborted",
+      ).toBe(false);
+
+      const pendingTimers = vi.getTimerCount();
+      expect(
+        pendingTimers,
+        "the scene's premise: the deadline's timer is still armed",
+      ).toBe(1);
+
+      if (resolveUpstream === undefined) {
+        throw new Error("resolveUpstream is undefined");
+      }
+
+      resolveUpstream({
+        kind: "upstream_error",
+        status: 502,
+        body_raw: '{"error":{"type":"server_error"}}',
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      const res = await req;
+      expect(
+        res.statusCode,
+        "an upstream answer that arrives before the deadline decides the terminal: a 502 at 100 seconds is the upstream's 502, not a TOTAL_TIMEOUT",
+      ).toBe(502);
+      expect(res.headers["x-gateway-error-class"]).toBe(
+        "upstream-retry-exhausted",
+      );
+      expect(
+        res.body,
+        "before the deadline the upstream's error body reaches the client as it came",
+      ).toBe('{"error":{"type":"server_error"}}');
+      expect(
+        recorded,
+        "a 5xx that arrives before the deadline is evidence about the upstream: the breaker result is FAILURE",
+      ).toStrictEqual(["FAILURE"]);
+
+      // The request is over at 100 seconds. Moving past the deadline shows
+      // whether its timer was disarmed: a timer left armed fires at 280
+      // seconds and aborts the signal of a finished request.
+      await vi.advanceTimersByTimeAsync(200_000);
+      expect(
+        receivedSignal?.aborted,
+        "the deadline's timer is disarmed once the attempt loop returns: past the deadline the signal of a finished request is not aborted",
+      ).toBe(false);
+
+      const complete = capture.byEvent("req_complete");
+      expect(complete).toHaveLength(1);
+      expect(
+        complete[0],
+        "before the deadline, req_complete describes the upstream's error",
+      ).toMatchObject({
+        status: 502,
+        error_class: "upstream-retry-exhausted",
+        stream: true,
+        attempts: 1,
+        retry_disposition: "ineligible",
       });
     } finally {
       vi.useRealTimers();
