@@ -287,7 +287,9 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
 
       if (
         request.body.stream === true &&
-        Date.now() >= deadlineAt
+        (Date.now() >= deadlineAt ||
+          (outcome.kind === "aborted" &&
+            outcome.abort_kind === "total_timeout"))
       ) {
         const status = 504;
         const errorClass: ErrorClass = "gateway-fault";
