@@ -666,6 +666,10 @@ function bodyForErrorOutcome(
               code: "wall_clock_exceeded",
             },
           };
+        // The handler ends the streaming deadline's own abort as TOTAL_TIMEOUT
+        // before it reaches these switches, so this arm and the one in
+        // statusForErrorOutcome are unreachable today. They keep the switches
+        // exhaustive and give the same answer.
         case "total_timeout":
           return TOTAL_TIMEOUT_BODY;
         default:
