@@ -1,5 +1,5 @@
 import http from "node:http";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type {
   CircuitBreaker,
   ProbeOutcome,
@@ -576,3 +576,90 @@ describe.each([
     );
   },
 );
+
+describe("streaming flag ON: the total-duration deadline bounds a stream: true request", () => {
+  it("ends a silent upstream as TOTAL_TIMEOUT at the deadline, not at the 30-second non-streaming deadline", async () => {
+    let calls = 0;
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+
+    const { breaker, recorded } = recordingBreaker();
+    const app = await buildProxyApp({
+      breaker: breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: (_body, signal) => {
+        calls += 1;
+        return new Promise((resolve) => {
+          signal.addEventListener(
+            "abort",
+            () => resolve({ kind: "aborted", abort_kind: signal.reason.kind }),
+            { once: true },
+          );
+        });
+      },
+    });
+
+    vi.useFakeTimers();
+
+    try {
+      const req = app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: bearer() },
+        payload: { ...validBody, stream: true },
+      });
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(violations).toStrictEqual([]);
+      expect(
+        calls,
+        "the request must be in flight at 30 seconds: the streaming upstream was called once and has not answered",
+      ).toBe(1);
+      expect(
+        recorded,
+        "a stream: true request is bounded by the 280-second total-duration deadline: the 30-second deadline of the non-streaming path must not end it",
+      ).toStrictEqual([]);
+
+      await vi.advanceTimersByTimeAsync(250_000);
+      const res = await req;
+      expect(
+        res.statusCode,
+        "the total-duration deadline expired before the first frame: the request must end as TOTAL_TIMEOUT, a 504",
+      ).toBe(504);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(
+        res.json(),
+        "the pre-first-frame 504 of the total-duration deadline carries code total_timeout_exceeded",
+      ).toStrictEqual({
+        error: {
+          message: "stream exceeded the total duration limit",
+          type: "gateway_timeout",
+          code: "total_timeout_exceeded",
+        },
+      });
+      expect(
+        recorded,
+        "an expired deadline proves nothing about the upstream's health: exactly one INCONCLUSIVE breaker result",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+
+      const complete = capture.byEvent("req_complete");
+      expect(complete).toHaveLength(1);
+      expect(
+        complete[0],
+        "a pre-first-frame terminal is named in req_complete: terminal TOTAL_TIMEOUT",
+      ).toMatchObject({
+        status: 504,
+        error_class: "gateway-fault",
+        stream: true,
+        attempts: 1,
+        retry_disposition: "ineligible",
+        terminal: "TOTAL_TIMEOUT",
+      });
+    } finally {
+      vi.useRealTimers();
+      await app.close();
+    }
+  });
+});

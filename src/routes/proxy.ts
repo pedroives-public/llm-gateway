@@ -21,7 +21,10 @@ import {
   type MinLogger,
 } from "../observability/events.js";
 import { retry } from "../reliability/retry.js";
-import { armWallClockTimeout } from "../reliability/timeouts.js";
+import {
+  armWallClockTimeout,
+  armTotalDurationTimeout,
+} from "../reliability/timeouts.js";
 import { classify, type Classification } from "../upstream/classify.js";
 import { assertNever } from "../upstream/assert-never.js";
 import {
@@ -34,6 +37,7 @@ import {
   type StreamingAdapter,
   cancelStream,
 } from "../upstream/stream.js";
+import { STREAM_TOTAL_DURATION_MS } from "../config.js";
 
 const WALL_CLOCK_MS = 30_000;
 const BODY_LIMIT_BYTES = 262_144;
@@ -212,8 +216,17 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
       }
 
       const armedAt = Date.now();
-      const timeout = armWallClockTimeout(WALL_CLOCK_MS);
-      const deadlineAt = armedAt + WALL_CLOCK_MS;
+      const timeout =
+        request.body.stream === true
+          ? armTotalDurationTimeout(
+              armedAt + STREAM_TOTAL_DURATION_MS,
+              () => false,
+            )
+          : armWallClockTimeout(WALL_CLOCK_MS);
+      const deadlineAt =
+        request.body.stream === true
+          ? armedAt + STREAM_TOTAL_DURATION_MS
+          : armedAt + WALL_CLOCK_MS;
       let attempts = 0;
       let upstreamDurationMs = 0;
 
@@ -264,6 +277,54 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
 
       const durationMs = Date.now() - requestStartedAt;
       const gatewayOverheadMs = Math.max(0, durationMs - upstreamDurationMs);
+
+      if (
+        request.body.stream === true &&
+        Date.now() >= deadlineAt
+      ) {
+        const status = 504;
+        const errorClass: ErrorClass = "gateway-fault";
+
+        try {
+          opts.breaker.recordResult("INCONCLUSIVE");
+        } finally {
+          if (isAcceptedStream(outcome)) {
+            await cancelStream(outcome.reader, upstreamLog, "proxy_route");
+          }
+        }
+
+        const terminalDurationMs = Date.now() - requestStartedAt;
+        const terminalGatewayOverheadMs = Math.max(
+          0,
+          terminalDurationMs - upstreamDurationMs,
+        );
+
+        emitReqComplete(request.log, {
+          req_id: request.reqId,
+          status,
+          error_class: errorClass,
+          stream: true,
+          attempts,
+          duration_ms: terminalDurationMs,
+          upstream_duration_ms: upstreamDurationMs,
+          gateway_overhead_ms: terminalGatewayOverheadMs,
+          retry_disposition: deriveRetryDisposition(
+            attempts,
+            outcome,
+            timeout.signal,
+          ),
+          terminal: "TOTAL_TIMEOUT",
+        });
+
+        reply.code(status).header("x-gateway-error-class", errorClass);
+        return {
+          error: {
+            message: "stream exceeded the total duration limit",
+            type: "gateway_timeout",
+            code: "total_timeout_exceeded",
+          },
+        };
+      }
 
       if (isAcceptedStream(outcome)) {
         const status = 500;
