@@ -119,15 +119,16 @@ function outcomeFromAbortReason(reason: unknown): Outcome {
   throw reason;
 }
 
-function isKnownAbortReason(
-  reason: unknown,
-): reason is { kind: "response_size_cap" | "wall_clock_expired" } {
+function isKnownAbortReason(reason: unknown): reason is {
+  kind: "response_size_cap" | "wall_clock_expired" | "total_timeout";
+} {
   return (
     typeof reason === "object" &&
     reason !== null &&
     "kind" in reason &&
     (reason.kind === "response_size_cap" ||
-      reason.kind === "wall_clock_expired")
+      reason.kind === "wall_clock_expired" ||
+      reason.kind === "total_timeout")
   );
 }
 

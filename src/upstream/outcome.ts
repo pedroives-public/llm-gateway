@@ -24,7 +24,7 @@ export type Outcome =
     }
   | {
       kind: "aborted";
-      abort_kind: "response_size_cap" | "wall_clock_expired";
+      abort_kind: "response_size_cap" | "wall_clock_expired" | "total_timeout";
     };
 
 export type ErrorOutcome = Exclude<Outcome, { kind: "ok" }>;

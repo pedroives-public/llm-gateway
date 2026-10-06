@@ -198,6 +198,25 @@ describe("classify", () => {
     expect(log.error).not.toHaveBeenCalled();
   });
 
+  it("classifies the streaming deadline's abort as gateway-fault, breaker delta 0 (the expiry proves the request outlived its deadline, never that the upstream failed)", () => {
+    const log = makeLog();
+    const expected = {
+      error_class: "gateway-fault",
+      breaker_delta: 0,
+    };
+
+    const result = classify(
+      {
+        kind: "aborted",
+        abort_kind: "total_timeout",
+      },
+      log,
+      "req-1",
+    );
+    expect(result).toEqual(expected);
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
   it("classifies a response-size-cap abort as upstream-fault, non-retryable, breaker delta 0 (local policy limit is not upstream unavailability)", () => {
     const log = makeLog();
     const expected = {
