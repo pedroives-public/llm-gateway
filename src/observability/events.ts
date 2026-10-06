@@ -47,7 +47,7 @@ export type AlertName = (typeof ALERT_NAMES)[number];
 
 export type EpisodeAlertName = (typeof EPISODE_ALERT_NAMES)[number];
 
-export type ReqCompleteTerminal = "STREAM_NOT_DELIVERED";
+export type ReqCompleteTerminal = "STREAM_NOT_DELIVERED" | "TOTAL_TIMEOUT";
 
 type OperationalAlertLine = {
   event: "operational_alert";
