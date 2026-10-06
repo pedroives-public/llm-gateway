@@ -645,8 +645,11 @@ describe("streaming flag ON: the total-duration deadline bounds a stream: true r
         "an expired deadline proves nothing about the upstream's health: exactly one INCONCLUSIVE breaker result",
       ).toStrictEqual(["INCONCLUSIVE"]);
 
+      expect(
+        capture.logs.flatMap((log) => log.event ?? []),
+        "a pre-first-frame terminal emits req_complete, never stream_done: the request logs req_start and req_complete, and no other event",
+      ).toStrictEqual(["req_start", "req_complete"]);
       const complete = capture.byEvent("req_complete");
-      expect(complete).toHaveLength(1);
       expect(
         complete[0],
         "a pre-first-frame terminal is named in req_complete: terminal TOTAL_TIMEOUT",
@@ -664,113 +667,133 @@ describe("streaming flag ON: the total-duration deadline bounds a stream: true r
     }
   });
 
-  it("ends as TOTAL_TIMEOUT when the clock is past the deadline, its timer has not fired and the upstream answers 502", async () => {
-    let calls = 0;
-    let resolveUpstream: ((result: StreamingAdapter) => void) | undefined;
-    let receivedSignal: AbortSignal | undefined;
+  // Two instants on the same scene. The first sits on the deadline itself: the
+  // re-read compares with >=, so a clock that has reached the deadline is past
+  // it. Only that row can tell >= from >.
+  it.each([
+    {
+      when: "exactly at the deadline",
+      clockAfterStartMs: 280_000,
+      rule: "the deadline comparison is >=: a clock exactly at the deadline has reached it, so the request ends as TOTAL_TIMEOUT, a 504, whatever the upstream answered",
+    },
+    {
+      when: "20 ms past the deadline",
+      clockAfterStartMs: 280_020,
+      rule: "the deadline is a value read at the terminal decision: past the deadline the request ends as TOTAL_TIMEOUT, a 504, whatever the upstream answered",
+    },
+  ])(
+    "ends as TOTAL_TIMEOUT when the clock is $when, its timer has not fired and the upstream answers 502",
+    async ({ clockAfterStartMs, rule }) => {
+      let calls = 0;
+      let resolveUpstream: ((result: StreamingAdapter) => void) | undefined;
+      let receivedSignal: AbortSignal | undefined;
 
-    const capture = makeLogCapture();
-    const violations: string[] = [];
-    const { breaker, recorded } = recordingBreaker();
+      const capture = makeLogCapture();
+      const violations: string[] = [];
+      const { breaker, recorded } = recordingBreaker();
 
-    const app = await buildProxyApp({
-      breaker: breaker,
-      logger: capture.logger,
-      streamingEnabled: true,
-      upstreamBuffered: bufferedTripwire(violations).seam,
-      upstreamStreaming: (_body, signal) => {
-        calls += 1;
-        receivedSignal = signal;
+      const app = await buildProxyApp({
+        breaker: breaker,
+        logger: capture.logger,
+        streamingEnabled: true,
+        upstreamBuffered: bufferedTripwire(violations).seam,
+        upstreamStreaming: (_body, signal) => {
+          calls += 1;
+          receivedSignal = signal;
 
-        return new Promise<StreamingAdapter>((resolve) => {
-          resolveUpstream = resolve;
-        });
-      },
-    });
-
-    vi.useFakeTimers();
-    const startedAt = Date.now();
-
-    try {
-      const req = app.inject({
-        method: "POST",
-        url: "/v1/chat/completions",
-        headers: { authorization: bearer() },
-        payload: { ...validBody, stream: true },
-      });
-
-      await vi.advanceTimersByTimeAsync(1_000);
-
-      expect(violations).toStrictEqual([]);
-      expect(
-        calls,
-        "the scene's premise: the request is in flight, the streaming upstream was called once and has not answered",
-      ).toBe(1);
-      expect(receivedSignal).toBeDefined();
-      expect(
-        receivedSignal?.aborted,
-        "the scene's premise: the deadline's timer has not fired, so the request signal is not aborted",
-      ).toBe(false);
-
-      const pendingTimers = vi.getTimerCount();
-      expect(
-        pendingTimers,
-        "the scene's premise: the deadline's timer is still armed",
-      ).toBe(1);
-
-      vi.setSystemTime(startedAt + 280_020);
-
-      if (resolveUpstream === undefined) {
-        throw new Error("resolveUpstream is undefined");
-      }
-
-      resolveUpstream({
-        kind: "upstream_error",
-        status: 502,
-        body_raw: "upstream failure",
-      });
-
-      await vi.advanceTimersByTimeAsync(0);
-
-      const res = await req;
-      expect(
-        res.statusCode,
-        "the deadline is a value read at the terminal decision: past the deadline the request ends as TOTAL_TIMEOUT, a 504, whatever the upstream answered",
-      ).toBe(504);
-      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
-      expect(
-        res.json(),
-        "the deadline is a value read at the terminal decision: past the deadline the client gets the deadline's own 504 body, not the upstream's 502",
-      ).toStrictEqual({
-        error: {
-          message: "stream exceeded the total duration limit",
-          type: "gateway_timeout",
-          code: "total_timeout_exceeded",
+          return new Promise<StreamingAdapter>((resolve) => {
+            resolveUpstream = resolve;
+          });
         },
       });
-      expect(
-        recorded,
-        "the deadline is a value read at the terminal decision: a 502 that arrives past the deadline is not evidence about the upstream, so the breaker result is INCONCLUSIVE",
-      ).toStrictEqual(["INCONCLUSIVE"]);
 
-      const complete = capture.byEvent("req_complete");
-      expect(complete).toHaveLength(1);
-      expect(
-        complete[0],
-        "the deadline is a value read at the terminal decision: req_complete names TOTAL_TIMEOUT, not the upstream's error",
-      ).toMatchObject({
-        status: 504,
-        error_class: "gateway-fault",
-        stream: true,
-        attempts: 1,
-        retry_disposition: "ineligible",
-        terminal: "TOTAL_TIMEOUT",
-      });
-    } finally {
-      vi.useRealTimers();
-      await app.close();
-    }
-  });
+      vi.useFakeTimers();
+      const startedAt = Date.now();
+
+      try {
+        const req = app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: bearer() },
+          payload: { ...validBody, stream: true },
+        });
+
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(violations).toStrictEqual([]);
+        expect(
+          calls,
+          "the scene's premise: the request is in flight, the streaming upstream was called once and has not answered",
+        ).toBe(1);
+        expect(receivedSignal).toBeDefined();
+        expect(
+          receivedSignal?.aborted,
+          "the scene's premise: the deadline's timer has not fired, so the request signal is not aborted",
+        ).toBe(false);
+
+        const pendingTimers = vi.getTimerCount();
+        expect(
+          pendingTimers,
+          "the scene's premise: the deadline's timer is still armed",
+        ).toBe(1);
+
+        vi.setSystemTime(startedAt + clockAfterStartMs);
+
+        if (resolveUpstream === undefined) {
+          throw new Error("resolveUpstream is undefined");
+        }
+
+        resolveUpstream({
+          kind: "upstream_error",
+          status: 502,
+          body_raw: "upstream failure",
+        });
+
+        await vi.advanceTimersByTimeAsync(0);
+
+        const res = await req;
+        expect(
+          res.statusCode,
+          rule,
+        ).toBe(504);
+        expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+        expect(
+          res.json(),
+          "the deadline is a value read at the terminal decision: past the deadline the client gets the deadline's own 504 body, not the upstream's 502",
+        ).toStrictEqual({
+          error: {
+            message: "stream exceeded the total duration limit",
+            type: "gateway_timeout",
+            code: "total_timeout_exceeded",
+          },
+        });
+        expect(
+          recorded,
+          "the deadline is a value read at the terminal decision: a 502 that arrives past the deadline is not evidence about the upstream, so the breaker result is INCONCLUSIVE",
+        ).toStrictEqual(["INCONCLUSIVE"]);
+
+        expect(
+          capture.logs.flatMap((log) => log.event ?? []),
+          "a pre-first-frame terminal emits req_complete, never stream_done: the request logs req_start and req_complete, and no other event",
+        ).toStrictEqual(["req_start", "req_complete"]);
+        const complete = capture.byEvent("req_complete");
+        expect(
+          complete[0],
+          "the deadline is a value read at the terminal decision: req_complete names TOTAL_TIMEOUT, not the upstream's error",
+        ).toMatchObject({
+          status: 504,
+          error_class: "gateway-fault",
+          stream: true,
+          attempts: 1,
+          retry_disposition: "ineligible",
+          terminal: "TOTAL_TIMEOUT",
+        });
+      } finally {
+        vi.useRealTimers();
+        await app.close();
+      }
+    },
+  );
 
   it("ends with the upstream's own 502 when it arrives after 30 seconds and before the deadline", async () => {
     let calls = 0;
@@ -864,7 +887,10 @@ describe("streaming flag ON: the total-duration deadline bounds a stream: true r
       ).toBe(false);
 
       const complete = capture.byEvent("req_complete");
-      expect(complete).toHaveLength(1);
+      expect(
+        complete,
+        "the request logs exactly one req_complete line",
+      ).toHaveLength(1);
       expect(
         complete[0],
         "before the deadline, req_complete describes the upstream's error",
@@ -973,8 +999,11 @@ describe("streaming flag ON: the total-duration deadline bounds a stream: true r
         "the deadline's own abort is a TOTAL_TIMEOUT even when the clock has stepped back: one INCONCLUSIVE breaker result",
       ).toStrictEqual(["INCONCLUSIVE"]);
 
+      expect(
+        capture.logs.flatMap((log) => log.event ?? []),
+        "a pre-first-frame terminal emits req_complete, never stream_done: the request logs req_start and req_complete, and no other event",
+      ).toStrictEqual(["req_start", "req_complete"]);
       const complete = capture.byEvent("req_complete");
-      expect(complete).toHaveLength(1);
       expect(
         complete[0],
         "the deadline's own abort is a TOTAL_TIMEOUT even when the clock has stepped back: req_complete names the terminal",
