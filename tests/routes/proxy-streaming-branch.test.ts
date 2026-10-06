@@ -880,4 +880,115 @@ describe("streaming flag ON: the total-duration deadline bounds a stream: true r
       await app.close();
     }
   });
+
+  it("ends as TOTAL_TIMEOUT when the clock steps back after the deadline's timer has aborted the request", async () => {
+    let calls = 0;
+    let resolveUpstream: ((result: StreamingAdapter) => void) | undefined;
+    let receivedSignal: AbortSignal | undefined;
+
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+
+    const app = await buildProxyApp({
+      breaker: breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: (_body, signal) => {
+        calls += 1;
+        receivedSignal = signal;
+
+        return new Promise<StreamingAdapter>((resolve) => {
+          resolveUpstream = resolve;
+        });
+      },
+    });
+
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+
+    try {
+      const req = app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: bearer() },
+        payload: { ...validBody, stream: true },
+      });
+
+      await vi.advanceTimersByTimeAsync(280_000);
+
+      expect(violations).toStrictEqual([]);
+      expect(
+        calls,
+        "the scene's premise: the streaming upstream was called once and has not answered",
+      ).toBe(1);
+      expect(receivedSignal).toBeDefined();
+      expect(
+        receivedSignal?.aborted,
+        "the scene's premise: the deadline's timer has fired and aborted the request signal",
+      ).toBe(true);
+      expect(
+        receivedSignal?.reason.kind,
+        "the scene's premise: the abort reason is the deadline's own",
+      ).toBe("total_timeout");
+
+      const pendingTimers = vi.getTimerCount();
+      expect(
+        pendingTimers,
+        "the scene's premise: the deadline's timer has fired and no other timer is armed",
+      ).toBe(0);
+
+      vi.setSystemTime(startedAt + 279_990);
+
+      if (resolveUpstream === undefined) {
+        throw new Error("resolveUpstream is undefined");
+      }
+
+      resolveUpstream({
+        kind: "aborted",
+        abort_kind: "total_timeout",
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      const res = await req;
+      expect(
+        res.statusCode,
+        "the deadline's own abort is a TOTAL_TIMEOUT even when the clock has stepped back behind the deadline: the request ends with a 504",
+      ).toBe(504);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(
+        res.json(),
+        "the deadline's own abort is a TOTAL_TIMEOUT even when the clock has stepped back: the client gets the same 504 body as at the deadline",
+      ).toStrictEqual({
+        error: {
+          message: "stream exceeded the total duration limit",
+          type: "gateway_timeout",
+          code: "total_timeout_exceeded",
+        },
+      });
+      expect(
+        recorded,
+        "the deadline's own abort is a TOTAL_TIMEOUT even when the clock has stepped back: one INCONCLUSIVE breaker result",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+
+      const complete = capture.byEvent("req_complete");
+      expect(complete).toHaveLength(1);
+      expect(
+        complete[0],
+        "the deadline's own abort is a TOTAL_TIMEOUT even when the clock has stepped back: req_complete names the terminal",
+      ).toMatchObject({
+        status: 504,
+        error_class: "gateway-fault",
+        stream: true,
+        attempts: 1,
+        retry_disposition: "ineligible",
+        terminal: "TOTAL_TIMEOUT",
+      });
+    } finally {
+      vi.useRealTimers();
+      await app.close();
+    }
+  });
 });
