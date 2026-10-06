@@ -137,6 +137,11 @@ export function classify(
             breaker_delta: 0,
           };
         case "total_timeout":
+          // The proxy route ends the streaming deadline's own abort as its
+          // TOTAL_TIMEOUT terminal before it classifies an outcome, so no
+          // request reaches this arm today. It keeps the switch exhaustive and
+          // answers like the non-streaming deadline: the expiry proves the
+          // request outlived its budget, not that the upstream failed.
           return {
             error_class: "gateway-fault",
             breaker_delta: 0,
