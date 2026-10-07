@@ -344,7 +344,11 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
 
       if (isAcceptedStream(outcome)) {
         const nextFrame = createSseFrameReader(outcome.reader);
-        const firstFrame = await nextFrame();
+        let firstFrame = await nextFrame();
+
+        while (firstFrame.kind === "frame" && firstFrame.data === null) {
+          firstFrame = await nextFrame();
+        }
 
         if (
           firstFrame.kind === "frame" &&
