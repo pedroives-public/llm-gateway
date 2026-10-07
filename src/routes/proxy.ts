@@ -393,6 +393,49 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           };
         }
 
+        if (firstFrame.kind === "cap") {
+          const status = 502;
+          const errorClass: ErrorClass = "upstream-fault";
+
+          try {
+            opts.breaker.recordResult("FAILURE");
+          } finally {
+            await cancelStream(outcome.reader, upstreamLog, "proxy_route");
+          }
+
+          const terminalDurationMs = Date.now() - requestStartedAt;
+          const terminalGatewayOverheadMs = Math.max(
+            0,
+            terminalDurationMs - upstreamDurationMs,
+          );
+
+          emitReqComplete(request.log, {
+            req_id: request.reqId,
+            status,
+            error_class: errorClass,
+            stream: true,
+            attempts,
+            duration_ms: terminalDurationMs,
+            upstream_duration_ms: upstreamDurationMs,
+            gateway_overhead_ms: terminalGatewayOverheadMs,
+            retry_disposition: deriveRetryDisposition(
+              attempts,
+              outcome,
+              timeout.signal,
+            ),
+            terminal: "PARSER_BUFFER_CAP",
+          });
+
+          reply.code(status).header("x-gateway-error-class", errorClass);
+          return {
+            error: {
+              message: "invalid response from upstream",
+              type: "server_error",
+              code: "upstream_decode_error",
+            },
+          };
+        }
+
         if (
           firstFrame.kind === "frame" &&
           firstFrame.data !== null &&

@@ -51,7 +51,8 @@ export type ReqCompleteTerminal =
   | "STREAM_NOT_DELIVERED"
   | "TOTAL_TIMEOUT"
   | "FIRST_FRAME_NOT_JSON"
-  | "UPSTREAM_EOF_BEFORE_FIRST_FRAME";
+  | "UPSTREAM_EOF_BEFORE_FIRST_FRAME"
+  | "PARSER_BUFFER_CAP";
 
 type OperationalAlertLine = {
   event: "operational_alert";
