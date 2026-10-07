@@ -1031,3 +1031,94 @@ describe("streaming flag ON: the total-duration deadline bounds a stream: true r
     },
   );
 });
+
+describe("streaming flag ON: the first frame is checked before anything is written", () => {
+  it("answers a first frame whose data is not JSON as undecodable, cancels the upstream body, and writes no stream", async () => {
+    const upstream = await holdOpenUpstream(
+      200,
+      { "content-type": "text/event-stream" },
+      "data: not-json\n\n",
+    );
+    const client = createOpenAIClient({
+      apiKey: "gateway-key",
+      baseURL: `http://127.0.0.1:${upstream.port}`,
+    });
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+    const app = await buildProxyApp({
+      breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: client.streaming,
+    });
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: bearer() },
+        payload: { ...validBody, stream: true },
+      });
+
+      expect(violations).toStrictEqual([]);
+      expect(
+        res.statusCode,
+        "a first frame whose data is not JSON is found before anything is written: the request ends with a clean 502, never a 200 stream",
+      ).toBe(502);
+      expect(
+        res.headers["x-gateway-error-class"],
+        "a first frame whose data is not JSON is a decode failure of a real upstream attempt: the class is upstream-fault",
+      ).toBe("upstream-fault");
+      expect(
+        res.headers["content-type"],
+        "no SSE head is written when the first frame fails the JSON check: the error is a JSON body",
+      ).toBe("application/json; charset=utf-8");
+      expect(
+        res.json(),
+        "a first frame whose data is not JSON gets the same client-facing error as any undecodable upstream response",
+      ).toStrictEqual({
+        error: {
+          message: "invalid response from upstream",
+          type: "server_error",
+          code: "upstream_decode_error",
+        },
+      });
+      expect(
+        recorded,
+        "a first frame whose data is not JSON is a decode failure of a real upstream attempt: one FAILURE breaker result",
+      ).toStrictEqual(["FAILURE"]);
+
+      const finished = await withinDeadline(
+        upstream.closed,
+        UPSTREAM_CLOSE_DEADLINE_MS,
+        "the upstream body was not cancelled after the first frame failed the JSON check: the fake saw no close before the deadline",
+      );
+      expect(
+        finished,
+        "the upstream connection closed only after the fake ended the body, not by a cancel",
+      ).toBe(false);
+
+      expect(
+        capture.logs.flatMap((log) => log.event ?? []),
+        "a pre-first-frame terminal emits req_complete, never stream_done: the request logs req_start and req_complete, and no other event",
+      ).toStrictEqual(["req_start", "req_complete"]);
+      const complete = capture.byEvent("req_complete");
+      expect(
+        complete[0],
+        "req_complete names the terminal, so an operator can tell a first frame that is not JSON from any other undecodable upstream response",
+      ).toMatchObject({
+        status: 502,
+        error_class: "upstream-fault",
+        stream: true,
+        attempts: 1,
+        retry_disposition: "ineligible",
+        terminal: "FIRST_FRAME_NOT_JSON",
+      });
+    } finally {
+      await app.close();
+      await upstream.close();
+    }
+  });
+});

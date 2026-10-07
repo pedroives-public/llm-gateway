@@ -37,6 +37,7 @@ import {
   type StreamingAdapter,
   cancelStream,
 } from "../upstream/stream.js";
+import { createSseFrameReader } from "../upstream/sse-frame-reader.js";
 import { STREAM_TOTAL_DURATION_MS } from "../config.js";
 
 const WALL_CLOCK_MS = 30_000;
@@ -47,6 +48,13 @@ const TOTAL_TIMEOUT_BODY = {
     message: "stream exceeded the total duration limit",
     type: "gateway_timeout",
     code: "total_timeout_exceeded",
+  },
+};
+const UPSTREAM_DECODE_ERROR_BODY = {
+  error: {
+    message: "invalid response from upstream",
+    type: "server_error",
+    code: "upstream_decode_error",
   },
 };
 
@@ -335,6 +343,54 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
       }
 
       if (isAcceptedStream(outcome)) {
+        const nextFrame = createSseFrameReader(outcome.reader);
+        const firstFrame = await nextFrame();
+
+        if (
+          firstFrame.kind === "frame" &&
+          firstFrame.data !== null &&
+          firstFrame.data !== "[DONE]"
+        ) {
+          try {
+            JSON.parse(firstFrame.data);
+          } catch {
+            const status = 502;
+            const errorClass: ErrorClass = "upstream-fault";
+
+            try {
+              opts.breaker.recordResult("FAILURE");
+            } finally {
+              await cancelStream(outcome.reader, upstreamLog, "proxy_route");
+            }
+
+            const terminalDurationMs = Date.now() - requestStartedAt;
+            const terminalGatewayOverheadMs = Math.max(
+              0,
+              terminalDurationMs - upstreamDurationMs,
+            );
+
+            emitReqComplete(request.log, {
+              req_id: request.reqId,
+              status,
+              error_class: errorClass,
+              stream: true,
+              attempts,
+              duration_ms: terminalDurationMs,
+              upstream_duration_ms: upstreamDurationMs,
+              gateway_overhead_ms: terminalGatewayOverheadMs,
+              retry_disposition: deriveRetryDisposition(
+                attempts,
+                outcome,
+                timeout.signal,
+              ),
+              terminal: "FIRST_FRAME_NOT_JSON",
+            });
+
+            reply.code(status).header("x-gateway-error-class", errorClass);
+            return UPSTREAM_DECODE_ERROR_BODY;
+          }
+        }
+
         const status = 500;
         const errorClass: ErrorClass = "gateway-fault";
 
