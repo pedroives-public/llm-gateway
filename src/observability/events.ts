@@ -52,7 +52,8 @@ export type ReqCompleteTerminal =
   | "TOTAL_TIMEOUT"
   | "FIRST_FRAME_NOT_JSON"
   | "UPSTREAM_EOF_BEFORE_FIRST_FRAME"
-  | "PARSER_BUFFER_CAP";
+  | "PARSER_BUFFER_CAP"
+  | "NETWORK_FAILED_POST_SEND";
 
 type OperationalAlertLine = {
   event: "operational_alert";

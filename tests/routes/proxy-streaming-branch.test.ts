@@ -122,6 +122,37 @@ async function endingUpstream(
   return listenEphemeral(server);
 }
 
+// Loopback delivers a response head within a few milliseconds; 50 ms leaves
+// it time to reach the gateway before the connection dies (measured
+// 2026-10-07: with 50 ms the failure landed on the body read in every run).
+const RESET_AFTER_HEAD_MS = 50;
+
+// A fake upstream that sends the given head and then destroys the connection
+// without ending the body: the gateway's pending read rejects with a transport
+// error instead of seeing an end of stream.
+async function resettingUpstream(
+  status: number,
+  headers: Record<string, string>,
+): Promise<FakeUpstream> {
+  const server = http.createServer((req, res) => {
+    res.on("error", () => {});
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(status, headers);
+      res.flushHeaders();
+      setTimeout(() => res.destroy(), RESET_AFTER_HEAD_MS);
+    });
+  });
+  const { port, close } = await listenEphemeral(server);
+  return {
+    port,
+    close: async () => {
+      server.closeAllConnections();
+      await close();
+    },
+  };
+}
+
 describe("streaming flag ON: the response head decides a stream: true attempt", () => {
   it("answers a 2xx that is not SSE as undecodable, cancels the upstream body, and never reaches the buffered read", async () => {
     // What a provider that ignores the `stream` field sends: a JSON completion.
@@ -1173,6 +1204,13 @@ describe("streaming flag ON: the first frame is checked before anything is writt
       code: "upstream_decode_error",
     },
   };
+  const CONNECTION_FAILED_BODY = {
+    error: {
+      message: "gateway error",
+      type: "gateway_error",
+      code: "upstream_connection_failed",
+    },
+  };
   type ExpectedTerminal = {
     status: number;
     errorClass: string;
@@ -1230,6 +1268,18 @@ describe("streaming flag ON: the first frame is checked before anything is writt
         terminal: "PARSER_BUFFER_CAP",
       },
       rule: "bytes that pass the frame buffer cap before a first frame never form one: 502 upstream-fault with a FAILURE vote, and nothing written as a stream",
+    },
+    {
+      when: "the connection is destroyed after the head",
+      makeUpstream: () => resettingUpstream(200, SSE_HEAD),
+      expected: {
+        status: 504,
+        errorClass: "gateway-fault",
+        body: CONNECTION_FAILED_BODY,
+        votes: ["FAILURE"],
+        terminal: "NETWORK_FAILED_POST_SEND",
+      },
+      rule: "a connection that dies after the head and before a first frame is a network failure after the request was sent: 504 gateway-fault with exactly one FAILURE vote",
     },
   ])(
     "ends as $expected.terminal when $when, before anything is written",
