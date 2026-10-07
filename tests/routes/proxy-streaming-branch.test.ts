@@ -18,6 +18,7 @@ import {
 } from "../helpers/streaming-seams.js";
 import { isAcceptedStream } from "../../src/upstream/stream.js";
 import type { StreamingAdapter } from "../../src/upstream/stream.js";
+import { PARSER_BUFFER_CAP } from "../../src/upstream/sse-frame-reader.js";
 
 // With the streaming flag ON, a `stream: true` attempt is decided by the
 // upstream response HEAD alone: status plus the `content-type` media type.
@@ -1212,6 +1213,23 @@ describe("streaming flag ON: the first frame is checked before anything is writt
       makeUpstream: () => endingUpstream(200, SSE_HEAD, ": keep-alive\n\n"),
       expected: EOF_BEFORE_FIRST_FRAME,
       rule: EOF_RULE,
+    },
+    {
+      when: "the bytes pass the frame buffer cap without forming a frame",
+      makeUpstream: () =>
+        holdOpenUpstream(
+          200,
+          SSE_HEAD,
+          `data: ${"x".repeat(PARSER_BUFFER_CAP + 1)}`,
+        ),
+      expected: {
+        status: 502,
+        errorClass: "upstream-fault",
+        body: UNDECODABLE_BODY,
+        votes: ["FAILURE"],
+        terminal: "PARSER_BUFFER_CAP",
+      },
+      rule: "bytes that pass the frame buffer cap before a first frame never form one: 502 upstream-fault with a FAILURE vote, and nothing written as a stream",
     },
   ])(
     "ends as $expected.terminal when $when, before anything is written",
