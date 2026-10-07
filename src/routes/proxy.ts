@@ -19,6 +19,7 @@ import {
   emitOperationalAlert,
   alertFor,
   type MinLogger,
+  type ReqCompleteTerminal,
 } from "../observability/events.js";
 import { retry } from "../reliability/retry.js";
 import {
@@ -350,93 +351,12 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           firstFrame = await nextFrame();
         }
 
+        let terminal: ReqCompleteTerminal | undefined;
         if (firstFrame.kind === "eof" || firstFrame.kind === "eof_partial") {
-          const status = 502;
-          const errorClass: ErrorClass = "upstream-fault";
-
-          try {
-            opts.breaker.recordResult("FAILURE");
-          } finally {
-            await cancelStream(outcome.reader, upstreamLog, "proxy_route");
-          }
-
-          const terminalDurationMs = Date.now() - requestStartedAt;
-          const terminalGatewayOverheadMs = Math.max(
-            0,
-            terminalDurationMs - upstreamDurationMs,
-          );
-
-          emitReqComplete(request.log, {
-            req_id: request.reqId,
-            status,
-            error_class: errorClass,
-            stream: true,
-            attempts,
-            duration_ms: terminalDurationMs,
-            upstream_duration_ms: upstreamDurationMs,
-            gateway_overhead_ms: terminalGatewayOverheadMs,
-            retry_disposition: deriveRetryDisposition(
-              attempts,
-              outcome,
-              timeout.signal,
-            ),
-            terminal: "UPSTREAM_EOF_BEFORE_FIRST_FRAME",
-          });
-
-          reply.code(status).header("x-gateway-error-class", errorClass);
-          return {
-            error: {
-              message: "invalid response from upstream",
-              type: "server_error",
-              code: "upstream_decode_error",
-            },
-          };
-        }
-
-        if (firstFrame.kind === "cap") {
-          const status = 502;
-          const errorClass: ErrorClass = "upstream-fault";
-
-          try {
-            opts.breaker.recordResult("FAILURE");
-          } finally {
-            await cancelStream(outcome.reader, upstreamLog, "proxy_route");
-          }
-
-          const terminalDurationMs = Date.now() - requestStartedAt;
-          const terminalGatewayOverheadMs = Math.max(
-            0,
-            terminalDurationMs - upstreamDurationMs,
-          );
-
-          emitReqComplete(request.log, {
-            req_id: request.reqId,
-            status,
-            error_class: errorClass,
-            stream: true,
-            attempts,
-            duration_ms: terminalDurationMs,
-            upstream_duration_ms: upstreamDurationMs,
-            gateway_overhead_ms: terminalGatewayOverheadMs,
-            retry_disposition: deriveRetryDisposition(
-              attempts,
-              outcome,
-              timeout.signal,
-            ),
-            terminal: "PARSER_BUFFER_CAP",
-          });
-
-          reply.code(status).header("x-gateway-error-class", errorClass);
-          return {
-            error: {
-              message: "invalid response from upstream",
-              type: "server_error",
-              code: "upstream_decode_error",
-            },
-          };
-        }
-
-        if (
+          terminal = "UPSTREAM_EOF_BEFORE_FIRST_FRAME";
+        } else if (firstFrame.kind === "cap") {
+          terminal = "PARSER_BUFFER_CAP";
+        } else if (
           firstFrame.kind === "frame" &&
           firstFrame.data !== null &&
           firstFrame.data !== "[DONE]"
@@ -444,41 +364,45 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           try {
             JSON.parse(firstFrame.data);
           } catch {
-            const status = 502;
-            const errorClass: ErrorClass = "upstream-fault";
-
-            try {
-              opts.breaker.recordResult("FAILURE");
-            } finally {
-              await cancelStream(outcome.reader, upstreamLog, "proxy_route");
-            }
-
-            const terminalDurationMs = Date.now() - requestStartedAt;
-            const terminalGatewayOverheadMs = Math.max(
-              0,
-              terminalDurationMs - upstreamDurationMs,
-            );
-
-            emitReqComplete(request.log, {
-              req_id: request.reqId,
-              status,
-              error_class: errorClass,
-              stream: true,
-              attempts,
-              duration_ms: terminalDurationMs,
-              upstream_duration_ms: upstreamDurationMs,
-              gateway_overhead_ms: terminalGatewayOverheadMs,
-              retry_disposition: deriveRetryDisposition(
-                attempts,
-                outcome,
-                timeout.signal,
-              ),
-              terminal: "FIRST_FRAME_NOT_JSON",
-            });
-
-            reply.code(status).header("x-gateway-error-class", errorClass);
-            return UPSTREAM_DECODE_ERROR_BODY;
+            terminal = "FIRST_FRAME_NOT_JSON";
           }
+        }
+
+        if (terminal !== undefined) {
+          const status = 502;
+          const errorClass: ErrorClass = "upstream-fault";
+
+          try {
+            opts.breaker.recordResult("FAILURE");
+          } finally {
+            await cancelStream(outcome.reader, upstreamLog, "proxy_route");
+          }
+
+          const terminalDurationMs = Date.now() - requestStartedAt;
+          const terminalGatewayOverheadMs = Math.max(
+            0,
+            terminalDurationMs - upstreamDurationMs,
+          );
+
+          emitReqComplete(request.log, {
+            req_id: request.reqId,
+            status,
+            error_class: errorClass,
+            stream: true,
+            attempts,
+            duration_ms: terminalDurationMs,
+            upstream_duration_ms: upstreamDurationMs,
+            gateway_overhead_ms: terminalGatewayOverheadMs,
+            retry_disposition: deriveRetryDisposition(
+              attempts,
+              outcome,
+              timeout.signal,
+            ),
+            terminal,
+          });
+
+          reply.code(status).header("x-gateway-error-class", errorClass);
+          return UPSTREAM_DECODE_ERROR_BODY;
         }
 
         const status = 500;
@@ -763,13 +687,7 @@ function bodyForErrorOutcome(
       return outcome.body_raw;
 
     case "undecodable":
-      return {
-        error: {
-          message: "invalid response from upstream",
-          type: "server_error",
-          code: "upstream_decode_error",
-        },
-      };
+      return UPSTREAM_DECODE_ERROR_BODY;
 
     case "redirect_blocked":
       return {
