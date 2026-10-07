@@ -113,7 +113,7 @@ describe("recognize", () => {
     expect(result).toEqual({ kind: "unrecognized" });
   });
 
-  it.each(["response_size_cap", "wall_clock_expired"] as const)(
+  it.each(["response_size_cap", "wall_clock_expired", "total_timeout"] as const)(
     "maps the recognized abort kind %s to aborted { abort_kind }",
     (abortKind) => {
       const result = recognize({
