@@ -7,7 +7,7 @@ import type {
 } from "fastify";
 import type { CircuitBreaker } from "../reliability/circuit-breaker.js";
 import type { ErrorOutcome, Outcome } from "../upstream/outcome.js";
-import type { Logger } from "../upstream/rejection.js";
+import { resolveRejection, type Logger } from "../upstream/rejection.js";
 import {
   emitReqStart,
   emitReqComplete,
@@ -38,7 +38,10 @@ import {
   type StreamingAdapter,
   cancelStream,
 } from "../upstream/stream.js";
-import { createSseFrameReader } from "../upstream/sse-frame-reader.js";
+import {
+  createSseFrameReader,
+  type SseFrame,
+} from "../upstream/sse-frame-reader.js";
 import { STREAM_TOTAL_DURATION_MS } from "../config.js";
 
 const WALL_CLOCK_MS = 30_000;
@@ -345,35 +348,79 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
 
       if (isAcceptedStream(outcome)) {
         const nextFrame = createSseFrameReader(outcome.reader);
-        let firstFrame = await nextFrame();
+        let firstFrame: SseFrame | undefined;
+        let readError: ErrorOutcome | undefined;
 
-        while (firstFrame.kind === "frame" && firstFrame.data === null) {
+        try {
           firstFrame = await nextFrame();
-        }
-
-        let terminal: ReqCompleteTerminal | undefined;
-        if (firstFrame.kind === "eof" || firstFrame.kind === "eof_partial") {
-          terminal = "UPSTREAM_EOF_BEFORE_FIRST_FRAME";
-        } else if (firstFrame.kind === "cap") {
-          terminal = "PARSER_BUFFER_CAP";
-        } else if (
-          firstFrame.kind === "frame" &&
-          firstFrame.data !== null &&
-          firstFrame.data !== "[DONE]"
-        ) {
-          try {
-            JSON.parse(firstFrame.data);
-          } catch {
-            terminal = "FIRST_FRAME_NOT_JSON";
+          while (firstFrame.kind === "frame" && firstFrame.data === null) {
+            firstFrame = await nextFrame();
           }
+        } catch (error) {
+          readError = resolveRejection(error, timeout.signal, upstreamLog);
         }
 
-        if (terminal !== undefined) {
-          const status = 502;
-          const errorClass: ErrorClass = "upstream-fault";
+        if (readError !== undefined) {
+          outcome = readError;
+        } else if (firstFrame !== undefined) {
+          let terminal: ReqCompleteTerminal | undefined;
+          if (firstFrame.kind === "eof" || firstFrame.kind === "eof_partial") {
+            terminal = "UPSTREAM_EOF_BEFORE_FIRST_FRAME";
+          } else if (firstFrame.kind === "cap") {
+            terminal = "PARSER_BUFFER_CAP";
+          } else if (
+            firstFrame.kind === "frame" &&
+            firstFrame.data !== null &&
+            firstFrame.data !== "[DONE]"
+          ) {
+            try {
+              JSON.parse(firstFrame.data);
+            } catch {
+              terminal = "FIRST_FRAME_NOT_JSON";
+            }
+          }
+          if (terminal !== undefined) {
+            const status = 502;
+            const errorClass: ErrorClass = "upstream-fault";
+
+            try {
+              opts.breaker.recordResult("FAILURE");
+            } finally {
+              await cancelStream(outcome.reader, upstreamLog, "proxy_route");
+            }
+
+            const terminalDurationMs = Date.now() - requestStartedAt;
+            const terminalGatewayOverheadMs = Math.max(
+              0,
+              terminalDurationMs - upstreamDurationMs,
+            );
+
+            emitReqComplete(request.log, {
+              req_id: request.reqId,
+              status,
+              error_class: errorClass,
+              stream: true,
+              attempts,
+              duration_ms: terminalDurationMs,
+              upstream_duration_ms: upstreamDurationMs,
+              gateway_overhead_ms: terminalGatewayOverheadMs,
+              retry_disposition: deriveRetryDisposition(
+                attempts,
+                outcome,
+                timeout.signal,
+              ),
+              terminal,
+            });
+
+            reply.code(status).header("x-gateway-error-class", errorClass);
+            return UPSTREAM_DECODE_ERROR_BODY;
+          }
+
+          const status = 500;
+          const errorClass: ErrorClass = "gateway-fault";
 
           try {
-            opts.breaker.recordResult("FAILURE");
+            opts.breaker.recordResult("INCONCLUSIVE");
           } finally {
             await cancelStream(outcome.reader, upstreamLog, "proxy_route");
           }
@@ -398,131 +445,104 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               outcome,
               timeout.signal,
             ),
-            terminal,
+            terminal: "STREAM_NOT_DELIVERED",
           });
 
           reply.code(status).header("x-gateway-error-class", errorClass);
-          return UPSTREAM_DECODE_ERROR_BODY;
+          return {
+            error: {
+              message: "streaming response was not delivered",
+              type: "internal_error",
+              code: "stream_not_delivered",
+            },
+          };
         }
-
-        const status = 500;
-        const errorClass: ErrorClass = "gateway-fault";
-
-        try {
-          opts.breaker.recordResult("INCONCLUSIVE");
-        } finally {
-          await cancelStream(outcome.reader, upstreamLog, "proxy_route");
-        }
-
-        const terminalDurationMs = Date.now() - requestStartedAt;
-        const terminalGatewayOverheadMs = Math.max(
-          0,
-          terminalDurationMs - upstreamDurationMs,
-        );
-
-        emitReqComplete(request.log, {
-          req_id: request.reqId,
-          status,
-          error_class: errorClass,
-          stream: true,
-          attempts,
-          duration_ms: terminalDurationMs,
-          upstream_duration_ms: upstreamDurationMs,
-          gateway_overhead_ms: terminalGatewayOverheadMs,
-          retry_disposition: deriveRetryDisposition(
-            attempts,
-            outcome,
-            timeout.signal,
-          ),
-          terminal: "STREAM_NOT_DELIVERED",
-        });
-
-        reply.code(status).header("x-gateway-error-class", errorClass);
-        return {
-          error: {
-            message: "streaming response was not delivered",
-            type: "internal_error",
-            code: "stream_not_delivered",
-          },
-        };
       }
 
-      if (outcome.kind === "ok") {
-        opts.breaker.recordResult("SUCCESS");
+      if (!isAcceptedStream(outcome)) {
+        if (outcome.kind === "ok") {
+          opts.breaker.recordResult("SUCCESS");
+          emitReqComplete(request.log, {
+            req_id: request.reqId,
+            status: outcome.status,
+            error_class: null,
+            stream: request.body.stream ?? false,
+            duration_ms: durationMs,
+            upstream_duration_ms: upstreamDurationMs,
+            gateway_overhead_ms: gatewayOverheadMs,
+            attempts,
+            retry_disposition: deriveRetryDisposition(
+              attempts,
+              outcome,
+              timeout.signal,
+            ),
+          });
+
+          reply.code(outcome.status);
+          return outcome.body_parsed;
+        }
+
+        const classification = classify(outcome, request.log, request.reqId);
+        const retryDisposition = deriveRetryDisposition(
+          attempts,
+          outcome,
+          timeout.signal,
+        );
+
+        // recordResult uses the policy's delta, not classify's raw delta, in the
+        // same synchronous stretch — no await between deciding and recording.
+        const terminal = decideErrorTerminal(
+          classification,
+          retryDisposition,
+          outcome,
+        );
+        opts.breaker.recordResult(
+          terminal.breaker_delta === 1 ? "FAILURE" : "INCONCLUSIVE",
+        );
+
+        const alert = alertFor(terminal.error_class);
+        if (alert !== null) {
+          emitOperationalAlert(request.log, alert, { req_id: request.reqId });
+        }
+
+        const reqCompleteTerminal: ReqCompleteTerminal | undefined =
+          outcome.kind === "network_failed" && !outcome.pre_send_proven
+            ? "NETWORK_FAILED_POST_SEND"
+            : undefined;
+
         emitReqComplete(request.log, {
           req_id: request.reqId,
-          status: outcome.status,
-          error_class: null,
+          status: terminal.status,
+          error_class: terminal.error_class,
           stream: request.body.stream ?? false,
           duration_ms: durationMs,
           upstream_duration_ms: upstreamDurationMs,
           gateway_overhead_ms: gatewayOverheadMs,
           attempts,
-          retry_disposition: deriveRetryDisposition(
-            attempts,
-            outcome,
-            timeout.signal,
-          ),
+          retry_disposition: retryDisposition,
+          terminal: reqCompleteTerminal,
         });
 
-        reply.code(outcome.status);
-        return outcome.body_parsed;
-      }
+        reply
+          .code(terminal.status)
+          .header("x-gateway-error-class", terminal.error_class);
 
-      const classification = classify(outcome, request.log, request.reqId);
-      const retryDisposition = deriveRetryDisposition(
-        attempts,
-        outcome,
-        timeout.signal,
-      );
-
-      // recordResult uses the policy's delta, not classify's raw delta, in the
-      // same synchronous stretch — no await between deciding and recording.
-      const terminal = decideErrorTerminal(
-        classification,
-        retryDisposition,
-        outcome,
-      );
-      opts.breaker.recordResult(
-        terminal.breaker_delta === 1 ? "FAILURE" : "INCONCLUSIVE",
-      );
-
-      const alert = alertFor(terminal.error_class);
-      if (alert !== null) {
-        emitOperationalAlert(request.log, alert, { req_id: request.reqId });
-      }
-
-      emitReqComplete(request.log, {
-        req_id: request.reqId,
-        status: terminal.status,
-        error_class: terminal.error_class,
-        stream: request.body.stream ?? false,
-        duration_ms: durationMs,
-        upstream_duration_ms: upstreamDurationMs,
-        gateway_overhead_ms: gatewayOverheadMs,
-        attempts,
-        retry_disposition: retryDisposition,
-      });
-
-      reply
-        .code(terminal.status)
-        .header("x-gateway-error-class", terminal.error_class);
-
-      // Sanitized terminals never pass through: the upstream condition is the
-      // deployment operator's own (credentials, access, quota), so the
-      // upstream's body and headers (Retry-After included) are replaced by
-      // the deterministic terminal below.
-      if (
-        outcome.kind === "upstream_error" &&
-        !isSanitizedUpstreamTerminal(terminal.error_class)
-      ) {
-        if (outcome.retry_after !== undefined) {
-          reply.header("retry-after", outcome.retry_after);
+        // Sanitized terminals never pass through: the upstream condition is the
+        // deployment operator's own (credentials, access, quota), so the
+        // upstream's body and headers (Retry-After included) are replaced by
+        // the deterministic terminal below.
+        if (
+          outcome.kind === "upstream_error" &&
+          !isSanitizedUpstreamTerminal(terminal.error_class)
+        ) {
+          if (outcome.retry_after !== undefined) {
+            reply.header("retry-after", outcome.retry_after);
+          }
+          return outcome.body_raw;
         }
-        return outcome.body_raw;
-      }
 
-      return bodyForErrorOutcome(outcome, terminal.error_class);
+        return bodyForErrorOutcome(outcome, terminal.error_class);
+      }
     },
   );
 };
