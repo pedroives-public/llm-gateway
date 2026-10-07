@@ -16,6 +16,7 @@ import {
   streamingTripwire,
   withinDeadline,
 } from "../helpers/streaming-seams.js";
+import { isAcceptedStream } from "../../src/upstream/stream.js";
 import type { StreamingAdapter } from "../../src/upstream/stream.js";
 
 // With the streaming flag ON, a `stream: true` attempt is decided by the
@@ -93,6 +94,31 @@ async function holdOpenUpstream(
       await close();
     },
   };
+}
+
+type FakeUpstream = {
+  port: number;
+  close: () => Promise<void>;
+  // Present only on a fake that holds its body open: see HeldUpstream.
+  closed?: Promise<boolean>;
+};
+
+// A fake upstream that sends the given head and body and then ENDS the body:
+// what the gateway reads after the head is a clean end of stream.
+async function endingUpstream(
+  status: number,
+  headers: Record<string, string>,
+  body: string,
+): Promise<FakeUpstream> {
+  const server = http.createServer((req, res) => {
+    res.on("error", () => {});
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(status, headers);
+      res.end(body);
+    });
+  });
+  return listenEphemeral(server);
 }
 
 describe("streaming flag ON: the response head decides a stream: true attempt", () => {
@@ -1138,4 +1164,140 @@ describe("streaming flag ON: the first frame is checked before anything is writt
     },
   );
 
+  const SSE_HEAD = { "content-type": "text/event-stream" };
+  const UNDECODABLE_BODY = {
+    error: {
+      message: "invalid response from upstream",
+      type: "server_error",
+      code: "upstream_decode_error",
+    },
+  };
+  type ExpectedTerminal = {
+    status: number;
+    errorClass: string;
+    body: { error: { message: string; type: string; code: string } };
+    votes: ProbeOutcome[];
+    terminal: string;
+  };
+  const EOF_BEFORE_FIRST_FRAME: ExpectedTerminal = {
+    status: 502,
+    errorClass: "upstream-fault",
+    body: UNDECODABLE_BODY,
+    votes: ["FAILURE"],
+    terminal: "UPSTREAM_EOF_BEFORE_FIRST_FRAME",
+  };
+  const EOF_RULE =
+    "a body that ends before a first frame with data is never a clean completion: 502 upstream-fault with a FAILURE vote, and nothing written as a stream";
+
+  it.each<{
+    when: string;
+    makeUpstream: () => Promise<FakeUpstream>;
+    expected: ExpectedTerminal;
+    rule: string;
+  }>([
+    {
+      when: "the body ends with no bytes",
+      makeUpstream: () => endingUpstream(200, SSE_HEAD, ""),
+      expected: EOF_BEFORE_FIRST_FRAME,
+      rule: EOF_RULE,
+    },
+    {
+      when: "the body ends with a partial frame",
+      makeUpstream: () => endingUpstream(200, SSE_HEAD, "data: partial"),
+      expected: EOF_BEFORE_FIRST_FRAME,
+      rule: EOF_RULE,
+    },
+    {
+      when: "the body ends after only a comment frame",
+      makeUpstream: () => endingUpstream(200, SSE_HEAD, ": keep-alive\n\n"),
+      expected: EOF_BEFORE_FIRST_FRAME,
+      rule: EOF_RULE,
+    },
+  ])(
+    "ends as $expected.terminal when $when, before anything is written",
+    async ({ makeUpstream, expected, rule }) => {
+      const upstream = await makeUpstream();
+      const client = createOpenAIClient({
+        apiKey: "gateway-key",
+        baseURL: `http://127.0.0.1:${upstream.port}`,
+      });
+      const capture = makeLogCapture();
+      const violations: string[] = [];
+      const accepted: boolean[] = [];
+      const { breaker, recorded } = recordingBreaker();
+      const app = await buildProxyApp({
+        breaker,
+        logger: capture.logger,
+        streamingEnabled: true,
+        upstreamBuffered: bufferedTripwire(violations).seam,
+        upstreamStreaming: async (body, signal, log) => {
+          const result = await client.streaming(body, signal, log);
+          accepted.push(isAcceptedStream(result));
+          return result;
+        },
+      });
+
+      try {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: bearer() },
+          payload: { ...validBody, stream: true },
+        });
+
+        expect(violations).toStrictEqual([]);
+        expect(
+          accepted,
+          "the scene's premise: the upstream head arrived and was accepted as a stream, so what follows is decided by the first-frame read",
+        ).toStrictEqual([true]);
+        expect(
+          {
+            status: res.statusCode,
+            errorClass: res.headers["x-gateway-error-class"],
+            contentType: res.headers["content-type"],
+            body: res.json(),
+            votes: recorded,
+          },
+          rule,
+        ).toStrictEqual({
+          status: expected.status,
+          errorClass: expected.errorClass,
+          contentType: "application/json; charset=utf-8",
+          body: expected.body,
+          votes: expected.votes,
+        });
+
+        if (upstream.closed !== undefined) {
+          const finished = await withinDeadline(
+            upstream.closed,
+            UPSTREAM_CLOSE_DEADLINE_MS,
+            "the upstream body was not cancelled after the first-frame read ended the request: the fake saw no close before the deadline",
+          );
+          expect(
+            finished,
+            "the upstream connection closed only after the fake ended the body, not by a cancel",
+          ).toBe(false);
+        }
+
+        expect(
+          capture.logs.flatMap((log) => log.event ?? []),
+          "a pre-first-frame terminal emits req_complete, never stream_done: the request logs req_start and req_complete, and no other event",
+        ).toStrictEqual(["req_start", "req_complete"]);
+        expect(
+          capture.byEvent("req_complete")[0],
+          "req_complete names the terminal, so an operator can tell which pre-first-frame row ended the request",
+        ).toMatchObject({
+          status: expected.status,
+          error_class: expected.errorClass,
+          stream: true,
+          attempts: 1,
+          retry_disposition: "ineligible",
+          terminal: expected.terminal,
+        });
+      } finally {
+        await app.close();
+        await upstream.close();
+      }
+    },
+  );
 });
