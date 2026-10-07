@@ -285,11 +285,16 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
       const durationMs = Date.now() - requestStartedAt;
       const gatewayOverheadMs = Math.max(0, durationMs - upstreamDurationMs);
 
+      // The deadline ends the request when the re-read clock has reached it, or
+      // when its own timer has already aborted: that timer aborts only after
+      // reading the deadline value, so the reason on the signal records a
+      // reading that held, even if the clock has stepped back since. The
+      // reason is read, not the aborted flag, because the flag cannot tell the
+      // deadline's abort from any other cause that comes to share this signal.
       if (
         request.body.stream === true &&
         (Date.now() >= deadlineAt ||
-          (outcome.kind === "aborted" &&
-            outcome.abort_kind === "total_timeout"))
+          timeout.signal.reason?.kind === "total_timeout")
       ) {
         const status = 504;
         const errorClass: ErrorClass = "gateway-fault";
