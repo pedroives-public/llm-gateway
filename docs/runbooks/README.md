@@ -25,6 +25,10 @@ Scheduled operations (not alert-driven) have their own files:
 
 - [Rotating the Fly deploy token](fly-deploy-token-rotation.md) — monthly, two days before expiry.
 
+Request endings that raise no alert have their own files too:
+
+- [`TOTAL_TIMEOUT`: a streaming request outlived its deadline](streaming-total-timeout.md) — reachable only where the streaming flag is on.
+
 ---
 
 ## upstream_auth_failure
