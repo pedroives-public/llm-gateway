@@ -17,7 +17,10 @@ import {
   withinDeadline,
 } from "../helpers/streaming-seams.js";
 import { isAcceptedStream } from "../../src/upstream/stream.js";
-import type { StreamingAdapter } from "../../src/upstream/stream.js";
+import type {
+  AcceptedStream,
+  StreamingAdapter,
+} from "../../src/upstream/stream.js";
 import { PARSER_BUFFER_CAP } from "../../src/upstream/sse-frame-reader.js";
 
 // With the streaming flag ON, a `stream: true` attempt is decided by the
@@ -1369,3 +1372,377 @@ describe("streaming flag ON: the first frame is checked before anything is writt
     },
   );
 });
+
+describe("streaming flag ON: the total-duration deadline spans the first-frame wait", () => {
+  const TOTAL_TIMEOUT_BODY = {
+    error: {
+      message: "stream exceeded the total duration limit",
+      type: "gateway_timeout",
+      code: "total_timeout_exceeded",
+    },
+  };
+
+  // A fake accepted stream whose body never yields a byte. Its pending read
+  // rejects with the request signal's own reason when that signal aborts, the
+  // way an undici body does (measured 2026-10-01), so the route's catch sees
+  // the deadline's abort by identity.
+  function silentAcceptedStream(signal: AbortSignal): AcceptedStream {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        signal.addEventListener(
+          "abort",
+          () => {
+            controller.error(signal.reason);
+          },
+          { once: true },
+        );
+      },
+      pull() {
+        return new Promise<void>(() => {});
+      },
+    });
+    return { kind: "accepted_stream", status: 200, reader: body.getReader() };
+  }
+
+  it("ends an accepted head followed by silence as TOTAL_TIMEOUT when the deadline fires during the first-frame wait", async () => {
+    let calls = 0;
+    let receivedSignal: AbortSignal | undefined;
+
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+
+    const app = await buildProxyApp({
+      breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: (_body, signal) => {
+        calls += 1;
+        receivedSignal = signal;
+        return Promise.resolve(silentAcceptedStream(signal));
+      },
+    });
+
+    vi.useFakeTimers();
+
+    try {
+      const req = app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: bearer() },
+        payload: { ...validBody, stream: true },
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(violations).toStrictEqual([]);
+      expect(
+        calls,
+        "the scene's premise: the streaming upstream was called once and answered with an accepted head",
+      ).toBe(1);
+      expect(receivedSignal).toBeDefined();
+      expect(
+        receivedSignal?.aborted,
+        "the scene's premise: one second in, the deadline's timer has not fired",
+      ).toBe(false);
+      expect(
+        vi.getTimerCount(),
+        "the deadline's timer stays armed during the first-frame wait: an accepted head followed by silence is bounded by T, not by nothing",
+      ).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(279_000);
+
+      expect(
+        receivedSignal?.reason?.kind,
+        "the scene's premise: at T the deadline's timer aborted the request signal with its own reason",
+      ).toBe("total_timeout");
+
+      const res = await req;
+      expect(
+        res.statusCode,
+        "the deadline fired during the first-frame wait: the request ends as TOTAL_TIMEOUT, a 504, with nothing written as a stream",
+      ).toBe(504);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(
+        res.json(),
+        "the deadline fired during the first-frame wait: the client gets the deadline's own 504 body",
+      ).toStrictEqual(TOTAL_TIMEOUT_BODY);
+      expect(
+        recorded,
+        "a deadline that fires before the first frame is not evidence about the upstream: exactly one INCONCLUSIVE breaker result",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+
+      expect(
+        capture.logs.flatMap((log) => log.event ?? []),
+        "the abort already errored the body, so the route's cancel on every exit is seen as the cancel-rejected observation between req_start and req_complete, and no stream_done",
+      ).toStrictEqual(["req_start", "upstream_cancel_rejected", "req_complete"]);
+      expect(
+        capture.byEvent("upstream_cancel_rejected")[0],
+        "the route, not the adapter, cancels the body it received still open",
+      ).toMatchObject({ site: "proxy_route" });
+      expect(
+        capture.byEvent("req_complete")[0],
+        "req_complete names the terminal: TOTAL_TIMEOUT, decided from the deadline condition read after the first-frame read returned",
+      ).toMatchObject({
+        status: 504,
+        error_class: "gateway-fault",
+        stream: true,
+        attempts: 1,
+        retry_disposition: "ineligible",
+        terminal: "TOTAL_TIMEOUT",
+      });
+    } finally {
+      vi.useRealTimers();
+      await app.close();
+    }
+  });
+
+});
+
+describe("streaming flag ON: the first-frame line meets the total-duration deadline", () => {
+  const TOTAL_TIMEOUT_BODY = {
+    error: {
+      message: "stream exceeded the total duration limit",
+      type: "gateway_timeout",
+      code: "total_timeout_exceeded",
+    },
+  };
+  const JSON_FRAME = 'data: {"a":1}\n\n';
+  const NOT_JSON_FRAME = "data: not-json\n\n";
+
+  // A fake accepted stream the cell drives by hand. `release(text)` makes the
+  // pending read resolve with those bytes; an abort of the request signal
+  // errors the stream with the signal's reason, as an undici body does
+  // (measured 2026-10-01); and with `holdCancel` the body's cancel() stays
+  // pending until the cell calls `finishCancel()`, so a terminal's cleanup can
+  // be held open while the deadline fires.
+  function drivenAcceptedStream(
+    signal: AbortSignal,
+    holdCancel = false,
+  ): {
+    stream: AcceptedStream;
+    release: (text: string) => void;
+    finishCancel: () => void;
+    cancelCalled: () => boolean;
+  } {
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let finishCancel: (() => void) | undefined;
+    const cancelHeld = new Promise<void>((resolve) => {
+      finishCancel = resolve;
+    });
+    let cancelCalled = false;
+
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        controller = c;
+        signal.addEventListener(
+          "abort",
+          () => {
+            c.error(signal.reason);
+          },
+          { once: true },
+        );
+      },
+      pull() {
+        return new Promise<void>(() => {});
+      },
+      cancel() {
+        cancelCalled = true;
+        return holdCancel ? cancelHeld : Promise.resolve();
+      },
+    });
+
+    return {
+      stream: { kind: "accepted_stream", status: 200, reader: body.getReader() },
+      release: (text) => {
+        if (controller === undefined) {
+          throw new Error("the fake stream has not started");
+        }
+        controller.enqueue(new TextEncoder().encode(text));
+      },
+      finishCancel: () => {
+        if (finishCancel === undefined) {
+          throw new Error("the fake stream's cancel is not held");
+        }
+        finishCancel();
+      },
+      cancelCalled: () => cancelCalled,
+    };
+  }
+
+  async function buildDrivenApp(holdCancel = false) {
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+    let driven: ReturnType<typeof drivenAcceptedStream> | undefined;
+    let receivedSignal: AbortSignal | undefined;
+    let calls = 0;
+
+    const app = await buildProxyApp({
+      breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: (_body, signal) => {
+        calls += 1;
+        receivedSignal = signal;
+        driven = drivenAcceptedStream(signal, holdCancel);
+        return Promise.resolve(driven.stream);
+      },
+    });
+
+    return {
+      app,
+      capture,
+      violations,
+      recorded,
+      calls: () => calls,
+      signal: () => receivedSignal,
+      driven: () => {
+        if (driven === undefined) {
+          throw new Error("the streaming upstream was not called");
+        }
+        return driven;
+      },
+    };
+  }
+
+  function inject(app: Awaited<ReturnType<typeof buildProxyApp>>) {
+    return app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: { authorization: bearer() },
+      payload: { ...validBody, stream: true },
+    });
+  }
+
+  it.each([
+    {
+      frame: "a frame that is valid JSON",
+      bytes: JSON_FRAME,
+      rule: "the deadline condition is read immediately before the write, never the order in which the frame and the firing arrived: a frame available with the clock exactly at the deadline and the firing late ends as TOTAL_TIMEOUT, a 504, with zero SSE bytes",
+    },
+    {
+      frame: "a frame that is not JSON",
+      bytes: NOT_JSON_FRAME,
+      rule: "the deadline condition is read after the first-frame read returns and before any terminal is decided from it: a frame that is not JSON, available after the deadline with the firing late, ends as TOTAL_TIMEOUT, never FIRST_FRAME_NOT_JSON",
+    },
+  ])(
+    "ends as TOTAL_TIMEOUT when $frame becomes available with the clock at the deadline and the firing late",
+    async ({ bytes, rule }) => {
+      const t = await buildDrivenApp();
+      vi.useFakeTimers();
+      const startedAt = Date.now();
+
+      try {
+        const req = inject(t.app);
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(t.violations).toStrictEqual([]);
+        expect(
+          t.calls(),
+          "the scene's premise: the streaming upstream was called once and answered with an accepted head",
+        ).toBe(1);
+        expect(
+          t.signal()?.aborted,
+          "the scene's premise: the deadline's timer has not fired, so the request signal is not aborted",
+        ).toBe(false);
+
+        vi.setSystemTime(startedAt + 280_000);
+        t.driven().release(bytes);
+        await vi.advanceTimersByTimeAsync(0);
+
+        const res = await req;
+        expect(res.statusCode, rule).toBe(504);
+        expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+        expect(
+          res.headers["content-type"],
+          "nothing is written as a stream once the deadline condition holds: the 504 is a JSON body, not an SSE head",
+        ).toBe("application/json; charset=utf-8");
+        expect(res.json(), rule).toStrictEqual(TOTAL_TIMEOUT_BODY);
+        expect(
+          t.recorded,
+          "a frame that arrives past the deadline is not evidence about the upstream: exactly one INCONCLUSIVE breaker result",
+        ).toStrictEqual(["INCONCLUSIVE"]);
+        expect(
+          t.driven().cancelCalled(),
+          "the route cancels the body it received still open on every exit after the decision",
+        ).toBe(true);
+        expect(
+          t.capture.logs.flatMap((log) => log.event ?? []),
+          "a pre-first-frame terminal emits req_complete, never stream_done: the request logs req_start and req_complete, and no other event",
+        ).toStrictEqual(["req_start", "req_complete"]);
+        expect(t.capture.byEvent("req_complete")[0], rule).toMatchObject({
+          status: 504,
+          error_class: "gateway-fault",
+          stream: true,
+          attempts: 1,
+          retry_disposition: "ineligible",
+          terminal: "TOTAL_TIMEOUT",
+        });
+      } finally {
+        vi.useRealTimers();
+        await t.app.close();
+      }
+    },
+  );
+
+  it("ends as TOTAL_TIMEOUT when the deadline's timer has aborted, the clock has stepped back, and a frame read before the abort is available", async () => {
+    const t = await buildDrivenApp();
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+
+    try {
+      const req = inject(t.app);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(t.violations).toStrictEqual([]);
+      expect(
+        t.calls(),
+        "the scene's premise: the streaming upstream was called once and answered with an accepted head",
+      ).toBe(1);
+
+      // The frame resolves the pending read; in the same tick, before the
+      // route's continuation runs, the deadline's timer fires and aborts, and
+      // the clock steps back behind the deadline value.
+      t.driven().release(JSON_FRAME);
+      vi.advanceTimersByTime(279_000);
+      expect(
+        t.signal()?.reason?.kind,
+        "the scene's premise: the deadline's timer has fired and aborted the request signal with its own reason",
+      ).toBe("total_timeout");
+      vi.setSystemTime(startedAt + 279_990);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const res = await req;
+      expect(
+        res.statusCode,
+        "the deadline condition is the value reached OR the deadline's own timer having aborted: with the clock stepped back behind the value, the abort reason alone ends the request as TOTAL_TIMEOUT, a 504, and the frame is never written",
+      ).toBe(504);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(res.json()).toStrictEqual(TOTAL_TIMEOUT_BODY);
+      expect(
+        t.recorded,
+        "a frame read before the deadline's abort is not evidence about the upstream once the abort stands: exactly one INCONCLUSIVE breaker result",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+      expect(
+        t.capture.logs.flatMap((log) => log.event ?? []),
+        "the abort already errored the body, so the route's cancel on every exit is seen as the cancel-rejected observation between req_start and req_complete, and no stream_done",
+      ).toStrictEqual(["req_start", "upstream_cancel_rejected", "req_complete"]);
+      expect(t.capture.byEvent("req_complete")[0]).toMatchObject({
+        status: 504,
+        error_class: "gateway-fault",
+        stream: true,
+        attempts: 1,
+        retry_disposition: "ineligible",
+        terminal: "TOTAL_TIMEOUT",
+      });
+    } finally {
+      vi.useRealTimers();
+      await t.app.close();
+    }
+  });
+
+});
+
