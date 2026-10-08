@@ -308,11 +308,13 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
       }
 
       const armedAt = Date.now();
+      let terminalDecided = false;
+
       const timeout =
         request.body.stream === true
           ? armTotalDurationTimeout(
               armedAt + STREAM_TOTAL_DURATION_MS,
-              () => false,
+              () => terminalDecided,
             )
           : armWallClockTimeout(WALL_CLOCK_MS);
       const deadlineAt =
@@ -362,6 +364,7 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
             firstByteFlushed: () => false,
           });
         } catch (error) {
+          terminalDecided = true;
           opts.breaker.recordResult("INCONCLUSIVE");
           throw error;
         }
@@ -376,6 +379,8 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         // reason is read, not the aborted flag, because the flag cannot tell the
         // deadline's abort from any other cause that comes to share this signal.
         if (isTotalTimeout(request.body.stream, deadlineAt, timeout.signal)) {
+          terminalDecided = true;
+
           return finishTotalTimeout({
             acceptedStream: isAcceptedStream(outcome) ? outcome : undefined,
             outcome,
@@ -409,6 +414,8 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
             if (
               isTotalTimeout(request.body.stream, deadlineAt, timeout.signal)
             ) {
+              terminalDecided = true;
+
               return finishTotalTimeout({
                 acceptedStream,
                 outcome: acceptedStream,
@@ -430,6 +437,8 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           }
 
           if (isTotalTimeout(request.body.stream, deadlineAt, timeout.signal)) {
+            terminalDecided = true;
+
             return finishTotalTimeout({
               acceptedStream,
               outcome: acceptedStream,
@@ -470,6 +479,8 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               }
             }
             if (terminal !== undefined) {
+              terminalDecided = true;
+
               const status = 502;
               const errorClass: ErrorClass = "upstream-fault";
 
@@ -509,6 +520,8 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               reply.code(status).header("x-gateway-error-class", errorClass);
               return UPSTREAM_DECODE_ERROR_BODY;
             }
+
+            terminalDecided = true;
 
             const status = 500;
             const errorClass: ErrorClass = "gateway-fault";
@@ -558,6 +571,8 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         }
 
         if (!isAcceptedStream(outcome)) {
+          terminalDecided = true;
+
           if (outcome.kind === "ok") {
             opts.breaker.recordResult("SUCCESS");
             emitReqComplete(request.log, {
