@@ -1744,5 +1744,64 @@ describe("streaming flag ON: the first-frame line meets the total-duration deadl
     }
   });
 
-});
+  it("lets a settled FIRST_FRAME_NOT_JSON stand when the deadline is reached while its cleanup is still awaited: the firing does nothing", async () => {
+    const t = await buildDrivenApp(true);
+    vi.useFakeTimers();
 
+    try {
+      const req = inject(t.app);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(t.violations).toStrictEqual([]);
+      expect(
+        t.calls(),
+        "the scene's premise: the streaming upstream was called once and answered with an accepted head",
+      ).toBe(1);
+
+      t.driven().release(NOT_JSON_FRAME);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        t.driven().cancelCalled(),
+        "the scene's premise: the terminal is settled and its cleanup, the body's cancel, is pending",
+      ).toBe(true);
+      expect(
+        t.recorded,
+        "the scene's premise: the settled terminal recorded its single breaker result before the cleanup",
+      ).toStrictEqual(["FAILURE"]);
+
+      await vi.advanceTimersByTimeAsync(280_000);
+      expect(
+        t.signal()?.aborted,
+        "a firing that finds a terminal already settled does nothing: the request signal is not aborted",
+      ).toBe(false);
+
+      t.driven().finishCancel();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const res = await req;
+      expect(
+        res.statusCode,
+        "the settled terminal stands: the client gets the FIRST_FRAME_NOT_JSON 502, not a 504",
+      ).toBe(502);
+      expect(res.headers["x-gateway-error-class"]).toBe("upstream-fault");
+      expect(
+        t.recorded,
+        "the settled terminal's single breaker result stands: no second result from the firing",
+      ).toStrictEqual(["FAILURE"]);
+      expect(
+        t.capture.logs.flatMap((log) => log.event ?? []),
+        "one terminal, one req_complete, and no stream_done",
+      ).toStrictEqual(["req_start", "req_complete"]);
+      expect(t.capture.byEvent("req_complete")[0]).toMatchObject({
+        status: 502,
+        error_class: "upstream-fault",
+        stream: true,
+        attempts: 1,
+        terminal: "FIRST_FRAME_NOT_JSON",
+      });
+    } finally {
+      vi.useRealTimers();
+      await t.app.close();
+    }
+  });
+});
