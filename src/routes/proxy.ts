@@ -1,10 +1,4 @@
-import type {
-  FastifyError,
-  FastifyPluginAsync,
-  FastifyReply,
-  FastifyRequest,
-  FastifySchemaValidationError,
-} from "fastify";
+import type { FastifyError, FastifyPluginAsync } from "fastify";
 import type { CircuitBreaker } from "../reliability/circuit-breaker.js";
 import type { ErrorOutcome, Outcome } from "../upstream/outcome.js";
 import { resolveRejection, type Logger } from "../upstream/rejection.js";
@@ -13,9 +7,6 @@ import {
   emitReqComplete,
   wasColdStart,
   type ErrorClass,
-  type RetryDisposition,
-  emitReqRejected,
-  type ReqRejectedReason,
   emitOperationalAlert,
   alertFor,
   type MinLogger,
@@ -27,12 +18,7 @@ import {
   armWallClockTimeout,
   armTotalDurationTimeout,
 } from "../reliability/timeouts.js";
-import { classify, type Classification } from "../upstream/classify.js";
-import { assertNever } from "../upstream/assert-never.js";
-import {
-  isRetryEligible,
-  retryAfterMs,
-} from "../upstream/retry-eligibility.js";
+import { classify } from "../upstream/classify.js";
 import {
   isAcceptedStream,
   type AttemptResult,
@@ -45,24 +31,22 @@ import {
   type SseFrame,
 } from "../upstream/sse-frame-reader.js";
 import { STREAM_TOTAL_DURATION_MS } from "../config.js";
+import {
+  finishFirstFrameFault,
+  finishTotalTimeout,
+  isTotalTimeout,
+} from "./proxy-first-frame.js";
+import {
+  bodyForErrorOutcome,
+  decideErrorTerminal,
+  deriveRetryDisposition,
+  isSanitizedUpstreamTerminal,
+} from "./proxy-error-outcome.js";
+import { sendProxyError } from "./proxy-error-handler.js";
 
 const WALL_CLOCK_MS = 30_000;
 const BODY_LIMIT_BYTES = 262_144;
 const MAX_OUTPUT_TOKENS_CAP = 16_384;
-const TOTAL_TIMEOUT_BODY = {
-  error: {
-    message: "stream exceeded the total duration limit",
-    type: "gateway_timeout",
-    code: "total_timeout_exceeded",
-  },
-};
-const UPSTREAM_DECODE_ERROR_BODY = {
-  error: {
-    message: "invalid response from upstream",
-    type: "server_error",
-    code: "upstream_decode_error",
-  },
-};
 
 export interface ChatCompletionsBody {
   model: string;
@@ -156,77 +140,6 @@ function resolveStreamingUpstream(
   };
 }
 
-function isTotalTimeout(
-  stream: boolean | undefined,
-  deadlineAt: number,
-  signal: AbortSignal,
-): boolean {
-  return (
-    stream === true &&
-    (Date.now() >= deadlineAt || signal.reason?.kind === "total_timeout")
-  );
-}
-
-type TotalTimeoutContext = {
-  acceptedStream?: AcceptedStream;
-  outcome: AttemptResult;
-  attempts: number;
-  requestStartedAt: number;
-  upstreamDurationMs: number;
-  request: {
-    log: MinLogger;
-    reqId: string;
-  };
-  reply: FastifyReply;
-  signal: AbortSignal;
-  upstreamLog: Logger & MinLogger;
-  breaker: CircuitBreaker;
-};
-
-async function finishTotalTimeout(
-  context: TotalTimeoutContext,
-): Promise<typeof TOTAL_TIMEOUT_BODY> {
-  const status = 504;
-  const errorClass: ErrorClass = "gateway-fault";
-
-  try {
-    context.breaker.recordResult("INCONCLUSIVE");
-  } finally {
-    if (context.acceptedStream !== undefined) {
-      await cancelStream(
-        context.acceptedStream.reader,
-        context.upstreamLog,
-        "proxy_route",
-      );
-    }
-  }
-
-  const terminalDurationMs = Date.now() - context.requestStartedAt;
-  const terminalGatewayOverheadMs = Math.max(
-    0,
-    terminalDurationMs - context.upstreamDurationMs,
-  );
-
-  emitReqComplete(context.request.log, {
-    req_id: context.request.reqId,
-    status,
-    error_class: errorClass,
-    stream: true,
-    attempts: context.attempts,
-    duration_ms: terminalDurationMs,
-    upstream_duration_ms: context.upstreamDurationMs,
-    gateway_overhead_ms: terminalGatewayOverheadMs,
-    retry_disposition: deriveRetryDisposition(
-      context.attempts,
-      context.outcome,
-      context.signal,
-    ),
-    terminal: "TOTAL_TIMEOUT",
-  });
-
-  context.reply.code(status).header("x-gateway-error-class", errorClass);
-  return TOTAL_TIMEOUT_BODY;
-}
 
 export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
   fastify,
@@ -522,44 +435,24 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
             if (terminal !== undefined) {
               terminalDecided = true;
 
-              const status = 502;
-              const errorClass: ErrorClass = "upstream-fault";
-
-              try {
-                opts.breaker.recordResult("FAILURE");
-              } finally {
-                await cancelStream(
-                  acceptedStream.reader,
-                  upstreamLog,
-                  "proxy_route",
-                );
-              }
-
-              const terminalDurationMs = Date.now() - requestStartedAt;
-              const terminalGatewayOverheadMs = Math.max(
-                0,
-                terminalDurationMs - upstreamDurationMs,
-              );
-
-              emitReqComplete(request.log, {
-                req_id: request.reqId,
-                status,
-                error_class: errorClass,
-                stream: true,
-                attempts,
-                duration_ms: terminalDurationMs,
-                upstream_duration_ms: upstreamDurationMs,
-                gateway_overhead_ms: terminalGatewayOverheadMs,
-                retry_disposition: deriveRetryDisposition(
-                  attempts,
+              return finishFirstFrameFault(
+                {
+                  acceptedStream,
                   outcome,
-                  timeout.signal,
-                ),
+                  attempts,
+                  requestStartedAt,
+                  upstreamDurationMs,
+                  request: {
+                    log: request.log,
+                    reqId: request.reqId,
+                  },
+                  reply,
+                  signal: timeout.signal,
+                  upstreamLog,
+                  breaker: opts.breaker,
+                },
                 terminal,
-              });
-
-              reply.code(status).header("x-gateway-error-class", errorClass);
-              return UPSTREAM_DECODE_ERROR_BODY;
+              );
             }
 
             if (firstFrame.kind === "frame" && firstFrame.data === "[DONE]") {
@@ -744,397 +637,3 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
     },
   );
 };
-
-// Reconstructs WHY a request did or did not retry from what the retry
-// primitive leaves behind (attempts, outcome, signal). Callers pass a real
-// upstream outcome (attempts >= 1); the breaker-OPEN fast-fail sets
-// `ineligible` directly. Exported so a unit test can pin the no-Retry-After
-// budget-skip, a path unreachable end-to-end.
-export function deriveRetryDisposition(
-  attempts: number,
-  outcome: AttemptResult,
-  signal: AbortSignal,
-): RetryDisposition {
-  if (attempts === 2) {
-    return "attempted";
-  }
-
-  if (isAcceptedStream(outcome) || outcome.kind === "ok") {
-    return "ineligible";
-  }
-
-  if (
-    isRetryEligible(outcome) &&
-    !signal.aborted &&
-    retryAfterMs(outcome) !== null
-  ) {
-    return "skipped_budget";
-  }
-  return "ineligible";
-}
-
-// What an error outcome resolves to — the one place the per-outcome
-// classification and the per-episode disposition compose.
-type ErrorTerminal = {
-  error_class: ErrorClass;
-  breaker_delta: 0 | 1;
-  status: number;
-};
-
-// Suppress an upstream budget-skip: the upstream asked us to back off, so it
-// is not a breaker-worthy fault. Only a 429/503 can reach this branch —
-// skipped_budget requires a usable Retry-After, and retryAfterMs grants that
-// authority to those statuses alone (non-upstream outcomes never qualify);
-// the kind guard narrows the type and keeps impossible kinds falling through.
-function decideErrorTerminal(
-  classification: Classification,
-  disposition: RetryDisposition,
-  outcome: ErrorOutcome,
-): ErrorTerminal {
-  if (disposition === "skipped_budget" && outcome.kind === "upstream_error") {
-    return {
-      ...classification,
-      breaker_delta: 0,
-      status: outcome.status,
-    };
-  }
-
-  return {
-    error_class: classification.error_class,
-    breaker_delta: classification.breaker_delta,
-    status: statusForErrorOutcome(outcome, classification.error_class),
-  };
-}
-
-// For an upstream_error terminal: does this class answer with the
-// deterministic sanitized 502 (true) or pass the upstream's own status and
-// body through verbatim (false)? Total over ErrorClass: adding a class
-// without deciding here is a compile error.
-function isSanitizedUpstreamTerminal(errorClass: ErrorClass): boolean {
-  switch (errorClass) {
-    // Operator-culpable rejections: upstream body/headers never reach the consumer.
-    case "upstream-auth-failure":
-    case "upstream-access-denied":
-    case "upstream-quota-exhausted":
-      return true;
-    // Consumer-relevant upstream responses pass through verbatim.
-    case "client-fault":
-    case "upstream-retry-exhausted":
-      return false;
-    // Never produced from an upstream_error outcome today; if that ever
-    // changes, sanitize by default — no unvetted body reaches the consumer.
-    case "gateway-fault":
-    case "upstream-fault":
-    case "upstream-redirect-blocked":
-      return true;
-
-    default:
-      assertNever(errorClass);
-  }
-}
-
-function statusForErrorOutcome(
-  outcome: ErrorOutcome,
-  errorClass: ErrorClass,
-): number {
-  switch (outcome.kind) {
-    case "upstream_error":
-      // Sanitized terminals are proxy-boundary failures: the upstream was
-      // reached but refused the deployment's own account context — 502,
-      // never the upstream's original status.
-      if (isSanitizedUpstreamTerminal(errorClass)) {
-        return 502;
-      }
-      return outcome.status >= 500 ? 502 : outcome.status;
-    case "undecodable":
-      return 502;
-    // Proxy-boundary failure on the operator's side (stale endpoint config or
-    // an upstream that started redirecting): 502, never a passthrough.
-    case "redirect_blocked":
-      return 502;
-    case "network_failed":
-      return errorClass === "gateway-fault" ? 504 : 502;
-    case "aborted":
-      switch (outcome.abort_kind) {
-        case "wall_clock_expired":
-        case "total_timeout":
-          return 504;
-        case "response_size_cap":
-          return 502;
-        default:
-          return assertNever(outcome.abort_kind);
-      }
-  }
-}
-
-function bodyForErrorOutcome(
-  outcome: ErrorOutcome,
-  errorClass: ErrorClass,
-): unknown {
-  switch (outcome.kind) {
-    case "upstream_error":
-      // Only sanitized terminal classes reach here; verbatim passthrough
-      // returns earlier in the handler.
-      if (errorClass === "upstream-auth-failure") {
-        return {
-          error: {
-            message: "upstream authentication failed",
-            type: "server_error",
-            code: "upstream_auth_failure",
-          },
-        };
-      }
-      if (errorClass === "upstream-access-denied") {
-        return {
-          error: {
-            message: "upstream access denied",
-            type: "server_error",
-            code: "upstream_access_denied",
-          },
-        };
-      }
-      if (errorClass === "upstream-quota-exhausted") {
-        return {
-          error: {
-            message: "upstream quota exhausted",
-            type: "server_error",
-            code: "upstream_quota_exhausted",
-          },
-        };
-      }
-      return outcome.body_raw;
-
-    case "undecodable":
-      return UPSTREAM_DECODE_ERROR_BODY;
-
-    case "redirect_blocked":
-      return {
-        error: {
-          message: "upstream redirect blocked",
-          type: "server_error",
-          code: "upstream_redirect_blocked",
-        },
-      };
-
-    case "network_failed":
-      if (errorClass === "gateway-fault") {
-        return {
-          error: {
-            message: "gateway error",
-            type: "gateway_error",
-            code: "upstream_connection_failed",
-          },
-        };
-      }
-
-      return {
-        error: {
-          message: "upstream unavailable",
-          type: "server_error",
-          code: "upstream_unavailable",
-        },
-      };
-
-    case "aborted":
-      switch (outcome.abort_kind) {
-        case "response_size_cap":
-          return {
-            error: {
-              message: "upstream response too large",
-              type: "server_error",
-              code: "response_too_large",
-            },
-          };
-        case "wall_clock_expired":
-          return {
-            error: {
-              message: "gateway timeout",
-              type: "gateway_timeout",
-              code: "wall_clock_exceeded",
-            },
-          };
-        // The handler ends the streaming deadline's own abort as TOTAL_TIMEOUT
-        // before it reaches these switches, so this arm and the one in
-        // statusForErrorOutcome are unreachable today. They keep the switches
-        // exhaustive and give the same answer.
-        case "total_timeout":
-          return TOTAL_TIMEOUT_BODY;
-        default:
-          return assertNever(outcome.abort_kind);
-      }
-
-    default:
-      return assertNever(outcome);
-  }
-}
-
-// Branch selection: a schema rejection requires BOTH the FST_ERR_VALIDATION
-// code AND a populated `validation` array — a lone signal falls to the
-// unhandled 500 branch. Parse failures match stable FST_ERR_CTP_* codes;
-// explicit 413 is body-too-large; anything else is a gateway fault.
-function sendProxyError(
-  error: FastifyError,
-  request: FastifyRequest,
-  reply: FastifyReply,
-): void {
-  if (
-    error.validation &&
-    error.validation.length > 0 &&
-    error.code === "FST_ERR_VALIDATION"
-  ) {
-    const { code, reason } = deriveValidationRejection(error.validation);
-
-    if (request.tenantId === null) {
-      request.log.error(
-        { req_id: request.reqId, err_name: error.name },
-        "schema rejection with null tenant: auth misconfiguration",
-      );
-    } else {
-      emitReqRejected(request.log, {
-        req_id: request.reqId,
-        tenant_id: request.tenantId,
-        route: request.routeOptions.url,
-        reason,
-        status: 400,
-      });
-    }
-    reply
-      .code(400)
-      .header("x-gateway-error-class", "client-fault")
-      .send({
-        error: {
-          message: error.message,
-          type: "invalid_request_error",
-          code,
-        },
-      });
-
-    return;
-  }
-
-  if (error.code === "FST_ERR_CTP_INVALID_JSON_BODY") {
-    reply
-      .code(400)
-      .header("x-gateway-error-class", "client-fault")
-      .send({
-        error: {
-          message: "request body is not valid JSON",
-          type: "invalid_request_error",
-          code: "malformed_json",
-        },
-      });
-    return;
-  }
-
-  if (error.code === "FST_ERR_CTP_EMPTY_JSON_BODY") {
-    reply
-      .code(400)
-      .header("x-gateway-error-class", "client-fault")
-      .send({
-        error: {
-          message: "request body is empty",
-          type: "invalid_request_error",
-          code: "empty_body",
-        },
-      });
-    return;
-  }
-
-  if (error.code === "FST_ERR_CTP_INVALID_MEDIA_TYPE") {
-    reply
-      .code(415)
-      .header("x-gateway-error-class", "client-fault")
-      .send({
-        error: {
-          message: "request content type unsupported",
-          type: "invalid_request_error",
-          code: "unsupported_content_type",
-        },
-      });
-    return;
-  }
-
-  if (error.statusCode === 413) {
-    reply
-      .code(413)
-      .header("x-gateway-error-class", "client-fault")
-      .send({
-        error: {
-          message: "request body too large",
-          type: "invalid_request_error",
-          code: "request_too_large",
-        },
-      });
-    return;
-  }
-
-  // Log only allowlisted fields — the raw error (stack/cause) must stay out of
-  // both the client body and the log payload.
-  request.log.error(
-    { req_id: request.reqId, err_name: error.name },
-    "unhandled exception in proxy handler",
-  );
-  reply
-    .code(500)
-    .header("x-gateway-error-class", "gateway-fault")
-    .send({
-      error: {
-        message: "internal server error",
-        type: "internal_error",
-        code: "unhandled_exception",
-      },
-    });
-}
-
-function deriveValidationRejection(
-  validation: FastifySchemaValidationError[],
-): {
-  code: string;
-  reason: ReqRejectedReason;
-} {
-  // Both checks on purpose in each const branch: keyword alone would claim
-  // any other `const` field; path alone would mislabel a type violation on
-  // the same field (e.g. stream: "x").
-  if (
-    validation[0]?.keyword === "const" &&
-    validation[0].instancePath === "/n"
-  ) {
-    return {
-      code: "n_not_supported",
-      reason: "cost_cap_exceeded",
-    };
-  }
-
-  // Fires only with the streaming flag OFF: the flag-ON schema has no `const`
-  // on `stream`. Remove it together with the flag-OFF form.
-  if (
-    validation[0]?.keyword === "const" &&
-    validation[0].instancePath === "/stream"
-  ) {
-    return {
-      code: "stream_not_supported",
-      reason: "schema_validation",
-    };
-  }
-
-  switch (validation[0]?.keyword) {
-    case "required":
-      return {
-        code: `${String(validation[0].params.missingProperty)}_missing`,
-        reason: "schema_validation",
-      };
-    case "minLength":
-    case "minItems":
-      return {
-        code: `${validation[0].instancePath.slice(1)}_empty`,
-        reason: "schema_validation",
-      };
-    case "maximum":
-      return {
-        code: `${validation[0].instancePath.slice(1)}_too_large`,
-        reason: "cost_cap_exceeded",
-      };
-    default:
-      return { code: "invalid_request", reason: "schema_validation" };
-  }
-}
