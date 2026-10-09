@@ -1381,6 +1381,13 @@ describe("streaming flag ON: the total-duration deadline spans the first-frame w
       code: "total_timeout_exceeded",
     },
   };
+  const UNHANDLED_EXCEPTION_BODY = {
+    error: {
+      message: "internal server error",
+      type: "internal_error",
+      code: "unhandled_exception",
+    },
+  };
 
   // A fake accepted stream whose body never yields a byte. Its pending read
   // rejects with the request signal's own reason when that signal aborts, the
@@ -1399,6 +1406,18 @@ describe("streaming flag ON: the total-duration deadline spans the first-frame w
       },
       pull() {
         return new Promise<void>(() => {});
+      },
+    });
+    return { kind: "accepted_stream", status: 200, reader: body.getReader() };
+  }
+
+  // A fake accepted stream whose first read rejects with an error the
+  // recognizer does not know: not the signal's reason, no cause code, no
+  // cause message.
+  function unrecognizedRejectingStream(): AcceptedStream {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error("a rejection the recognizer does not know"));
       },
     });
     return { kind: "accepted_stream", status: 200, reader: body.getReader() };
@@ -1498,6 +1517,64 @@ describe("streaming flag ON: the total-duration deadline spans the first-frame w
     }
   });
 
+  it("ends a first-frame read that rejects with an error the recognizer does not know as UNRECOGNIZED_REJECTION: one INCONCLUSIVE vote, the body cancelled, the error handler's 500", async () => {
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+
+    const app = await buildProxyApp({
+      breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: () => Promise.resolve(unrecognizedRejectingStream()),
+    });
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: bearer() },
+        payload: { ...validBody, stream: true },
+      });
+
+      expect(violations).toStrictEqual([]);
+      expect(
+        res.statusCode,
+        "an unrecognized rejection of the first-frame read is rethrown to the scoped error handler: the client gets its 500",
+      ).toBe(500);
+      expect(res.headers["x-gateway-error-class"]).toBe("gateway-fault");
+      expect(
+        res.json(),
+        "an unrecognized rejection of the first-frame read gets the error handler's generic body, with nothing of the error in it",
+      ).toStrictEqual(UNHANDLED_EXCEPTION_BODY);
+      expect(
+        recorded,
+        "an unrecognized rejection proves nothing about the upstream: exactly one INCONCLUSIVE breaker result, recorded before the rethrow",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+
+      expect(
+        capture.logs.flatMap((log) => log.event ?? []),
+        "the rejection already errored the body, so the route's cancel on every exit is seen as the cancel-rejected observation; req_complete is emitted once, before the rethrow, and no stream_done",
+      ).toStrictEqual(["req_start", "upstream_cancel_rejected", "req_complete"]);
+      expect(
+        capture.byEvent("upstream_cancel_rejected")[0],
+        "the route, not the adapter, cancels the body it received still open",
+      ).toMatchObject({ site: "proxy_route" });
+      expect(
+        capture.byEvent("req_complete")[0],
+        "req_complete names the terminal, so an operator can tell an unrecognized rejection from any other 500",
+      ).toMatchObject({
+        status: 500,
+        error_class: "gateway-fault",
+        stream: true,
+        attempts: 1,
+        terminal: "UNRECOGNIZED_REJECTION",
+      });
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 describe("streaming flag ON: the first-frame line meets the total-duration deadline", () => {
