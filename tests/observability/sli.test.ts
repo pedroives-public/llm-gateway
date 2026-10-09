@@ -57,6 +57,7 @@ function streamDone(
     gateway_overhead_ms: overheadMs,
     attempts: 1,
     error_class: errorClass,
+    terminal: completed ? "DONE" : "UPSTREAM_DEATH",
   };
 }
 
