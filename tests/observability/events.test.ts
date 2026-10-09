@@ -123,6 +123,7 @@ describe("event emitters — field shape", () => {
       gateway_overhead_ms: 100,
       attempts: 1,
       error_class: null,
+      terminal: "DONE",
     };
     emitStreamDone(mockLog, payload);
     expect(logCalls[0]).toEqual({ event: "stream_done", ...payload });
@@ -140,6 +141,7 @@ describe("event emitters — field shape", () => {
       gateway_overhead_ms: 2,
       attempts: 1,
       error_class: null,
+      terminal: "DONE",
     });
     expect(wasColdStart()).toBe(false);
   });
@@ -305,8 +307,16 @@ describe("emitEpisodeAlert", () => {
       errorCalls,
       "a repeated episode alert was swallowed: per-episode names must not pass through the once-per-process set",
     ).toEqual([
-      { event: "operational_alert", alert: "auth_db_unavailable", req_id: "r-1" },
-      { event: "operational_alert", alert: "auth_db_unavailable", req_id: "r-2" },
+      {
+        event: "operational_alert",
+        alert: "auth_db_unavailable",
+        req_id: "r-1",
+      },
+      {
+        event: "operational_alert",
+        alert: "auth_db_unavailable",
+        req_id: "r-2",
+      },
     ]);
   });
 

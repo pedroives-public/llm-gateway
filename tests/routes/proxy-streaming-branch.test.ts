@@ -1882,3 +1882,81 @@ describe("streaming flag ON: the first-frame line meets the total-duration deadl
     }
   });
 });
+
+describe("streaming flag ON: a first data frame that is the terminating frame is a valid, empty stream", () => {
+  it("commits the head and the terminating frame together, ends as DONE with one SUCCESS vote and no first-token line, and cancels the upstream body", async () => {
+    const upstream = await holdOpenUpstream(
+      200,
+      { "content-type": "text/event-stream" },
+      "data: [DONE]\n\n",
+    );
+    const client = createOpenAIClient({
+      apiKey: "gateway-key",
+      baseURL: `http://127.0.0.1:${upstream.port}`,
+    });
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+    const app = await buildProxyApp({
+      breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: client.streaming,
+    });
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: bearer() },
+        payload: { ...validBody, stream: true },
+      });
+
+      expect(violations).toStrictEqual([]);
+      expect(
+        res.statusCode,
+        "the terminating frame as the first data frame is a valid, empty stream: the gateway commits with a 200, never a decode error",
+      ).toBe(200);
+      expect(
+        res.headers["content-type"],
+        "the commit writes the SSE head: content-type text/event-stream",
+      ).toBe("text/event-stream");
+      expect(
+        res.body,
+        "the body is exactly the terminating frame's bytes, forwarded verbatim, with nothing before or after it",
+      ).toBe("data: [DONE]\n\n");
+      expect(
+        recorded,
+        "a stream that ends with the upstream's own terminating frame is a clean completion: exactly one SUCCESS breaker result",
+      ).toStrictEqual(["SUCCESS"]);
+
+      const finished = await withinDeadline(
+        upstream.closed,
+        UPSTREAM_CLOSE_DEADLINE_MS,
+        "the post-loop did not cancel the upstream body after DONE: the fake saw no close before the deadline",
+      );
+      expect(
+        finished,
+        "the upstream connection closed only after the fake ended the body, not by a cancel",
+      ).toBe(false);
+
+      expect(
+        capture.logs.flatMap((log) => log.event ?? []),
+        "after the commit the terminal event is stream_done, never req_complete; and a stream whose only data frame is the terminating frame never fires stream_first_token, because that measure promises time to content",
+      ).toStrictEqual(["req_start", "stream_done"]);
+      expect(
+        capture.byEvent("stream_done")[0],
+        "stream_done carries the clean completion: completed true, terminal DONE, no error class",
+      ).toMatchObject({
+        completed: true,
+        terminal: "DONE",
+        error_class: null,
+        attempts: 1,
+      });
+    } finally {
+      await app.close();
+      await upstream.close();
+    }
+  });
+});
