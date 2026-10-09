@@ -56,6 +56,14 @@ export type ReqCompleteTerminal =
   | "NETWORK_FAILED_POST_SEND"
   | "UNRECOGNIZED_REJECTION";
 
+export type StreamDoneTerminal =
+  | "DONE"
+  | "TOTAL_TIMEOUT"
+  | "UPSTREAM_DEATH"
+  | "EOF_WITHOUT_DONE"
+  | "PARSER_BUFFER_CAP"
+  | "CLIENT_GONE";
+
 type OperationalAlertLine = {
   event: "operational_alert";
   alert: AlertName | EpisodeAlertName;
@@ -112,6 +120,7 @@ export interface StreamDonePayload {
   total_tokens?: number;
   attempts: number;
   error_class: ErrorClass | null;
+  terminal: StreamDoneTerminal;
 }
 
 export interface OperationalAlertPayload {

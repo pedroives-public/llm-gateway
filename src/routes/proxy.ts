@@ -20,6 +20,7 @@ import {
   alertFor,
   type MinLogger,
   type ReqCompleteTerminal,
+  emitStreamDone,
 } from "../observability/events.js";
 import { retry } from "../reliability/retry.js";
 import {
@@ -517,6 +518,7 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
                 terminal = "FIRST_FRAME_NOT_JSON";
               }
             }
+
             if (terminal !== undefined) {
               terminalDecided = true;
 
@@ -558,6 +560,47 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
 
               reply.code(status).header("x-gateway-error-class", errorClass);
               return UPSTREAM_DECODE_ERROR_BODY;
+            }
+
+            if (firstFrame.kind === "frame" && firstFrame.data === "[DONE]") {
+              terminalDecided = true;
+              reply.hijack();
+              reply.raw.writeHead(200, {
+                "content-type": "text/event-stream",
+                "cache-control": "no-cache",
+                connection: "keep-alive",
+              });
+              reply.raw.write(firstFrame.bytes);
+              reply.raw.end();
+
+              try {
+                opts.breaker.recordResult("SUCCESS");
+              } finally {
+                await cancelStream(
+                  acceptedStream.reader,
+                  upstreamLog,
+                  "proxy_route",
+                );
+              }
+
+              const terminalDurationMs = Date.now() - requestStartedAt;
+              const terminalGatewayOverheadMs = Math.max(
+                0,
+                terminalDurationMs - upstreamDurationMs,
+              );
+
+              emitStreamDone(request.log, {
+                req_id: request.reqId,
+                completed: true,
+                terminal: "DONE",
+                total_duration_ms: terminalDurationMs,
+                upstream_duration_ms: upstreamDurationMs,
+                gateway_overhead_ms: terminalGatewayOverheadMs,
+                attempts,
+                error_class: null,
+              });
+
+              return;
             }
 
             terminalDecided = true;
