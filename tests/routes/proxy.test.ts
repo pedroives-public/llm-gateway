@@ -5,9 +5,9 @@ import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app.js";
 import {
   proxyRoute,
-  deriveRetryDisposition,
   type ChatCompletionsBody,
 } from "../../src/routes/proxy.js";
+import { deriveRetryDisposition } from "../../src/routes/proxy-error-outcome.js";
 import {
   createCircuitBreaker,
   type CircuitBreaker,
