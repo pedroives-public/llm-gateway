@@ -433,7 +433,46 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               });
             }
 
-            readError = resolveRejection(error, timeout.signal, upstreamLog);
+            try {
+              readError = resolveRejection(error, timeout.signal, upstreamLog);
+            } catch (unrecognized) {
+              terminalDecided = true;
+
+              try {
+                opts.breaker.recordResult("INCONCLUSIVE");
+              } finally {
+                await cancelStream(
+                  acceptedStream.reader,
+                  upstreamLog,
+                  "proxy_route",
+                );
+              }
+
+              const terminalDurationMs = Date.now() - requestStartedAt;
+              const terminalGatewayOverheadMs = Math.max(
+                0,
+                terminalDurationMs - upstreamDurationMs,
+              );
+
+              emitReqComplete(request.log, {
+                req_id: request.reqId,
+                status: 500,
+                error_class: "gateway-fault",
+                stream: true,
+                attempts,
+                duration_ms: terminalDurationMs,
+                upstream_duration_ms: upstreamDurationMs,
+                gateway_overhead_ms: terminalGatewayOverheadMs,
+                retry_disposition: deriveRetryDisposition(
+                  attempts,
+                  acceptedStream,
+                  timeout.signal,
+                ),
+                terminal: "UNRECOGNIZED_REJECTION",
+              });
+
+              throw unrecognized;
+            }
           }
 
           if (isTotalTimeout(request.body.stream, deadlineAt, timeout.signal)) {
