@@ -53,7 +53,8 @@ export type ReqCompleteTerminal =
   | "FIRST_FRAME_NOT_JSON"
   | "UPSTREAM_EOF_BEFORE_FIRST_FRAME"
   | "PARSER_BUFFER_CAP"
-  | "NETWORK_FAILED_POST_SEND";
+  | "NETWORK_FAILED_POST_SEND"
+  | "UNRECOGNIZED_REJECTION";
 
 type OperationalAlertLine = {
   event: "operational_alert";
