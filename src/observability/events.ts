@@ -48,7 +48,6 @@ export type AlertName = (typeof ALERT_NAMES)[number];
 export type EpisodeAlertName = (typeof EPISODE_ALERT_NAMES)[number];
 
 export type ReqCompleteTerminal =
-  | "STREAM_NOT_DELIVERED"
   | "TOTAL_TIMEOUT"
   | "FIRST_FRAME_NOT_JSON"
   | "UPSTREAM_EOF_BEFORE_FIRST_FRAME"

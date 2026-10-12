@@ -55,10 +55,12 @@ describe("stream:true must not open the shared circuit breaker", () => {
       const ATTACKER_REQUESTS = 7;
 
       // Fake upstream: a real streaming provider answers `stream: true` with an
-      // SSE head and frames, and a normal request with JSON. The SSE body is
-      // never ended, so its connection closes only when the gateway cancels
-      // its read: each close is the evidence of one cancel. The victim's JSON
-      // body is ended normally.
+      // SSE head and frames, and a normal request with JSON. The one frame it
+      // sends is the terminating frame, so each attacker's stream ends as a
+      // valid empty stream and inject resolves; the SSE body itself is never
+      // ended, so its connection closes only when the gateway cancels its
+      // read: each close is the evidence of one cancel. The victim's JSON body
+      // is ended normally.
       const streamCloses: Promise<boolean>[] = [];
       const server = http.createServer((req, res) => {
         res.on("error", () => {});
@@ -83,9 +85,7 @@ describe("stream:true must not open the shared circuit breaker", () => {
               }),
             );
             res.writeHead(200, { "content-type": "text/event-stream" });
-            res.write(
-              'data: {"id":"chatcmpl-x","choices":[{"delta":{"content":"hi"}}]}\n\n',
-            );
+            res.write("data: [DONE]\n\n");
           } else {
             res.writeHead(200, { "content-type": "application/json" });
             res.end(JSON.stringify(VICTIM_BODY));
@@ -137,8 +137,8 @@ describe("stream:true must not open the shared circuit breaker", () => {
           });
           attackerAnswers.push({
             status: res.statusCode,
-            errorClass: res.headers["x-gateway-error-class"],
-            code: (res.json() as { error?: { code?: unknown } }).error?.code,
+            contentType: res.headers["content-type"],
+            body: res.body,
           });
         }
 
@@ -157,25 +157,25 @@ describe("stream:true must not open the shared circuit breaker", () => {
         // and changes the later answers too, and only this assertion names why.
         expect(
           recorded,
-          "an accepted stream that delivered nothing votes INCONCLUSIVE, never SUCCESS (a HALF_OPEN probe would close the breaker on an upstream that may die on the next byte) and never FAILURE (one client would open the breaker for everyone)",
+          "a delivered empty stream votes SUCCESS on the upstream's own terminating frame, never FAILURE (one client would open the breaker for everyone): the vote follows what the upstream sent, not the shape of the client's request",
         ).toStrictEqual([
-          "INCONCLUSIVE",
-          "INCONCLUSIVE",
-          "INCONCLUSIVE",
-          "INCONCLUSIVE",
-          "INCONCLUSIVE",
-          "INCONCLUSIVE",
-          "INCONCLUSIVE",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
+          "SUCCESS",
           "SUCCESS",
         ]);
         expect(
           attackerAnswers,
-          "a head recognized as SSE is not delivered in slice 1: the gap is the gateway's own, so 500 gateway-fault stream_not_delivered, never a 502 that blames the upstream",
+          "a head recognized as SSE is the beginning of a delivered stream, never a terminal: 200 with the terminating frame's bytes, never a 5xx",
         ).toStrictEqual(
           Array.from({ length: ATTACKER_REQUESTS }, () => ({
-            status: 500,
-            errorClass: "gateway-fault",
-            code: "stream_not_delivered",
+            status: 200,
+            contentType: "text/event-stream",
+            body: "data: [DONE]\n\n",
           })),
         );
         expect(
