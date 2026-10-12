@@ -103,7 +103,10 @@ export async function finishTotalTimeout(
 // the frame's data is not JSON. Which of the three applies is the caller's
 // decision (`terminal`); the vote, the upstream teardown, the request-complete
 // event and the sanitized body are the same for all three.
-type FirstFrameFaultContext = Omit<TotalTimeoutContext, "acceptedStream"> & {
+export type FirstFrameFaultContext = Omit<
+  TotalTimeoutContext,
+  "acceptedStream"
+> & {
   acceptedStream: AcceptedStream;
 };
 
