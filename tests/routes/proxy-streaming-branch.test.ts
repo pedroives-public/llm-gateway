@@ -222,12 +222,13 @@ describe("streaming flag ON: the response head decides a stream: true attempt", 
 
   it("closes an accepted stream's body even when the breaker vote throws", async () => {
     // The route depends on the CircuitBreaker interface, not on today's
-    // implementation, which never throws on INCONCLUSIVE; closing the opened
-    // body must not rely on that.
+    // implementation, which never throws on SUCCESS; closing the opened body
+    // must not rely on that. The stream is the empty one, its only data frame
+    // the terminating frame, so the response ends and the vote is SUCCESS.
     const upstream = await holdOpenUpstream(
       200,
       { "content-type": "text/event-stream" },
-      'data: {"id":"chatcmpl-x","choices":[{"delta":{"content":"hi"}}]}\n\n',
+      "data: [DONE]\n\n",
     );
     const client = createOpenAIClient({
       apiKey: "gateway-key",
@@ -236,7 +237,7 @@ describe("streaming flag ON: the response head decides a stream: true attempt", 
     const throwingVoteBreaker: CircuitBreaker = {
       tryAcquire: () => ({ kind: "NORMAL" }),
       recordResult: (outcome) => {
-        if (outcome === "INCONCLUSIVE") {
+        if (outcome === "SUCCESS") {
           throw new Error("breaker vote failed");
         }
       },
@@ -268,54 +269,6 @@ describe("streaming flag ON: the response head decides a stream: true attempt", 
         finished,
         "the upstream connection closed only after the fake ended the body, not by a cancel",
       ).toBe(false);
-    } finally {
-      await app.close();
-      await upstream.close();
-    }
-  });
-
-  it("names an accepted stream that was not delivered in its req_complete line", async () => {
-    const upstream = await holdOpenUpstream(
-      200,
-      { "content-type": "text/event-stream" },
-      'data: {"id":"chatcmpl-x","choices":[{"delta":{"content":"hi"}}]}\n\n',
-    );
-    const client = createOpenAIClient({
-      apiKey: "gateway-key",
-      baseURL: `http://127.0.0.1:${upstream.port}`,
-    });
-    const capture = makeLogCapture();
-    const violations: string[] = [];
-    const app = await buildProxyApp({
-      breaker: stubBreaker,
-      logger: capture.logger,
-      streamingEnabled: true,
-      upstreamBuffered: bufferedTripwire(violations).seam,
-      upstreamStreaming: client.streaming,
-    });
-
-    try {
-      await app.inject({
-        method: "POST",
-        url: "/v1/chat/completions",
-        headers: { authorization: bearer() },
-        payload: { ...validBody, stream: true },
-      });
-
-      expect(violations).toStrictEqual([]);
-      const complete = capture.byEvent("req_complete");
-      expect(complete).toHaveLength(1);
-      expect(
-        complete[0],
-        "req_complete must name the transitional terminal, so an operator can tell an undelivered stream from any other 500",
-      ).toMatchObject({
-        status: 500,
-        error_class: "gateway-fault",
-        stream: true,
-        attempts: 1,
-        retry_disposition: "ineligible",
-        terminal: "STREAM_NOT_DELIVERED",
-      });
     } finally {
       await app.close();
       await upstream.close();
@@ -390,41 +343,46 @@ async function answeringUpstream(
 }
 
 describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
-  const SSE_TERMINAL = {
-    status: 500,
-    errorClass: "gateway-fault",
-    code: "stream_not_delivered",
-    votes: ["INCONCLUSIVE"],
-  };
+  const DELIVERED_EMPTY_STREAM = {
+    kind: "delivered",
+    label: "a delivered empty stream",
+    status: 200,
+    contentType: "text/event-stream",
+    body: "data: [DONE]\n\n",
+    votes: ["SUCCESS"],
+  } as const;
   const UNDECODABLE_TERMINAL = {
+    kind: "terminal",
+    label: "upstream_decode_error",
     status: 502,
     errorClass: "upstream-fault",
     code: "upstream_decode_error",
     votes: ["FAILURE"],
-  };
-  const SSE_TERMINAL_REASON =
-    "a head recognized as SSE is not delivered in slice 1: the gap is the gateway's own, so 500 gateway-fault with an INCONCLUSIVE vote, never a 502 that blames the upstream";
+  } as const;
+  const DELIVERED_EMPTY_STREAM_REASON =
+    "a head recognized as SSE is the beginning of a delivered stream, never a terminal: with the terminating frame as its only frame it ends as a valid empty stream, 200 with that frame's bytes and one SUCCESS vote, never a 502 that blames the upstream";
   const UNDECODABLE_TERMINAL_REASON =
     "a 2xx that is not SSE breaks the upstream's own claim of success: 502 upstream-fault with a FAILURE vote";
 
-  // Every row sends the same body bytes, a valid SSE frame; only the head
-  // changes, so the head alone decides each answer. A 204 or 205 cannot carry
-  // them: the server drops the bytes and fetch exposes no body at all.
+  // Every row sends the same body bytes, the terminating frame; only the head
+  // changes, so the head alone decides each answer, and a head recognized as
+  // SSE ends as a valid empty stream, so inject resolves. A 204 or 205 cannot
+  // carry the bytes: the server drops them and fetch exposes no body at all.
   it.each([
     {
       status: 200,
       head: "text/event-stream",
       contentType: "text/event-stream",
-      expected: SSE_TERMINAL,
-      terminalReason: SSE_TERMINAL_REASON,
+      expected: DELIVERED_EMPTY_STREAM,
+      terminalReason: DELIVERED_EMPTY_STREAM_REASON,
       because: "a 2xx head declaring text/event-stream is recognized as SSE",
     },
     {
       status: 200,
       head: "text/event-stream with a charset parameter",
       contentType: "text/event-stream; charset=utf-8",
-      expected: SSE_TERMINAL,
-      terminalReason: SSE_TERMINAL_REASON,
+      expected: DELIVERED_EMPTY_STREAM,
+      terminalReason: DELIVERED_EMPTY_STREAM_REASON,
       because:
         "the comparison is by media type, the part before the first ';', so a parameter does not change the answer",
     },
@@ -432,8 +390,8 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       status: 200,
       head: "text/event-stream in upper case",
       contentType: "TEXT/EVENT-STREAM",
-      expected: SSE_TERMINAL,
-      terminalReason: SSE_TERMINAL_REASON,
+      expected: DELIVERED_EMPTY_STREAM,
+      terminalReason: DELIVERED_EMPTY_STREAM_REASON,
       because: "media types compare case-insensitively",
     },
     {
@@ -457,8 +415,8 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       status: 201,
       head: "text/event-stream and a 2xx that is not 200",
       contentType: "text/event-stream",
-      expected: SSE_TERMINAL,
-      terminalReason: SSE_TERMINAL_REASON,
+      expected: DELIVERED_EMPTY_STREAM,
+      terminalReason: DELIVERED_EMPTY_STREAM_REASON,
       because:
         "the 2xx filter is the range 200-299, as the official SDK's response.ok: the browser EventSource's 200-only rule binds the head the gateway sends its own client, not the upstream head it consumes as a fetch client",
     },
@@ -481,12 +439,12 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
         "a 2xx status that cannot carry a body can never carry a frame: it is the end-of-body-before-the-first-frame terminal, known at the head",
     },
   ])(
-    "$status with $head → $expected.code",
+    "$status with $head → $expected.label",
     async ({ status, contentType, expected, because, terminalReason }) => {
       const upstream = await holdOpenUpstream(
         status,
         contentType === undefined ? {} : { "content-type": contentType },
-        'data: {"id":"chatcmpl-x","choices":[{"delta":{"content":"hi"}}]}\n\n',
+        "data: [DONE]\n\n",
       );
       const client = createOpenAIClient({
         apiKey: "gateway-key",
@@ -517,17 +475,40 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
         );
 
         expect(violations).toStrictEqual([]);
-        const answer = {
-          status: res.statusCode,
-          errorClass: res.headers["x-gateway-error-class"],
-          code: (res.json() as { error?: { code?: unknown } }).error?.code,
-          votes: recorded,
-        };
         // Two questions, two assertions: the verdict on the head carries the
-        // row's reason, and the terminal that verdict leads to carries its own,
+        // row's reason, and the answer that verdict leads to carries its own,
         // so a defect in one never fails naming the other.
-        expect(answer.code, because).toBe(expected.code);
-        expect(answer, terminalReason).toStrictEqual(expected);
+        if (expected.kind === "delivered") {
+          expect(res.headers["content-type"], because).toBe(
+            expected.contentType,
+          );
+          expect(
+            {
+              kind: "delivered",
+              label: expected.label,
+              status: res.statusCode,
+              contentType: res.headers["content-type"],
+              body: res.body,
+              votes: recorded,
+            },
+            terminalReason,
+          ).toStrictEqual(expected);
+        } else {
+          const code = (res.json() as { error?: { code?: unknown } }).error
+            ?.code;
+          expect(code, because).toBe(expected.code);
+          expect(
+            {
+              kind: "terminal",
+              label: expected.label,
+              status: res.statusCode,
+              errorClass: res.headers["x-gateway-error-class"],
+              code,
+              votes: recorded,
+            },
+            terminalReason,
+          ).toStrictEqual(expected);
+        }
       } finally {
         await app.close();
         await upstream.close();
@@ -1877,6 +1858,124 @@ describe("streaming flag ON: the first-frame line meets the total-duration deadl
         terminal: "FIRST_FRAME_NOT_JSON",
       });
     } finally {
+      vi.useRealTimers();
+      await t.app.close();
+    }
+  });
+
+  it("commits the head and a JSON frame available 1 ms before the deadline together: a 200 SSE head, exactly that frame's bytes, one stream_first_token, and nothing after the line", async () => {
+    const t = await buildDrivenApp();
+    // A real client socket, not inject: on this branch the committed response
+    // stays open after the line (the forwarding loop is the next slice), so
+    // the client reads the head plus the first body bytes and then closes.
+    await t.app.listen({ port: 0, host: "127.0.0.1" });
+    const address = t.app.server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("the app did not listen on a TCP port");
+    }
+    // setImmediate stays real so the test can yield to socket I/O while the
+    // clock is fake; no timer is advanced in this scene, only the clock moves.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const startedAt = Date.now();
+    const yieldToIo = () =>
+      new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    const until = async (ready: () => boolean, premise: string) => {
+      for (let turn = 0; turn < 200; turn += 1) {
+        if (ready()) return;
+        await yieldToIo();
+      }
+      throw new Error(premise);
+    };
+
+    const body = JSON.stringify({ ...validBody, stream: true });
+    const client = http.request({
+      host: "127.0.0.1",
+      port: address.port,
+      method: "POST",
+      path: "/v1/chat/completions",
+      headers: {
+        authorization: bearer(),
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(body)),
+      },
+    });
+    client.on("error", () => {});
+    let head: http.IncomingMessage | undefined;
+    const received: Buffer[] = [];
+    client.on("response", (res) => {
+      head = res;
+      res.on("data", (chunk: Buffer) => {
+        received.push(chunk);
+      });
+    });
+
+    try {
+      client.end(body);
+      await until(
+        () => t.calls() === 1,
+        "the scene's premise: the streaming upstream was called once and answered with an accepted head",
+      );
+      expect(t.violations).toStrictEqual([]);
+      expect(
+        t.signal()?.aborted,
+        "the scene's premise: the deadline's timer has not fired, so the request signal is not aborted",
+      ).toBe(false);
+
+      // The frame becomes available with the clock 1 ms short of the deadline
+      // value: the pair of row 1 (clock exactly at the deadline), which is what
+      // tells `>=` from `>`.
+      vi.setSystemTime(startedAt + 279_999);
+      t.driven().release(JSON_FRAME);
+
+      await until(
+        () => head !== undefined,
+        "the client never received a response head after the frame was released",
+      );
+      expect(
+        head?.statusCode,
+        "a JSON first frame available 1 ms before the deadline crosses the first-frame line: the client sees a 200, never a 5xx terminal",
+      ).toBe(200);
+      expect(
+        head?.headers["content-type"],
+        "the commit writes the SSE head: content-type exactly text/event-stream",
+      ).toBe("text/event-stream");
+
+      const frameBytes = Buffer.from(JSON_FRAME, "utf8");
+      await until(
+        () => Buffer.concat(received).length >= frameBytes.length,
+        "the client never received the first frame's bytes after the head",
+      );
+      expect(
+        Buffer.concat(received).equals(frameBytes),
+        "the body the client has read is exactly the first frame's bytes, forwarded verbatim: no error body, no terminating frame",
+      ).toBe(true);
+
+      // The client leaves right after the frame. Nothing on this branch ends
+      // the response or cancels the upstream body after the line: the
+      // departure observer (6.11) and the post-loop (6.12) are later slices,
+      // and the fake body is closed by this test's teardown.
+      client.destroy();
+      await yieldToIo();
+
+      expect(
+        t.capture.logs.flatMap((log) => log.event ?? []),
+        "after the commit the request has logged req_start and stream_first_token, in that order, and nothing else: no req_complete, no stream_done, no alert, no cancel-rejected line",
+      ).toStrictEqual(["req_start", "stream_first_token"]);
+      expect(
+        t.capture.byEvent("stream_first_token")[0],
+        "ttft_ms is measured from the attempt's dispatch to the first complete parsed frame: with the clock moved to 1 ms short of the 280 000 ms deadline, 279 999; was_cold_start is the value req_start snapshotted",
+      ).toMatchObject({
+        ttft_ms: 279_999,
+        was_cold_start: t.capture.byEvent("req_start")[0]?.was_cold_start,
+      });
+      expect(
+        t.recorded,
+        "the breaker votes once, at the end of the stream, and the end is not reached on this slice: no breaker result at the line",
+      ).toStrictEqual([]);
+    } finally {
+      client.destroy();
       vi.useRealTimers();
       await t.app.close();
     }

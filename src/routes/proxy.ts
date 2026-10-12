@@ -12,6 +12,7 @@ import {
   type MinLogger,
   type ReqCompleteTerminal,
   emitStreamDone,
+  emitStreamFirstToken,
 } from "../observability/events.js";
 import { retry } from "../reliability/retry.js";
 import {
@@ -140,7 +141,6 @@ function resolveStreamingUpstream(
   };
 }
 
-
 export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
   fastify,
   opts,
@@ -235,8 +235,10 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         request.body.stream === true
           ? armedAt + STREAM_TOTAL_DURATION_MS
           : armedAt + WALL_CLOCK_MS;
+
       let attempts = 0;
       let upstreamDurationMs = 0;
+      let attemptStartedAt = requestStartedAt;
 
       // A schema maximum only fires on a present field: when the client omits
       // both spend fields, inject the cap so omission cannot reach the
@@ -252,7 +254,7 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
       const upstreamLog = request.log.child({ req_id: request.reqId });
       const callUpstream = async (): Promise<AttemptResult> => {
         attempts += 1;
-        const attemptStartedAt = Date.now();
+        attemptStartedAt = Date.now();
 
         const upstream =
           request.body.stream === true
@@ -272,9 +274,8 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           outcome = await retry(callUpstream, {
             signal: timeout.signal,
             deadlineAt,
-            // No byte reaches the client before the terminal is decided: an
-            // accepted stream is closed without forwarding any frame, so this
-            // stays false until frames are forwarded.
+            // No byte reaches the client before the accepted stream is classified.
+            // The first-frame commit happens after retry has already finished.
             firstByteFlushed: () => false,
           });
         } catch (error) {
@@ -496,52 +497,23 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               return;
             }
 
-            terminalDecided = true;
+            if (firstFrame.kind === "frame") {
+              reply.hijack();
+              reply.raw.writeHead(200, {
+                "content-type": "text/event-stream",
+                "cache-control": "no-cache",
+                connection: "keep-alive",
+              });
+              reply.raw.write(firstFrame.bytes);
 
-            const status = 500;
-            const errorClass: ErrorClass = "gateway-fault";
+              emitStreamFirstToken(request.log, {
+                req_id: request.reqId,
+                ttft_ms: Date.now() - attemptStartedAt,
+                was_cold_start: wasCold,
+              });
 
-            try {
-              opts.breaker.recordResult("INCONCLUSIVE");
-            } finally {
-              await cancelStream(
-                acceptedStream.reader,
-                upstreamLog,
-                "proxy_route",
-              );
+              return;
             }
-
-            const terminalDurationMs = Date.now() - requestStartedAt;
-            const terminalGatewayOverheadMs = Math.max(
-              0,
-              terminalDurationMs - upstreamDurationMs,
-            );
-
-            emitReqComplete(request.log, {
-              req_id: request.reqId,
-              status,
-              error_class: errorClass,
-              stream: true,
-              attempts,
-              duration_ms: terminalDurationMs,
-              upstream_duration_ms: upstreamDurationMs,
-              gateway_overhead_ms: terminalGatewayOverheadMs,
-              retry_disposition: deriveRetryDisposition(
-                attempts,
-                outcome,
-                timeout.signal,
-              ),
-              terminal: "STREAM_NOT_DELIVERED",
-            });
-
-            reply.code(status).header("x-gateway-error-class", errorClass);
-            return {
-              error: {
-                message: "streaming response was not delivered",
-                type: "internal_error",
-                code: "stream_not_delivered",
-              },
-            };
           }
         }
 
