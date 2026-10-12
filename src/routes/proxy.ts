@@ -36,6 +36,7 @@ import {
   finishFirstFrameFault,
   finishTotalTimeout,
   isTotalTimeout,
+  type FirstFrameFaultContext,
 } from "./proxy-first-frame.js";
 import {
   bodyForErrorOutcome,
@@ -390,73 +391,53 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
             }
           }
 
+          const faultContext: FirstFrameFaultContext = {
+            acceptedStream,
+            outcome: acceptedStream,
+            attempts,
+            requestStartedAt,
+            upstreamDurationMs,
+            request: { log: request.log, reqId: request.reqId },
+            reply,
+            signal: timeout.signal,
+            upstreamLog,
+            breaker: opts.breaker,
+          };
+
           if (isTotalTimeout(request.body.stream, deadlineAt, timeout.signal)) {
             terminalDecided = true;
 
-            return finishTotalTimeout({
-              acceptedStream,
-              outcome: acceptedStream,
-              attempts,
-              requestStartedAt,
-              upstreamDurationMs,
-              request: {
-                log: request.log,
-                reqId: request.reqId,
-              },
-              reply,
-              signal: timeout.signal,
-              upstreamLog,
-              breaker: opts.breaker,
-            });
+            return finishTotalTimeout(faultContext);
           }
 
           if (readError !== undefined) {
             outcome = readError;
           } else if (firstFrame !== undefined) {
-            let terminal: ReqCompleteTerminal | undefined;
-            if (
-              firstFrame.kind === "eof" ||
-              firstFrame.kind === "eof_partial"
-            ) {
-              terminal = "UPSTREAM_EOF_BEFORE_FIRST_FRAME";
-            } else if (firstFrame.kind === "cap") {
-              terminal = "PARSER_BUFFER_CAP";
-            } else if (
-              firstFrame.kind === "frame" &&
-              firstFrame.data !== null &&
-              firstFrame.data !== "[DONE]"
-            ) {
+            if (firstFrame.kind !== "frame") {
+              const terminal =
+                firstFrame.kind === "cap"
+                  ? "PARSER_BUFFER_CAP"
+                  : "UPSTREAM_EOF_BEFORE_FIRST_FRAME";
+
+              terminalDecided = true;
+
+              return finishFirstFrameFault(faultContext, terminal);
+            }
+
+            if (firstFrame.data !== null && firstFrame.data !== "[DONE]") {
               try {
                 JSON.parse(firstFrame.data);
               } catch {
-                terminal = "FIRST_FRAME_NOT_JSON";
+                terminalDecided = true;
+
+                return finishFirstFrameFault(
+                  faultContext,
+                  "FIRST_FRAME_NOT_JSON",
+                );
               }
             }
 
-            if (terminal !== undefined) {
-              terminalDecided = true;
-
-              return finishFirstFrameFault(
-                {
-                  acceptedStream,
-                  outcome,
-                  attempts,
-                  requestStartedAt,
-                  upstreamDurationMs,
-                  request: {
-                    log: request.log,
-                    reqId: request.reqId,
-                  },
-                  reply,
-                  signal: timeout.signal,
-                  upstreamLog,
-                  breaker: opts.breaker,
-                },
-                terminal,
-              );
-            }
-
-            if (firstFrame.kind === "frame" && firstFrame.data === "[DONE]") {
+            if (firstFrame.data === "[DONE]") {
               terminalDecided = true;
               reply.hijack();
               reply.raw.writeHead(200, {
@@ -497,23 +478,21 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               return;
             }
 
-            if (firstFrame.kind === "frame") {
-              reply.hijack();
-              reply.raw.writeHead(200, {
-                "content-type": "text/event-stream",
-                "cache-control": "no-cache",
-                connection: "keep-alive",
-              });
-              reply.raw.write(firstFrame.bytes);
+            reply.hijack();
+            reply.raw.writeHead(200, {
+              "content-type": "text/event-stream",
+              "cache-control": "no-cache",
+              connection: "keep-alive",
+            });
+            reply.raw.write(firstFrame.bytes);
 
-              emitStreamFirstToken(request.log, {
-                req_id: request.reqId,
-                ttft_ms: Date.now() - attemptStartedAt,
-                was_cold_start: wasCold,
-              });
+            emitStreamFirstToken(request.log, {
+              req_id: request.reqId,
+              ttft_ms: Date.now() - attemptStartedAt,
+              was_cold_start: wasCold,
+            });
 
-              return;
-            }
+            return;
           }
         }
 
