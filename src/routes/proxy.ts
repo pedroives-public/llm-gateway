@@ -10,7 +10,6 @@ import {
   emitOperationalAlert,
   alertFor,
   type MinLogger,
-  type ReqCompleteTerminal,
   emitStreamDone,
   emitStreamFirstToken,
 } from "../observability/events.js";
@@ -43,6 +42,7 @@ import {
   decideErrorTerminal,
   deriveRetryDisposition,
   isSanitizedUpstreamTerminal,
+  terminalForErrorOutcome,
 } from "./proxy-error-outcome.js";
 import { sendProxyError } from "./proxy-error-handler.js";
 
@@ -544,10 +544,10 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
             emitOperationalAlert(request.log, alert, { req_id: request.reqId });
           }
 
-          const reqCompleteTerminal: ReqCompleteTerminal | undefined =
-            outcome.kind === "network_failed" && !outcome.pre_send_proven
-              ? "NETWORK_FAILED_POST_SEND"
-              : undefined;
+          const reqCompleteTerminal = terminalForErrorOutcome(
+            outcome,
+            terminal.error_class,
+          );
 
           emitReqComplete(request.log, {
             req_id: request.reqId,

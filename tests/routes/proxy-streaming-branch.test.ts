@@ -620,6 +620,174 @@ describe.each([
   },
 );
 
+describe.each([
+  { transport: "stream: true", stream: true },
+  { transport: "stream: false", stream: false },
+])(
+  "streaming flag ON, $transport: req_complete names the pre-first-frame terminal an upstream answer decides",
+  ({ stream }) => {
+    // One row per terminal that an upstream answer decides before the first
+    // frame, in the order and with the labels of the pre-first-frame terminals
+    // table. Every row is literal: the head the upstream sends, then what the
+    // gateway writes to the client, votes on the breaker and logs. The rows
+    // are the same for both transports: the error path that names the
+    // terminal is shared, so a request that never asked for a stream ends
+    // under the same names.
+    it.each<{
+      terminal: string;
+      upstreamStatus: number;
+      upstreamBody: string;
+      expected: {
+        status: number;
+        errorClass: string;
+        body: string;
+        votes: ProbeOutcome[];
+        events: string[];
+      };
+    }>([
+      {
+        terminal: "UPSTREAM_5XX",
+        upstreamStatus: 500,
+        upstreamBody: '{"error":{"type":"server_error"}}',
+        expected: {
+          status: 502,
+          errorClass: "upstream-retry-exhausted",
+          body: '{"error":{"type":"server_error"}}',
+          votes: ["FAILURE"],
+          events: ["req_start", "req_complete"],
+        },
+      },
+      {
+        terminal: "UPSTREAM_401",
+        upstreamStatus: 401,
+        upstreamBody: '{"error":{"type":"server_error"}}',
+        expected: {
+          status: 502,
+          errorClass: "upstream-auth-failure",
+          body: '{"error":{"message":"upstream authentication failed","type":"server_error","code":"upstream_auth_failure"}}',
+          votes: ["FAILURE"],
+          events: ["req_start", "req_complete"],
+        },
+      },
+      {
+        terminal: "UPSTREAM_403",
+        upstreamStatus: 403,
+        upstreamBody: '{"error":{"type":"server_error"}}',
+        expected: {
+          status: 502,
+          errorClass: "upstream-access-denied",
+          body: '{"error":{"message":"upstream access denied","type":"server_error","code":"upstream_access_denied"}}',
+          votes: ["INCONCLUSIVE"],
+          events: ["req_start", "req_complete"],
+        },
+      },
+      {
+        terminal: "UPSTREAM_QUOTA",
+        upstreamStatus: 429,
+        upstreamBody:
+          '{"error":{"type":"server_error", "code": "insufficient_quota"}}',
+        expected: {
+          status: 502,
+          errorClass: "upstream-quota-exhausted",
+          body: '{"error":{"message":"upstream quota exhausted","type":"server_error","code":"upstream_quota_exhausted"}}',
+          votes: ["INCONCLUSIVE"],
+          events: ["req_start", "req_complete"],
+        },
+      },
+      {
+        terminal: "UPSTREAM_429",
+        upstreamStatus: 429,
+        upstreamBody: '{"error":{"type":"server_error"}}',
+        expected: {
+          status: 429,
+          errorClass: "upstream-retry-exhausted",
+          body: '{"error":{"type":"server_error"}}',
+          votes: ["INCONCLUSIVE"],
+          events: ["req_start", "req_complete"],
+        },
+      },
+      {
+        terminal: "UPSTREAM_OTHER_4XX",
+        upstreamStatus: 402,
+        upstreamBody: '{"error":{"type":"server_error"}}',
+        expected: {
+          status: 402,
+          errorClass: "client-fault",
+          body: '{"error":{"type":"server_error"}}',
+          votes: ["INCONCLUSIVE"],
+          events: ["req_start", "req_complete"],
+        },
+      },
+    ])(
+      "ends as $terminal when the upstream answers $upstreamStatus",
+      async ({ terminal, upstreamStatus, upstreamBody, expected }) => {
+        const upstream = await answeringUpstream(upstreamStatus, upstreamBody);
+        const client = createOpenAIClient({
+          apiKey: "gateway-key",
+          baseURL: `http://127.0.0.1:${upstream.port}`,
+        });
+        const capture = makeLogCapture();
+        const violations: string[] = [];
+        const { breaker, recorded } = recordingBreaker();
+        const app = await buildProxyApp({
+          breaker,
+          logger: capture.logger,
+          streamingEnabled: true,
+          upstreamBuffered: bufferedTripwire(violations, client.buffered).seam,
+          upstreamStreaming: client.streaming,
+        });
+
+        try {
+          const res = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            headers: { authorization: bearer() },
+            payload: { ...validBody, stream },
+          });
+
+          expect(violations).toStrictEqual([]);
+          expect(
+            {
+              status: res.statusCode,
+              errorClass: res.headers["x-gateway-error-class"],
+              body: res.body,
+              votes: recorded,
+            },
+            `${terminal}: what the gateway writes to the client and votes on the breaker is this terminal's row of the pre-first-frame table`,
+          ).toStrictEqual({
+            status: expected.status,
+            errorClass: expected.errorClass,
+            body: expected.body,
+            votes: expected.votes,
+          });
+          // The operator alert is emitted once per process for each alert name,
+          // so whether it appears here depends on which requests ran before
+          // this one. Its own tests pin it; this list holds the events of the
+          // request itself.
+          expect(
+            capture.logs
+              .flatMap((log) => log.event ?? [])
+              .filter((event) => event !== "operational_alert"),
+            `${terminal}: a pre-first-frame terminal emits req_complete, never stream_done`,
+          ).toStrictEqual(expected.events);
+          expect(
+            capture.byEvent("req_complete")[0],
+            `req_complete names the terminal ${terminal}, so an operator can tell which pre-first-frame row ended the request`,
+          ).toMatchObject({
+            status: expected.status,
+            error_class: expected.errorClass,
+            stream,
+            terminal,
+          });
+        } finally {
+          await app.close();
+          await upstream.close();
+        }
+      },
+    );
+  },
+);
+
 describe("streaming flag ON: the total-duration deadline bounds a stream: true request", () => {
   it("ends a silent upstream as TOTAL_TIMEOUT at the deadline, not at the 30-second non-streaming deadline", async () => {
     let calls = 0;

@@ -1,5 +1,9 @@
 import type { ErrorOutcome } from "../upstream/outcome.js";
-import type { ErrorClass, RetryDisposition } from "../observability/events.js";
+import type {
+  ErrorClass,
+  ReqCompleteTerminal,
+  RetryDisposition,
+} from "../observability/events.js";
 import type { Classification } from "../upstream/classify.js";
 import { assertNever } from "../upstream/assert-never.js";
 import {
@@ -148,6 +152,45 @@ function statusForErrorOutcome(
         default:
           return assertNever(outcome.abort_kind);
       }
+  }
+}
+
+// Names the terminal an error outcome ends as on the request-complete log
+// line, so an operator can tell apart ends whose status and error class
+// repeat. The branches follow the classifier's order. The quota name reads
+// the error class: the classifier is the one place that recognizes quota
+// exhaustion from the response body. An outcome this function does not name
+// returns undefined, and its log line carries no terminal.
+export function terminalForErrorOutcome(
+  outcome: ErrorOutcome,
+  errorClass: ErrorClass,
+): ReqCompleteTerminal | undefined {
+  switch (outcome.kind) {
+    case "upstream_error":
+      if (outcome.status >= 500) {
+        return "UPSTREAM_5XX";
+      }
+      if (outcome.status === 401) {
+        return "UPSTREAM_401";
+      }
+      if (outcome.status === 403) {
+        return "UPSTREAM_403";
+      }
+      if (errorClass === "upstream-quota-exhausted") {
+        return "UPSTREAM_QUOTA";
+      }
+      if (outcome.status === 429) {
+        return "UPSTREAM_429";
+      }
+      return "UPSTREAM_OTHER_4XX";
+    case "network_failed":
+      return outcome.pre_send_proven ? undefined : "NETWORK_FAILED_POST_SEND";
+    case "undecodable":
+    case "redirect_blocked":
+    case "aborted":
+      return undefined;
+    default:
+      return assertNever(outcome);
   }
 }
 
