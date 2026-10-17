@@ -186,8 +186,9 @@ export function terminalForErrorOutcome(
     case "network_failed":
       return outcome.pre_send_proven ? undefined : "NETWORK_FAILED_POST_SEND";
     case "undecodable":
-    case "redirect_blocked":
       return undefined;
+    case "redirect_blocked":
+      return "REDIRECT_BLOCKED";
     case "aborted":
       switch (outcome.abort_kind) {
         case "response_size_cap":

@@ -60,6 +60,7 @@ export type ReqCompleteTerminal =
   | "UPSTREAM_QUOTA"
   | "UPSTREAM_429"
   | "UPSTREAM_OTHER_4XX"
+  | "REDIRECT_BLOCKED"
   | "RESPONSE_TOO_LARGE";
 
 export type StreamDoneTerminal =
