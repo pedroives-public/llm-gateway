@@ -59,7 +59,8 @@ export type ReqCompleteTerminal =
   | "UPSTREAM_403"
   | "UPSTREAM_QUOTA"
   | "UPSTREAM_429"
-  | "UPSTREAM_OTHER_4XX";
+  | "UPSTREAM_OTHER_4XX"
+  | "RESPONSE_TOO_LARGE";
 
 export type StreamDoneTerminal =
   | "DONE"

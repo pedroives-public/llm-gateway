@@ -978,9 +978,11 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       });
     // Build with real timers (Fastify boot), then switch to fake timers for the
     // request so advanceTimersByTimeAsync deterministically fires the 30s deadline.
+    const capture = makeLogCapture();
     const { app, apiKey } = await buildWith(
       recordingBreaker(recorded),
       upstream,
+      capture,
     );
     vi.useFakeTimers();
     try {
@@ -1000,6 +1002,15 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
       // The silence may be a tenant's legitimately slow request, so the
       // expiry carries no evidence about upstream availability.
       expect(recorded).toEqual(["INCONCLUSIVE"]);
+
+      expect(capture.byEvent("req_complete")).toHaveLength(1);
+      const reqComplete = capture.byEvent("req_complete")[0];
+      // A net, not a ruler: the rule is an absence, and listing every field
+      // req_complete may carry would break on each unrelated field it gains.
+      expect(
+        reqComplete,
+        "the 30-second wall-clock expiry is an end only a stream: false request reaches, so its req_complete carries no terminal name",
+      ).not.toHaveProperty("terminal");
     } finally {
       vi.useRealTimers();
       await app.close();

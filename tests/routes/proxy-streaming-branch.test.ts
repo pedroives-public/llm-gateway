@@ -718,6 +718,18 @@ describe.each([
           events: ["req_start", "req_complete"],
         },
       },
+      {
+        terminal: "RESPONSE_TOO_LARGE",
+        upstreamStatus: 502,
+        upstreamBody: "x".repeat(2 * 1024 * 1024),
+        expected: {
+          status: 502,
+          errorClass: "upstream-fault",
+          body: '{"error":{"message":"upstream response too large","type":"server_error","code":"response_too_large"}}',
+          votes: ["INCONCLUSIVE"],
+          events: ["req_start", "req_complete"],
+        },
+      },
     ])(
       "ends as $terminal when the upstream answers $upstreamStatus",
       async ({ terminal, upstreamStatus, upstreamBody, expected }) => {
