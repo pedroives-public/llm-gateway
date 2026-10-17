@@ -719,6 +719,18 @@ describe.each([
         },
       },
       {
+        terminal: "REDIRECT_BLOCKED",
+        upstreamStatus: 301,
+        upstreamBody: '{"error":{"type":"server_error"}}',
+        expected: {
+          status: 502,
+          errorClass: "upstream-redirect-blocked",
+          body: '{"error":{"message":"upstream redirect blocked","type":"server_error","code":"upstream_redirect_blocked"}}',
+          votes: ["FAILURE"],
+          events: ["req_start", "req_complete"],
+        },
+      },
+      {
         terminal: "RESPONSE_TOO_LARGE",
         upstreamStatus: 502,
         upstreamBody: "x".repeat(2 * 1024 * 1024),
