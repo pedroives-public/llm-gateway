@@ -187,8 +187,20 @@ export function terminalForErrorOutcome(
       return outcome.pre_send_proven ? undefined : "NETWORK_FAILED_POST_SEND";
     case "undecodable":
     case "redirect_blocked":
-    case "aborted":
       return undefined;
+    case "aborted":
+      switch (outcome.abort_kind) {
+        case "response_size_cap":
+          return "RESPONSE_TOO_LARGE";
+        case "total_timeout":
+          return "TOTAL_TIMEOUT";
+
+        // An end only a stream: false request reaches: it carries no terminal name.
+        case "wall_clock_expired":
+          return undefined;
+        default:
+          return assertNever(outcome.abort_kind);
+      }
     default:
       return assertNever(outcome);
   }
