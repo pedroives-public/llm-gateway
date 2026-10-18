@@ -111,7 +111,7 @@ describe("isInsufficientQuota", () => {
     },
     {
       name: "non-upstream_error outcome (undecodable) — no body to inspect, not quota",
-      outcome: { kind: "undecodable" },
+      outcome: { kind: "undecodable", undecodable_kind: "unparsable_body" },
       expected: false,
     },
     {

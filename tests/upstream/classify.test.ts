@@ -82,7 +82,11 @@ describe("classify", () => {
       breaker_delta: 1,
     };
 
-    const result = classify({ kind: "undecodable" }, log, "req-1");
+    const result = classify(
+      { kind: "undecodable", undecodable_kind: "unparsable_body" },
+      log,
+      "req-1",
+    );
     expect(result).toEqual(expected);
     expect(log.error).toHaveBeenCalledWith({
       req_id: "req-1",

@@ -61,7 +61,8 @@ export type ReqCompleteTerminal =
   | "UPSTREAM_429"
   | "UPSTREAM_OTHER_4XX"
   | "REDIRECT_BLOCKED"
-  | "RESPONSE_TOO_LARGE";
+  | "RESPONSE_TOO_LARGE"
+  | "200_NON_SSE";
 
 export type StreamDoneTerminal =
   | "DONE"
