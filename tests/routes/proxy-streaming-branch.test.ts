@@ -323,6 +323,7 @@ describe("streaming flag ON: the fork reads the stream value Ajv coerced", () =>
 async function answeringUpstream(
   status: number,
   body: string,
+  headers: Record<string, string> = {},
 ): Promise<{
   port: number;
   requests: () => number;
@@ -334,7 +335,7 @@ async function answeringUpstream(
     res.on("error", () => {});
     req.resume();
     req.on("end", () => {
-      res.writeHead(status, { "content-type": "application/json" });
+      res.writeHead(status, { "content-type": "application/json", ...headers });
       res.end(body);
     });
   });
@@ -687,10 +688,12 @@ describe.each([
       terminal: string;
       upstreamStatus: number;
       upstreamBody: string;
+      upstreamHeaders?: Record<string, string>;
       expected: {
         status: number;
         errorClass: string;
         body: string;
+        retryAfter?: string;
         votes: ProbeOutcome[];
         events: string[];
       };
@@ -736,6 +739,7 @@ describe.each([
         upstreamStatus: 429,
         upstreamBody:
           '{"error":{"type":"server_error", "code": "insufficient_quota"}}',
+        upstreamHeaders: { "retry-after": "2" },
         expected: {
           status: 502,
           errorClass: "upstream-quota-exhausted",
@@ -748,10 +752,12 @@ describe.each([
         terminal: "UPSTREAM_429",
         upstreamStatus: 429,
         upstreamBody: '{"error":{"type":"server_error"}}',
+        upstreamHeaders: { "retry-after": "2" },
         expected: {
           status: 429,
           errorClass: "upstream-retry-exhausted",
           body: '{"error":{"type":"server_error"}}',
+          retryAfter: "2",
           votes: ["INCONCLUSIVE"],
           events: ["req_start", "req_complete"],
         },
@@ -794,8 +800,18 @@ describe.each([
       },
     ])(
       "ends as $terminal when the upstream answers $upstreamStatus",
-      async ({ terminal, upstreamStatus, upstreamBody, expected }) => {
-        const upstream = await answeringUpstream(upstreamStatus, upstreamBody);
+      async ({
+        terminal,
+        upstreamStatus,
+        upstreamBody,
+        upstreamHeaders,
+        expected,
+      }) => {
+        const upstream = await answeringUpstream(
+          upstreamStatus,
+          upstreamBody,
+          upstreamHeaders,
+        );
         const client = createOpenAIClient({
           apiKey: "gateway-key",
           baseURL: `http://127.0.0.1:${upstream.port}`,
@@ -825,13 +841,15 @@ describe.each([
               status: res.statusCode,
               errorClass: res.headers["x-gateway-error-class"],
               body: res.body,
+              retryAfter: res.headers["retry-after"],
               votes: recorded,
             },
-            `${terminal}: what the gateway writes to the client and votes on the breaker is this terminal's row of the pre-first-frame table`,
+            `${terminal}: what the gateway writes to the client and votes on the breaker is this terminal's row of the pre-first-frame table; an upstream Retry-After is echoed only where the upstream's own answer passes through`,
           ).toStrictEqual({
             status: expected.status,
             errorClass: expected.errorClass,
             body: expected.body,
+            retryAfter: expected.retryAfter,
             votes: expected.votes,
           });
           // The operator alert is emitted once per process for each alert name,
