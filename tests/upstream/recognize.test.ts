@@ -61,7 +61,13 @@ describe("recognize", () => {
       body_raw: "<html>200 OK but not JSON</html>",
     });
 
-    expect(result).toEqual({ kind: "undecodable" });
+    expect(
+      result,
+      "a resolved 2xx whose body failed to parse is the unparsable_body fact, the only one the buffered recognizer reports",
+    ).toEqual({
+      kind: "undecodable",
+      undecodable_kind: "unparsable_body",
+    });
   });
 
   it.each(["ENOTFOUND", "ECONNREFUSED", "UND_ERR_CONNECT_TIMEOUT"])(

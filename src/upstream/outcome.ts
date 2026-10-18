@@ -7,6 +7,7 @@ export type Outcome =
     }
   | {
       kind: "undecodable";
+      undecodable_kind: "non_sse_head" | "head_without_body" | "unparsable_body";
     }
   | {
       kind: "network_failed";

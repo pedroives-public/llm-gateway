@@ -96,13 +96,16 @@ export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
     const contentType = response.headers.get("content-type");
     const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
 
-    if (mediaType !== "text/event-stream" || response.body === null) {
+    if (mediaType !== "text/event-stream") {
       if (response.body !== null) {
         const reader = response.body.getReader();
         await cancelStream(reader, log, "upstream_adapter");
       }
+      return { kind: "undecodable", undecodable_kind: "non_sse_head" };
+    }
 
-      return { kind: "undecodable" };
+    if (response.body === null) {
+      return { kind: "undecodable", undecodable_kind: "head_without_body" };
     }
 
     return {

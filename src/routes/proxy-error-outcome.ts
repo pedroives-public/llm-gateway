@@ -186,7 +186,19 @@ export function terminalForErrorOutcome(
     case "network_failed":
       return outcome.pre_send_proven ? undefined : "NETWORK_FAILED_POST_SEND";
     case "undecodable":
-      return undefined;
+      switch (outcome.undecodable_kind) {
+        case "non_sse_head":
+          return "200_NON_SSE";
+        // A head that can never carry a body ends the body before a first frame.
+        case "head_without_body":
+          return "UPSTREAM_EOF_BEFORE_FIRST_FRAME";
+
+        // An end only a stream: false request reaches: it carries no terminal name.
+        case "unparsable_body":
+          return undefined;
+        default:
+          return assertNever(outcome.undecodable_kind);
+      }
     case "redirect_blocked":
       return "REDIRECT_BLOCKED";
     case "aborted":

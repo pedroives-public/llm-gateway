@@ -62,7 +62,10 @@ export function streamingTripwire(violations: string[]): {
       }
       // The terminal is not the subject of the cells that use this seam; any
       // error outcome ends the request.
-      return Promise.resolve({ kind: "undecodable" });
+      return Promise.resolve({
+        kind: "undecodable",
+        undecodable_kind: "non_sse_head",
+      });
     },
   };
 }

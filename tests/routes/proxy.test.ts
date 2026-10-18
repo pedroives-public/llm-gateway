@@ -328,7 +328,10 @@ describe("proxy route — buffered skeleton", () => {
     let upstreamCalls = 0;
     const undecodableUpstream = (): Promise<Outcome> => {
       upstreamCalls += 1;
-      return Promise.resolve({ kind: "undecodable" });
+      return Promise.resolve({
+        kind: "undecodable",
+        undecodable_kind: "unparsable_body",
+      });
     };
     const recorded: ProbeOutcome[] = [];
     const breaker: CircuitBreaker = {
@@ -339,8 +342,9 @@ describe("proxy route — buffered skeleton", () => {
       getState: () => "CLOSED",
     };
 
+    const capture = makeLogCapture();
     const app = await buildApp({
-      logger: false,
+      logger: capture.logger,
       db: fakeAuthDb(tenantId),
       registerProtected: async (scope) => {
         await scope.register(proxyRoute, {
@@ -373,6 +377,15 @@ describe("proxy route — buffered skeleton", () => {
       });
       expect(recorded).toEqual(["FAILURE"]);
       expect(upstreamCalls).toBe(1);
+
+      expect(capture.byEvent("req_complete")).toHaveLength(1);
+      const reqComplete = capture.byEvent("req_complete")[0];
+      // A net, not a ruler: the rule is an absence, and listing every field
+      // req_complete may carry would break on each unrelated field it gains.
+      expect(
+        reqComplete,
+        "a 2xx body that is not JSON is an end only a stream: false request reaches, so its req_complete carries no terminal name, never 200_NON_SSE",
+      ).not.toHaveProperty("terminal");
     } finally {
       await app.close();
     }

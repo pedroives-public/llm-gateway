@@ -112,7 +112,7 @@ export function recognizeResponse(raw: ResponseFacts): ResponseRecognition {
   }
 
   if (isSuccessStatus(raw.status)) {
-    return { kind: "undecodable" };
+    return { kind: "undecodable", undecodable_kind: "unparsable_body" };
   }
 
   return {
