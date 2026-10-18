@@ -1011,6 +1011,75 @@ describe.each([
   },
 );
 
+describe("streaming flag ON, stream: false: req_complete names a network failure after the request was sent", () => {
+  it("ends as NETWORK_FAILED_POST_SEND when the connection is destroyed after the head, during the buffered body read", async () => {
+    const upstream = await resettingUpstream(200, {
+      "content-type": "application/json",
+    });
+    const client = createOpenAIClient({
+      apiKey: "gateway-key",
+      baseURL: `http://127.0.0.1:${upstream.port}`,
+    });
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+    const app = await buildProxyApp({
+      breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations, client.buffered).seam,
+      upstreamStreaming: streamingTripwire(violations).seam,
+    });
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: bearer() },
+        payload: { ...validBody, stream: false },
+      });
+
+      expect(violations).toStrictEqual([]);
+      expect(
+        {
+          status: res.statusCode,
+          errorClass: res.headers["x-gateway-error-class"],
+          body: res.json(),
+          votes: recorded,
+        },
+        "a connection that dies after the head, while a stream: false body is read, is a network failure after the request was sent: 504 gateway-fault with exactly one FAILURE vote and no retry",
+      ).toStrictEqual({
+        status: 504,
+        errorClass: "gateway-fault",
+        body: {
+          error: {
+            message: "gateway error",
+            type: "gateway_error",
+            code: "upstream_connection_failed",
+          },
+        },
+        votes: ["FAILURE"],
+      });
+      expect(
+        capture.byEvent("req_complete"),
+        "the stream: false request ends under the same name as the stream: true one, because the error path that names it is shared",
+      ).toMatchObject([
+        {
+          status: 504,
+          error_class: "gateway-fault",
+          stream: false,
+          attempts: 1,
+          retry_disposition: "ineligible",
+          terminal: "NETWORK_FAILED_POST_SEND",
+        },
+      ]);
+    } finally {
+      await app.close();
+      await upstream.close();
+    }
+  });
+});
+
 describe("streaming flag ON, stream: true: the cost caps of the buffered body hold", () => {
   // The output-token ceiling, literal: a stream: true body is bound by the same
   // number as a buffered one.
