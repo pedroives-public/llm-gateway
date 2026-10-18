@@ -363,6 +363,12 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
     "a head recognized as SSE is the beginning of a delivered stream, never a terminal: with the terminating frame as its only frame it ends as a valid empty stream, 200 with that frame's bytes and one SUCCESS vote, never a 502 that blames the upstream";
   const UNDECODABLE_TERMINAL_REASON =
     "a 2xx that is not SSE breaks the upstream's own claim of success: 502 upstream-fault with a FAILURE vote";
+  const DELIVERED_REQ_COMPLETE_REASON =
+    "a delivered stream ends with stream_done, so no req_complete line is written";
+  const NON_SSE_REQ_COMPLETE_REASON =
+    "req_complete names a 2xx head that is not SSE 200_NON_SSE, so an operator can tell it apart from the other ends that answer upstream_decode_error";
+  const BODYLESS_REQ_COMPLETE_REASON =
+    "a bodyless SSE head can never carry a frame: req_complete names it UPSTREAM_EOF_BEFORE_FIRST_FRAME, the end of a body before a first frame, never 200_NON_SSE, which names only a head that is not SSE";
 
   // Every row sends the same body bytes, the terminating frame; only the head
   // changes, so the head alone decides each answer, and a head recognized as
@@ -375,6 +381,8 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       contentType: "text/event-stream",
       expected: DELIVERED_EMPTY_STREAM,
       terminalReason: DELIVERED_EMPTY_STREAM_REASON,
+      reqCompleteTerminals: [],
+      reqCompleteReason: DELIVERED_REQ_COMPLETE_REASON,
       because: "a 2xx head declaring text/event-stream is recognized as SSE",
     },
     {
@@ -383,6 +391,8 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       contentType: "text/event-stream; charset=utf-8",
       expected: DELIVERED_EMPTY_STREAM,
       terminalReason: DELIVERED_EMPTY_STREAM_REASON,
+      reqCompleteTerminals: [],
+      reqCompleteReason: DELIVERED_REQ_COMPLETE_REASON,
       because:
         "the comparison is by media type, the part before the first ';', so a parameter does not change the answer",
     },
@@ -392,6 +402,8 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       contentType: "TEXT/EVENT-STREAM",
       expected: DELIVERED_EMPTY_STREAM,
       terminalReason: DELIVERED_EMPTY_STREAM_REASON,
+      reqCompleteTerminals: [],
+      reqCompleteReason: DELIVERED_REQ_COMPLETE_REASON,
       because: "media types compare case-insensitively",
     },
     {
@@ -400,6 +412,8 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       contentType: "application/json",
       expected: UNDECODABLE_TERMINAL,
       terminalReason: UNDECODABLE_TERMINAL_REASON,
+      reqCompleteTerminals: ["200_NON_SSE"],
+      reqCompleteReason: NON_SSE_REQ_COMPLETE_REASON,
       because: "a 2xx whose media type is not text/event-stream is undecodable",
     },
     {
@@ -408,6 +422,8 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       contentType: undefined,
       expected: UNDECODABLE_TERMINAL,
       terminalReason: UNDECODABLE_TERMINAL_REASON,
+      reqCompleteTerminals: ["200_NON_SSE"],
+      reqCompleteReason: NON_SSE_REQ_COMPLETE_REASON,
       because:
         "a 2xx without content-type makes no SSE claim, so it is not SSE (fail-closed)",
     },
@@ -417,6 +433,8 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       contentType: "text/event-stream",
       expected: DELIVERED_EMPTY_STREAM,
       terminalReason: DELIVERED_EMPTY_STREAM_REASON,
+      reqCompleteTerminals: [],
+      reqCompleteReason: DELIVERED_REQ_COMPLETE_REASON,
       because:
         "the 2xx filter is the range 200-299, as the official SDK's response.ok: the browser EventSource's 200-only rule binds the head the gateway sends its own client, not the upstream head it consumes as a fetch client",
     },
@@ -426,6 +444,8 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       contentType: "text/event-stream",
       expected: UNDECODABLE_TERMINAL,
       terminalReason: UNDECODABLE_TERMINAL_REASON,
+      reqCompleteTerminals: ["UPSTREAM_EOF_BEFORE_FIRST_FRAME"],
+      reqCompleteReason: BODYLESS_REQ_COMPLETE_REASON,
       because:
         "a 2xx status that cannot carry a body can never carry a frame: it is the end-of-body-before-the-first-frame terminal, known at the head",
     },
@@ -435,12 +455,33 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
       contentType: "text/event-stream",
       expected: UNDECODABLE_TERMINAL,
       terminalReason: UNDECODABLE_TERMINAL_REASON,
+      reqCompleteTerminals: ["UPSTREAM_EOF_BEFORE_FIRST_FRAME"],
+      reqCompleteReason: BODYLESS_REQ_COMPLETE_REASON,
       because:
         "a 2xx status that cannot carry a body can never carry a frame: it is the end-of-body-before-the-first-frame terminal, known at the head",
     },
+    {
+      status: 204,
+      head: "application/json and a status that cannot carry a body",
+      contentType: "application/json",
+      expected: UNDECODABLE_TERMINAL,
+      terminalReason: UNDECODABLE_TERMINAL_REASON,
+      reqCompleteTerminals: ["200_NON_SSE"],
+      reqCompleteReason: NON_SSE_REQ_COMPLETE_REASON,
+      because:
+        "the media type is read before the body: a 2xx head that is not SSE is 200_NON_SSE even when its status cannot carry a body",
+    },
   ])(
     "$status with $head → $expected.label",
-    async ({ status, contentType, expected, because, terminalReason }) => {
+    async ({
+      status,
+      contentType,
+      expected,
+      because,
+      terminalReason,
+      reqCompleteTerminals,
+      reqCompleteReason,
+    }) => {
       const upstream = await holdOpenUpstream(
         status,
         contentType === undefined ? {} : { "content-type": contentType },
@@ -450,10 +491,12 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
         apiKey: "gateway-key",
         baseURL: `http://127.0.0.1:${upstream.port}`,
       });
+      const capture = makeLogCapture();
       const violations: string[] = [];
       const { breaker, recorded } = recordingBreaker();
       const app = await buildProxyApp({
         breaker,
+        logger: capture.logger,
         streamingEnabled: true,
         upstreamBuffered: bufferedTripwire(violations).seam,
         upstreamStreaming: client.streaming,
@@ -509,6 +552,13 @@ describe("streaming flag ON: a 2xx head is SSE only by its media type", () => {
             terminalReason,
           ).toStrictEqual(expected);
         }
+
+        // A third question with its own reason: which end the operator reads
+        // on the request-complete line, apart from what the client was told.
+        expect(
+          capture.byEvent("req_complete").map((log) => log["terminal"]),
+          reqCompleteReason,
+        ).toStrictEqual(reqCompleteTerminals);
       } finally {
         await app.close();
         await upstream.close();

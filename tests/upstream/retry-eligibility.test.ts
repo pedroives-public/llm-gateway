@@ -79,7 +79,7 @@ describe("isRetryEligible", () => {
     },
     {
       name: "undecodable 2xx body — not retryable",
-      outcome: { kind: "undecodable" },
+      outcome: { kind: "undecodable", undecodable_kind: "unparsable_body" },
       eligible: false,
     },
     {

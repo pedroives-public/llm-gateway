@@ -73,7 +73,13 @@ describe("openai buffered client", () => {
       async (baseURL) => {
         const client = createOpenAIClient({ apiKey: "k", baseURL });
         const outcome = await client.buffered(reqBody, freshSignal(), silentLog);
-        expect(outcome).toEqual({ kind: "undecodable" });
+        expect(
+          outcome,
+          "a 200 whose body is not JSON reaches the buffered recognizer as the unparsable_body fact, never as a fact about the head",
+        ).toEqual({
+          kind: "undecodable",
+          undecodable_kind: "unparsable_body",
+        });
       },
     );
   });
