@@ -210,6 +210,7 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           gateway_overhead_ms: durationMs,
           attempts: 0,
           retry_disposition: "ineligible",
+          terminal: "FAST_FAIL",
         });
 
         reply.code(status).header("x-gateway-error-class", errorClass);

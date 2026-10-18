@@ -862,6 +862,155 @@ describe.each([
   },
 );
 
+// A loopback port with nothing listening: every connection attempt is refused
+// before a request byte leaves the socket.
+async function refusedPort(): Promise<number> {
+  const server = await listenEphemeral(http.createServer());
+  await server.close();
+  return server.port;
+}
+
+describe.each([
+  { transport: "stream: true", stream: true },
+  { transport: "stream: false", stream: false },
+])(
+  "streaming flag ON, $transport: req_complete names the pre-first-frame terminals no upstream answer decides",
+  ({ stream }) => {
+    it("ends as RETRY_EXHAUSTED when every attempt is refused before a request byte is sent", async () => {
+      const port = await refusedPort();
+      const client = createOpenAIClient({
+        apiKey: "gateway-key",
+        baseURL: `http://127.0.0.1:${port}`,
+      });
+      const capture = makeLogCapture();
+      const violations: string[] = [];
+      const { breaker, recorded } = recordingBreaker();
+      const app = await buildProxyApp({
+        breaker,
+        logger: capture.logger,
+        streamingEnabled: true,
+        upstreamBuffered: bufferedTripwire(violations, client.buffered).seam,
+        upstreamStreaming: client.streaming,
+      });
+
+      try {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: bearer() },
+          payload: { ...validBody, stream },
+        });
+
+        expect(violations).toStrictEqual([]);
+        expect(
+          {
+            status: res.statusCode,
+            errorClass: res.headers["x-gateway-error-class"],
+            body: res.json(),
+            votes: recorded,
+          },
+          "a network failure proven before the request was sent, on every attempt of the retry budget, is a 502 upstream-retry-exhausted with one FAILURE vote",
+        ).toStrictEqual({
+          status: 502,
+          errorClass: "upstream-retry-exhausted",
+          body: {
+            error: {
+              message: "upstream unavailable",
+              type: "server_error",
+              code: "upstream_unavailable",
+            },
+          },
+          votes: ["FAILURE"],
+        });
+        expect(
+          capture.byEvent("req_complete"),
+          "req_complete names the terminal, so an operator can tell an exhausted pre-send retry from a network failure after the request was sent",
+        ).toMatchObject([
+          {
+            status: 502,
+            error_class: "upstream-retry-exhausted",
+            stream,
+            attempts: 2,
+            retry_disposition: "attempted",
+            terminal: "RETRY_EXHAUSTED",
+          },
+        ]);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("ends as FAST_FAIL when the breaker refuses the request, before any attempt", async () => {
+      const capture = makeLogCapture();
+      const violations: string[] = [];
+      const recorded: ProbeOutcome[] = [];
+      const buffered = bufferedTripwire(violations);
+      const streaming = streamingTripwire(violations);
+      const app = await buildProxyApp({
+        breaker: {
+          tryAcquire: () => ({ kind: "FAST_FAIL" }),
+          recordResult: (outcome) => {
+            recorded.push(outcome);
+          },
+          getState: () => "OPEN",
+        },
+        logger: capture.logger,
+        streamingEnabled: true,
+        upstreamBuffered: buffered.seam,
+        upstreamStreaming: streaming.seam,
+      });
+
+      try {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: bearer() },
+          payload: { ...validBody, stream },
+        });
+
+        expect(violations).toStrictEqual([]);
+        expect(
+          {
+            status: res.statusCode,
+            errorClass: res.headers["x-gateway-error-class"],
+            body: res.json(),
+            upstreamCalls: buffered.calls() + streaming.calls(),
+            votes: recorded,
+          },
+          "a breaker that refuses the request answers 503 circuit_breaker_open without calling the upstream, and the refusal is not a vote",
+        ).toStrictEqual({
+          status: 503,
+          errorClass: "upstream-retry-exhausted",
+          body: {
+            error: {
+              message: "Service temporarily unavailable",
+              type: "service_unavailable",
+              code: "circuit_breaker_open",
+            },
+          },
+          upstreamCalls: 0,
+          votes: [],
+        });
+        expect(
+          capture.byEvent("req_complete"),
+          "req_complete names the terminal, so an operator can tell a breaker refusal from an exhausted retry, which shares its error class",
+        ).toMatchObject([
+          {
+            status: 503,
+            error_class: "upstream-retry-exhausted",
+            stream,
+            attempts: 0,
+            retry_disposition: "ineligible",
+            terminal: "FAST_FAIL",
+          },
+        ]);
+      } finally {
+        await app.close();
+      }
+    });
+  },
+);
+
 describe("streaming flag ON: the total-duration deadline bounds a stream: true request", () => {
   it("ends a silent upstream as TOTAL_TIMEOUT at the deadline, not at the 30-second non-streaming deadline", async () => {
     let calls = 0;

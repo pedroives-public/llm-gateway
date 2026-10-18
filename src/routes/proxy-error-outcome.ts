@@ -184,7 +184,9 @@ export function terminalForErrorOutcome(
       }
       return "UPSTREAM_OTHER_4XX";
     case "network_failed":
-      return outcome.pre_send_proven ? undefined : "NETWORK_FAILED_POST_SEND";
+      return outcome.pre_send_proven
+        ? "RETRY_EXHAUSTED"
+        : "NETWORK_FAILED_POST_SEND";
     case "undecodable":
       switch (outcome.undecodable_kind) {
         case "non_sse_head":
