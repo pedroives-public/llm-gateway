@@ -1011,6 +1011,146 @@ describe.each([
   },
 );
 
+describe("streaming flag ON, stream: true: the cost caps of the buffered body hold", () => {
+  // The output-token ceiling, literal: a stream: true body is bound by the same
+  // number as a buffered one.
+  const OUTPUT_TOKEN_CEILING = 16_384;
+
+  it.each([
+    {
+      field: "max_tokens above the ceiling",
+      extra: { max_tokens: OUTPUT_TOKEN_CEILING + 1 },
+      code: "max_tokens_too_large",
+    },
+    {
+      field: "max_completion_tokens above the ceiling",
+      extra: { max_completion_tokens: OUTPUT_TOKEN_CEILING + 1 },
+      code: "max_completion_tokens_too_large",
+    },
+    {
+      field: "a choice count above one",
+      extra: { n: 2 },
+      code: "n_not_supported",
+    },
+  ])(
+    "rejects $field with the buffered body's 400, before the breaker and the upstream",
+    async ({ extra, code }) => {
+      const capture = makeLogCapture();
+      const violations: string[] = [];
+      const { breaker, recorded } = recordingBreaker();
+      const buffered = bufferedTripwire(violations);
+      const streaming = streamingTripwire(violations);
+      const app = await buildProxyApp({
+        breaker,
+        logger: capture.logger,
+        streamingEnabled: true,
+        upstreamBuffered: buffered.seam,
+        upstreamStreaming: streaming.seam,
+      });
+
+      try {
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: bearer() },
+          payload: { ...validBody, stream: true, ...extra },
+        });
+
+        expect(violations).toStrictEqual([]);
+        expect(
+          {
+            status: res.statusCode,
+            errorClass: res.headers["x-gateway-error-class"],
+            code: (res.json() as { error?: { code?: unknown } }).error?.code,
+            upstreamCalls: buffered.calls() + streaming.calls(),
+            votes: recorded,
+          },
+          "a stream: true body that breaks a cost cap gets the same 400 and code as the identical buffered body, never reaches the upstream and never votes",
+        ).toStrictEqual({
+          status: 400,
+          errorClass: "client-fault",
+          code,
+          upstreamCalls: 0,
+          votes: [],
+        });
+        expect(
+          capture.logs.flatMap((log) => log.event ?? []),
+          "a cost-cap rejection logs one req_rejected and no request lifecycle: no req_start, no req_complete",
+        ).toStrictEqual(["req_rejected"]);
+        expect(
+          capture.byEvent("req_rejected")[0],
+          "a cost-cap rejection is told apart from a shape error by its reason",
+        ).toMatchObject({ reason: "cost_cap_exceeded" });
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it.each([
+    {
+      sent: "no output-token field",
+      extra: {},
+      forwarded: { max_tokens: OUTPUT_TOKEN_CEILING, max_completion_tokens: undefined },
+      because:
+        "a stream: true body that omits both output-token fields is forwarded with the ceiling injected, so omission never reaches the upstream uncapped",
+    },
+    {
+      sent: "max_tokens under the ceiling",
+      extra: { max_tokens: 100 },
+      forwarded: { max_tokens: 100, max_completion_tokens: undefined },
+      because: "a client's own max_tokens under the ceiling is forwarded as sent, never replaced",
+    },
+    {
+      sent: "only max_completion_tokens",
+      extra: { max_completion_tokens: 100 },
+      forwarded: { max_tokens: undefined, max_completion_tokens: 100 },
+      because:
+        "a client's own max_completion_tokens already bounds the output, so no max_tokens is injected beside it",
+    },
+  ])(
+    "forwards a stream: true body with $sent to the streaming upstream with the buffered body's output bound",
+    async ({ extra, forwarded, because }) => {
+      const violations: string[] = [];
+      const received: Record<string, unknown>[] = [];
+      const { breaker } = recordingBreaker();
+      const app = await buildProxyApp({
+        breaker,
+        streamingEnabled: true,
+        upstreamBuffered: bufferedTripwire(violations).seam,
+        upstreamStreaming: (body) => {
+          received.push({ ...(body as Record<string, unknown>) });
+          return Promise.resolve({
+            kind: "undecodable",
+            undecodable_kind: "non_sse_head",
+          });
+        },
+      });
+
+      try {
+        await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: bearer() },
+          payload: { ...validBody, stream: true, ...extra },
+        });
+
+        expect(violations).toStrictEqual([]);
+        expect(
+          received.map((body) => ({
+            stream: body["stream"],
+            max_tokens: body["max_tokens"],
+            max_completion_tokens: body["max_completion_tokens"],
+          })),
+          because,
+        ).toStrictEqual([{ stream: true, ...forwarded }]);
+      } finally {
+        await app.close();
+      }
+    },
+  );
+});
+
 describe("streaming flag ON: the total-duration deadline bounds a stream: true request", () => {
   it("ends a silent upstream as TOTAL_TIMEOUT at the deadline, not at the 30-second non-streaming deadline", async () => {
     let calls = 0;
