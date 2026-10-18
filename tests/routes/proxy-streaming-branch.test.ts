@@ -1029,6 +1029,85 @@ describe.each([
   },
 );
 
+// A gate whose every slot is taken: the gate's own capacity rules are pinned
+// by its tests; these cells pin what the request does when it is refused.
+const FULL_GATE = { tryAcquire: () => null };
+
+describe.each([
+  { transport: "stream: true", stream: true },
+  { transport: "stream: false", stream: false },
+])(
+  "streaming flag ON, $transport: an admission refusal ends before the request lifecycle",
+  ({ stream }) => {
+    it.each([
+      {
+        door: "before authentication",
+        gates: { admissionGatePre: FULL_GATE },
+      },
+      {
+        door: "after authentication",
+        gates: { admissionGatePost: FULL_GATE },
+      },
+    ])(
+      "answers 503 admission_full $door with no event, no vote and no upstream call",
+      async ({ gates }) => {
+        const capture = makeLogCapture();
+        const violations: string[] = [];
+        const { breaker, recorded } = recordingBreaker();
+        const buffered = bufferedTripwire(violations);
+        const streaming = streamingTripwire(violations);
+        const app = await buildProxyApp({
+          breaker,
+          logger: capture.logger,
+          streamingEnabled: true,
+          upstreamBuffered: buffered.seam,
+          upstreamStreaming: streaming.seam,
+          ...gates,
+        });
+
+        try {
+          const res = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            headers: { authorization: bearer() },
+            payload: { ...validBody, stream },
+          });
+
+          expect(violations).toStrictEqual([]);
+          expect(
+            {
+              status: res.statusCode,
+              errorClass: res.headers["x-gateway-error-class"],
+              body: res.json(),
+              upstreamCalls: buffered.calls() + streaming.calls(),
+              votes: recorded,
+            },
+            "a full admission gate answers 503 admission_full in the service_unavailable lane, with no error class, before the breaker or the upstream is asked",
+          ).toStrictEqual({
+            status: 503,
+            errorClass: undefined,
+            body: {
+              error: {
+                message: "Service temporarily unavailable",
+                type: "service_unavailable",
+                code: "admission_full",
+              },
+            },
+            upstreamCalls: 0,
+            votes: [],
+          });
+          expect(
+            capture.logs.flatMap((log) => log.event ?? []),
+            "an admission refusal happens before the handler: it emits no event at all, not even req_start",
+          ).toStrictEqual([]);
+        } finally {
+          await app.close();
+        }
+      },
+    );
+  },
+);
+
 describe("streaming flag ON, stream: false: req_complete names a network failure after the request was sent", () => {
   it("ends as NETWORK_FAILED_POST_SEND when the connection is destroyed after the head, during the buffered body read", async () => {
     const upstream = await resettingUpstream(200, {

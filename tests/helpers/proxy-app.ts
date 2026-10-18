@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { buildApp } from "../../src/app.js";
 import { proxyRoute, type ProxyRouteOptions } from "../../src/routes/proxy.js";
 import type { DrizzleClient } from "../../src/db/client.js";
+import type { AdmissionGate } from "../../src/reliability/admission-gate.js";
 import { fakeAuthDb } from "./fake-auth-db.js";
 
 // buildApp with only the proxy route registered — the wiring every proxy test
@@ -14,11 +15,15 @@ export async function buildProxyApp(
   opts: ProxyRouteOptions & {
     db?: DrizzleClient;
     logger?: boolean | Record<string, unknown>;
+    admissionGatePre?: AdmissionGate;
+    admissionGatePost?: AdmissionGate;
   },
 ): Promise<FastifyInstance> {
   return buildApp({
     logger: opts.logger ?? false,
     db: opts.db ?? fakeAuthDb(randomUUID()),
+    admissionGatePre: opts.admissionGatePre,
+    admissionGatePost: opts.admissionGatePost,
     registerProtected: async (scope) => {
       await scope.register(proxyRoute, {
         breaker: opts.breaker,
