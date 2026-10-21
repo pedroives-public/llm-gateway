@@ -2901,3 +2901,274 @@ describe("streaming flag ON: the terminating-frame-first path ends without waiti
     }
   });
 });
+
+// After the first frame the loop forwards every frame's original bytes until a
+// terminal. The JSON payloads below carry spaces on purpose: a gateway that
+// parsed and re-serialized a frame would drop them, so byte equality is what
+// proves the forwarding is verbatim.
+const CONTENT_FRAMES =
+  'data: {"id": "c1", "choices": [{"delta": {"content": "Hel"}}]}\n\n' +
+  'data: {"id": "c1", "choices": [{"delta": {"content": "lo"}}]}\n\n' +
+  'data: {"id": "c1", "choices": [{"delta": {}, "finish_reason": "stop"}]}\n\n';
+const ONE_CONTENT_FRAME =
+  'data: {"id": "c1", "choices": [{"delta": {"content": "Hel"}}]}\n\n';
+
+// The same loopback measurement as RESET_AFTER_HEAD_MS: 50 ms lets the bytes
+// already written reach the gateway before the connection dies (inferred for
+// body bytes from the head measurement of 2026-10-07).
+const RESET_AFTER_FRAMES_MS = RESET_AFTER_HEAD_MS;
+
+// A fake upstream that sends an SSE head and the given frames, then destroys
+// the connection without ending the body: after the first frame, the gateway's
+// next read rejects with a transport error.
+async function framesThenResetUpstream(frames: string): Promise<FakeUpstream> {
+  const server = http.createServer((req, res) => {
+    res.on("error", () => {});
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(frames);
+      setTimeout(() => res.destroy(), RESET_AFTER_FRAMES_MS);
+    });
+  });
+  const { port, close } = await listenEphemeral(server);
+  return {
+    port,
+    close: async () => {
+      server.closeAllConnections();
+      await close();
+    },
+  };
+}
+
+async function streamThrough(upstream: FakeUpstream) {
+  const client = createOpenAIClient({
+    apiKey: "gateway-key",
+    baseURL: `http://127.0.0.1:${upstream.port}`,
+  });
+  const capture = makeLogCapture();
+  const violations: string[] = [];
+  const { breaker, recorded } = recordingBreaker();
+  const app = await buildProxyApp({
+    breaker,
+    logger: capture.logger,
+    streamingEnabled: true,
+    upstreamBuffered: bufferedTripwire(violations).seam,
+    upstreamStreaming: client.streaming,
+  });
+
+  // A response that never ends leaves inject pending: the deadline turns that
+  // absence into a RED that names the missing end.
+  const res = await withinDeadline(
+    app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: { authorization: bearer() },
+      payload: { ...validBody, stream: true },
+    }),
+    UPSTREAM_CLOSE_DEADLINE_MS,
+    "the stream never ended: after the first frame the loop must read every frame until a terminal and end the response",
+  );
+
+  return { app, res, capture, violations, recorded };
+}
+
+describe("streaming flag ON: the loop forwards every frame verbatim and ends at the terminating frame", () => {
+  it("answers 200 SSE whose body is the upstream's bytes, with one first-token line, one DONE stream_done and one SUCCESS vote", async () => {
+    const upstream = await endingUpstream(
+      200,
+      { "content-type": "text/event-stream" },
+      CONTENT_FRAMES + "data: [DONE]\n\n",
+    );
+    const t = await streamThrough(upstream);
+
+    try {
+      expect(t.violations).toStrictEqual([]);
+      expect(
+        t.res.statusCode,
+        "a stream that reaches the upstream's terminating frame keeps the 200 of its commit",
+      ).toBe(200);
+      expect(
+        t.res.headers["content-type"],
+        "the commit writes the SSE head: content-type exactly text/event-stream",
+      ).toBe("text/event-stream");
+      expect(
+        t.res.rawPayload,
+        "every frame is forwarded byte-for-byte, the terminating frame included: the gateway never re-serializes a frame",
+      ).toStrictEqual(Buffer.from(CONTENT_FRAMES + "data: [DONE]\n\n", "utf8"));
+      expect(
+        t.capture.logs.flatMap((log) => log.event ?? []),
+        "a delivered stream logs req_start, one stream_first_token at the first frame and one stream_done at its end, and nothing else",
+      ).toStrictEqual(["req_start", "stream_first_token", "stream_done"]);
+      expect(
+        t.capture.byEvent("stream_done")[0],
+        "the terminal event is the clean completion: completed true, terminal DONE, no error class, one attempt",
+      ).toMatchObject({
+        completed: true,
+        terminal: "DONE",
+        error_class: null,
+        attempts: 1,
+      });
+      expect(
+        t.recorded,
+        "the breaker votes once, at the end of the stream: SUCCESS, the only vote a clean completion casts",
+      ).toStrictEqual(["SUCCESS"]);
+    } finally {
+      await t.app.close();
+      await upstream.close();
+    }
+  });
+});
+
+describe("streaming flag ON: an upstream that stops without its terminating frame ends with one sentinel", () => {
+  it.each([
+    {
+      terminal: "UPSTREAM_DEATH",
+      scene: "the connection resets after a forwarded frame",
+      start: () => framesThenResetUpstream(ONE_CONTENT_FRAME),
+      sentinel:
+        'data: {"error": {"message": "stream interrupted", "type": "upstream_error", "code": "stream_aborted"}, "gateway": {"terminal": "UPSTREAM_DEATH"}}\n\n',
+      payload: {
+        error: {
+          message: "stream interrupted",
+          type: "upstream_error",
+          code: "stream_aborted",
+        },
+        gateway: { terminal: "UPSTREAM_DEATH" },
+      },
+      errorClass: "gateway-fault",
+      rule: "a transport error after the first frame is UPSTREAM_DEATH, classed by the shared classifier: a reset after the send carries no proof of non-execution, so gateway-fault",
+    },
+    {
+      terminal: "EOF_WITHOUT_DONE",
+      scene: "the body ends cleanly after a forwarded frame, with no terminating frame",
+      start: () =>
+        endingUpstream(
+          200,
+          { "content-type": "text/event-stream" },
+          ONE_CONTENT_FRAME,
+        ),
+      sentinel:
+        'data: {"error": {"message": "stream ended without completion", "type": "upstream_error", "code": "stream_truncated"}, "gateway": {"terminal": "EOF_WITHOUT_DONE"}}\n\n',
+      payload: {
+        error: {
+          message: "stream ended without completion",
+          type: "upstream_error",
+          code: "stream_truncated",
+        },
+        gateway: { terminal: "EOF_WITHOUT_DONE" },
+      },
+      errorClass: "upstream-fault",
+      rule: "an EOF is never the terminating frame: a clean close without [DONE] is EOF_WITHOUT_DONE, upstream-fault, the same class as the end of a body before the first frame",
+    },
+    {
+      terminal: "EOF_WITHOUT_DONE",
+      scene: "the body ends in the middle of a frame, after a forwarded frame",
+      start: () =>
+        endingUpstream(
+          200,
+          { "content-type": "text/event-stream" },
+          ONE_CONTENT_FRAME + 'data: {"id": "c1", "choices": [{"delta": {"content": "w',
+        ),
+      sentinel:
+        'data: {"error": {"message": "stream ended without completion", "type": "upstream_error", "code": "stream_truncated"}, "gateway": {"terminal": "EOF_WITHOUT_DONE"}}\n\n',
+      payload: {
+        error: {
+          message: "stream ended without completion",
+          type: "upstream_error",
+          code: "stream_truncated",
+        },
+        gateway: { terminal: "EOF_WITHOUT_DONE" },
+      },
+      errorClass: "upstream-fault",
+      rule: "a close in the middle of a frame is EOF_WITHOUT_DONE too, upstream-fault: the partial bytes never formed a frame, so they are never forwarded",
+    },
+    {
+      terminal: "PARSER_BUFFER_CAP",
+      scene: "bytes pass the frame buffer cap without forming a frame, after a forwarded frame",
+      start: () =>
+        holdOpenUpstream(
+          200,
+          { "content-type": "text/event-stream" },
+          ONE_CONTENT_FRAME + `data: ${"x".repeat(PARSER_BUFFER_CAP + 1)}`,
+        ),
+      sentinel:
+        'data: {"error": {"message": "stream frame could not be decoded", "type": "upstream_error", "code": "upstream_decode_error"}, "gateway": {"terminal": "PARSER_BUFFER_CAP"}}\n\n',
+      payload: {
+        error: {
+          message: "stream frame could not be decoded",
+          type: "upstream_error",
+          code: "upstream_decode_error",
+        },
+        gateway: { terminal: "PARSER_BUFFER_CAP" },
+      },
+      errorClass: "upstream-fault",
+      rule: "bytes that pass the frame buffer cap after the first frame end as PARSER_BUFFER_CAP, upstream-fault, the same class as the cap before the first frame; none of the buffered bytes are forwarded",
+    },
+  ])(
+    "$terminal: $scene",
+    async ({ terminal, start, sentinel, payload, errorClass, rule }) => {
+      const upstream = await start();
+      const t = await streamThrough(upstream);
+
+      try {
+        expect(t.violations).toStrictEqual([]);
+        expect(
+          t.res.statusCode,
+          `${terminal}: an abnormal end after the commit keeps the 200; the status never changes retroactively`,
+        ).toBe(200);
+
+        // The terminal event first: a gateway that picked the wrong terminal
+        // fails here, naming the row's rule, before the body checks that
+        // would only name the missing sentinel.
+        expect(
+          t.capture.byEvent("stream_done"),
+          `${terminal}: exactly one terminal event`,
+        ).toHaveLength(1);
+        expect(t.capture.byEvent("stream_done")[0], rule).toMatchObject({
+          completed: false,
+          terminal,
+          error_class: errorClass,
+        });
+
+        expect(
+          t.res.body.startsWith(ONE_CONTENT_FRAME),
+          `${terminal}: the forwarded frame comes first, unaltered`,
+        ).toBe(true);
+
+        const rest = t.res.body.slice(ONE_CONTENT_FRAME.length);
+        expect(
+          rest.startsWith("data: ") && rest.endsWith("\n\n"),
+          `${terminal}: after the forwarded frame the body holds exactly one gateway frame, the sentinel`,
+        ).toBe(true);
+
+        // A payload that is not JSON must fail the assertion below with its
+        // sentence, not throw a bare SyntaxError that names no rule.
+        let sentinelPayload: unknown;
+        try {
+          sentinelPayload = JSON.parse(
+            rest.slice("data: ".length, -"\n\n".length),
+          );
+        } catch {
+          sentinelPayload = rest;
+        }
+        expect(
+          sentinelPayload,
+          `${terminal}: the sentinel carries that terminal's row of the sentinel vocabulary and names the terminal in its gateway object`,
+        ).toStrictEqual(payload);
+        expect(
+          t.res.rawPayload,
+          `${terminal}: the body is the forwarded frame followed by the sentinel in the byte form of the spec's wire example, and nothing else`,
+        ).toStrictEqual(Buffer.from(ONE_CONTENT_FRAME + sentinel, "utf8"));
+
+        expect(
+          t.recorded,
+          `${terminal}: every terminal after the first frame other than DONE votes INCONCLUSIVE, exactly once`,
+        ).toStrictEqual(["INCONCLUSIVE"]);
+      } finally {
+        await t.app.close();
+        await upstream.close();
+      }
+    },
+  );
+});
