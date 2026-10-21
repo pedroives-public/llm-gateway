@@ -9,7 +9,11 @@ import { bearer } from "../helpers/fake-auth-db.js";
 import { stubBreaker } from "../helpers/breaker-stubs.js";
 import { listenEphemeral } from "../helpers/ephemeral-server.js";
 import { buildProxyApp } from "../helpers/proxy-app.js";
-import { makeLogCapture } from "../log-capture.js";
+import { makeLogCapture, type LogCapture } from "../log-capture.js";
+import {
+  createAdmissionGate,
+  type AdmissionGate,
+} from "../../src/reliability/admission-gate.js";
 import {
   UPSTREAM_CLOSE_DEADLINE_MS,
   bufferedTripwire,
@@ -2753,6 +2757,147 @@ describe("streaming flag ON: a first data frame that is the terminating frame is
     } finally {
       await app.close();
       await upstream.close();
+    }
+  });
+});
+
+describe("streaming flag ON: the terminating-frame-first path ends without waiting for the upstream cancel", () => {
+  // Polling interval while the cell waits for a log line: short enough that
+  // the wait costs nothing against the deadline, long enough not to spin.
+  const LOG_POLL_MS = 5;
+
+  // A fake accepted stream whose only bytes are the terminating frame and
+  // whose cancel() never settles: any step of the route that waits for the
+  // cancel waits forever, so the cell sees that wait as a missing event.
+  function doneFirstStreamWithStuckCancel(): {
+    stream: AcceptedStream;
+    cancelCalled: () => boolean;
+  } {
+    let cancelCalled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+      },
+      pull() {
+        return new Promise<void>(() => {});
+      },
+      cancel() {
+        cancelCalled = true;
+        return new Promise<void>(() => {});
+      },
+    });
+
+    return {
+      stream: { kind: "accepted_stream", status: 200, reader: body.getReader() },
+      cancelCalled: () => cancelCalled,
+    };
+  }
+
+  // A one-slot POST_AUTH gate that reports whether its slot came back.
+  function observedPostGate(): {
+    gate: AdmissionGate;
+    released: () => boolean;
+  } {
+    const inner = createAdmissionGate(1);
+    let released = false;
+
+    return {
+      gate: {
+        tryAcquire() {
+          const release = inner.tryAcquire();
+          if (release === null) {
+            return null;
+          }
+          return () => {
+            release();
+            released = true;
+          };
+        },
+      },
+      released: () => released,
+    };
+  }
+
+  async function untilLogged(
+    capture: LogCapture,
+    event: string,
+    stopped: () => boolean,
+  ): Promise<void> {
+    while (capture.byEvent(event).length === 0 && !stopped()) {
+      await new Promise((resolve) => setTimeout(resolve, LOG_POLL_MS));
+    }
+  }
+
+  it("emits one DONE stream_done, votes SUCCESS once and releases the admission slot while the body's cancel never settles", async () => {
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+    const post = observedPostGate();
+    let fake: ReturnType<typeof doneFirstStreamWithStuckCancel> | undefined;
+    let waiting = true;
+    const app = await buildProxyApp({
+      breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      admissionGatePost: post.gate,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: () => {
+        fake = doneFirstStreamWithStuckCancel();
+        return Promise.resolve(fake.stream);
+      },
+    });
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: bearer() },
+        payload: { ...validBody, stream: true },
+      });
+
+      expect(violations).toStrictEqual([]);
+      expect(
+        res.statusCode,
+        "the terminating frame as the first data frame commits a 200 stream",
+      ).toBe(200);
+      expect(
+        res.headers["content-type"],
+        "the commit writes the SSE head: content-type text/event-stream",
+      ).toBe("text/event-stream");
+      expect(
+        res.body,
+        "the response carries the upstream's original terminating bytes and ends, whether or not the cancel settles",
+      ).toBe("data: [DONE]\n\n");
+
+      await withinDeadline(
+        untilLogged(capture, "stream_done", () => !waiting),
+        UPSTREAM_CLOSE_DEADLINE_MS,
+        "the terminal event does not wait for the upstream cancel: with the body's cancel() never settling, no stream_done was emitted before the deadline",
+      );
+
+      expect(
+        fake?.cancelCalled(),
+        "the post-loop starts the body reader's cancel even after DONE",
+      ).toBe(true);
+      expect(
+        capture.byEvent("stream_done"),
+        "exactly one terminal event, emitted without the cancel settling",
+      ).toHaveLength(1);
+      expect(
+        capture.byEvent("stream_done")[0],
+        "the terminal event is the clean completion: completed true, terminal DONE",
+      ).toMatchObject({ completed: true, terminal: "DONE" });
+      expect(
+        recorded,
+        "the breaker result is recorded exactly once, as SUCCESS, without the cancel settling",
+      ).toStrictEqual(["SUCCESS"]);
+      expect(
+        post.released(),
+        "the admission slot is released without the cancel settling",
+      ).toBe(true);
+    } finally {
+      waiting = false;
+      await app.close();
     }
   });
 });
