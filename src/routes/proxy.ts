@@ -23,7 +23,6 @@ import {
   type AttemptResult,
   type StreamingAdapter,
   cancelStream,
-  type AcceptedStream,
 } from "../upstream/stream.js";
 import {
   createSseFrameReader,
@@ -44,7 +43,11 @@ import {
   terminalForErrorOutcome,
 } from "./proxy-error-outcome.js";
 import { sendProxyError } from "./proxy-error-handler.js";
-import { finishDone } from "./proxy-streaming-post-loop.js";
+import {
+  runPostLoop,
+  type PostLoopContext,
+} from "./proxy-streaming-post-loop.js";
+import { forwardUntilTerminal } from "./proxy-streaming-loop.js";
 
 const WALL_CLOCK_MS = 30_000;
 const BODY_LIMIT_BYTES = 262_144;
@@ -315,10 +318,9 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           });
         }
 
-        let acceptedStream: AcceptedStream | undefined;
         if (isAcceptedStream(outcome)) {
-          acceptedStream = outcome;
-          const nextFrame = createSseFrameReader(acceptedStream.reader);
+          const stream = outcome;
+          const nextFrame = createSseFrameReader(stream.reader);
           let firstFrame: SseFrame | undefined;
           let readError: ErrorOutcome | undefined;
 
@@ -334,8 +336,8 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               terminalDecided = true;
 
               return finishTotalTimeout({
-                acceptedStream,
-                outcome: acceptedStream,
+                acceptedStream: stream,
+                outcome: stream,
                 attempts,
                 requestStartedAt,
                 upstreamDurationMs,
@@ -358,11 +360,7 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               try {
                 opts.breaker.recordResult("INCONCLUSIVE");
               } finally {
-                await cancelStream(
-                  acceptedStream.reader,
-                  upstreamLog,
-                  "proxy_route",
-                );
+                await cancelStream(stream.reader, upstreamLog, "proxy_route");
               }
 
               const terminalDurationMs = Date.now() - requestStartedAt;
@@ -382,7 +380,7 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
                 gateway_overhead_ms: terminalGatewayOverheadMs,
                 retry_disposition: deriveRetryDisposition(
                   attempts,
-                  acceptedStream,
+                  stream,
                   timeout.signal,
                 ),
                 terminal: "UNRECOGNIZED_REJECTION",
@@ -393,8 +391,8 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           }
 
           const faultContext: FirstFrameFaultContext = {
-            acceptedStream,
-            outcome: acceptedStream,
+            acceptedStream: stream,
+            outcome: stream,
             attempts,
             requestStartedAt,
             upstreamDurationMs,
@@ -403,6 +401,19 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
             signal: timeout.signal,
             upstreamLog,
             breaker: opts.breaker,
+          };
+
+          const postLoop: PostLoopContext = {
+            log: request.log,
+            reqId: request.reqId,
+            requestStartedAt,
+            upstreamDurationMs,
+            attempts,
+            clearDeadline: () => timeout.clear(),
+            breaker: opts.breaker,
+            releaseSlot: request.releaseSlot,
+            reader: stream.reader,
+            upstreamLog,
           };
 
           if (isTotalTimeout(request.body.stream, deadlineAt, timeout.signal)) {
@@ -449,17 +460,11 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               reply.raw.write(firstFrame.bytes);
               reply.raw.end();
 
-              finishDone({
-                log: request.log,
-                reqId: request.reqId,
-                requestStartedAt,
-                upstreamDurationMs,
-                attempts,
-                clearDeadline: () => timeout.clear(),
-                recordSuccess: () => opts.breaker.recordResult("SUCCESS"),
-                releaseSlot: request.releaseSlot,
-                reader: acceptedStream.reader,
-                upstreamLog,
+              runPostLoop(postLoop, {
+                terminal: "DONE",
+                breakerOutcome: "SUCCESS",
+                completed: true,
+                errorClass: null,
               });
 
               return;
@@ -477,6 +482,19 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               req_id: request.reqId,
               ttft_ms: Date.now() - attemptStartedAt,
               was_cold_start: wasCold,
+            });
+
+            await forwardUntilTerminal({
+              nextFrame,
+              raw: reply.raw,
+              signal: timeout.signal,
+              log: request.log,
+              reqId: request.reqId,
+              upstreamLog,
+              decideTerminal: () => {
+                terminalDecided = true;
+              },
+              postLoop,
             });
 
             return;
