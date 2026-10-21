@@ -10,7 +10,6 @@ import {
   emitOperationalAlert,
   alertFor,
   type MinLogger,
-  emitStreamDone,
   emitStreamFirstToken,
 } from "../observability/events.js";
 import { retry } from "../reliability/retry.js";
@@ -45,6 +44,7 @@ import {
   terminalForErrorOutcome,
 } from "./proxy-error-outcome.js";
 import { sendProxyError } from "./proxy-error-handler.js";
+import { finishDone } from "./proxy-streaming-post-loop.js";
 
 const WALL_CLOCK_MS = 30_000;
 const BODY_LIMIT_BYTES = 262_144;
@@ -449,31 +449,17 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               reply.raw.write(firstFrame.bytes);
               reply.raw.end();
 
-              try {
-                opts.breaker.recordResult("SUCCESS");
-              } finally {
-                await cancelStream(
-                  acceptedStream.reader,
-                  upstreamLog,
-                  "proxy_route",
-                );
-              }
-
-              const terminalDurationMs = Date.now() - requestStartedAt;
-              const terminalGatewayOverheadMs = Math.max(
-                0,
-                terminalDurationMs - upstreamDurationMs,
-              );
-
-              emitStreamDone(request.log, {
-                req_id: request.reqId,
-                completed: true,
-                terminal: "DONE",
-                total_duration_ms: terminalDurationMs,
-                upstream_duration_ms: upstreamDurationMs,
-                gateway_overhead_ms: terminalGatewayOverheadMs,
+              finishDone({
+                log: request.log,
+                reqId: request.reqId,
+                requestStartedAt,
+                upstreamDurationMs,
                 attempts,
-                error_class: null,
+                clearDeadline: () => timeout.clear(),
+                recordSuccess: () => opts.breaker.recordResult("SUCCESS"),
+                releaseSlot: request.releaseSlot,
+                reader: acceptedStream.reader,
+                upstreamLog,
               });
 
               return;
