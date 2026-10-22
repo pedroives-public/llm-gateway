@@ -3236,3 +3236,256 @@ describe("streaming flag ON: after the first-frame line, the total-duration dead
     }
   });
 });
+
+describe("streaming flag ON: after the first-frame line, a frame read past the deadline is never written", () => {
+  const TOTAL_TIMEOUT_SENTINEL =
+    'data: {"error": {"message": "stream exceeded the total duration limit", "type": "gateway_timeout", "code": "total_timeout_exceeded"}, "gateway": {"terminal": "TOTAL_TIMEOUT"}}\n\n';
+  const LATE_FRAME =
+    'data: {"id": "c1", "choices": [{"delta": {"content": "late"}}]}\n\n';
+  const PAST_DEADLINE_MS = 280_000 + 200;
+
+  // A fake accepted stream for a loop that never waits: with a zero high-water
+  // mark the body pulls only while a read is pending, so once `armed`, the
+  // loop's next read itself moves the clock past the deadline and finds the
+  // late frame ready. No macrotask runs between that read and the loop's
+  // decision, so the deadline's timer never gets a turn.
+  function busyAcceptedStream(
+    signal: AbortSignal,
+    pastDeadline: () => void,
+  ): {
+    stream: AcceptedStream;
+    release: (text: string) => void;
+    arm: () => void;
+    lateFrameServed: () => boolean;
+  } {
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let armed = false;
+    let served = false;
+
+    const body = new ReadableStream<Uint8Array>(
+      {
+        start(c) {
+          controller = c;
+          signal.addEventListener(
+            "abort",
+            () => {
+              c.error(signal.reason);
+            },
+            { once: true },
+          );
+        },
+        pull(c) {
+          if (armed && !served) {
+            served = true;
+            pastDeadline();
+            c.enqueue(new TextEncoder().encode(LATE_FRAME));
+          }
+        },
+      },
+      { highWaterMark: 0 },
+    );
+
+    return {
+      stream: { kind: "accepted_stream", status: 200, reader: body.getReader() },
+      release: (text) => {
+        if (controller === undefined) {
+          throw new Error("the fake stream has not started");
+        }
+        controller.enqueue(new TextEncoder().encode(text));
+      },
+      arm: () => {
+        armed = true;
+      },
+      lateFrameServed: () => served,
+    };
+  }
+
+  async function buildBusyApp(pastDeadline: () => void) {
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+    let busy: ReturnType<typeof busyAcceptedStream> | undefined;
+    let receivedSignal: AbortSignal | undefined;
+
+    const app = await buildProxyApp({
+      breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: (_body, signal) => {
+        receivedSignal = signal;
+        busy = busyAcceptedStream(signal, pastDeadline);
+        return Promise.resolve(busy.stream);
+      },
+    });
+
+    return {
+      app,
+      capture,
+      violations,
+      recorded,
+      signal: () => receivedSignal,
+      busy: () => {
+        if (busy === undefined) {
+          throw new Error("the streaming upstream was not called");
+        }
+        return busy;
+      },
+    };
+  }
+
+  it.each([
+    {
+      // Parked in the frame read; the deadline's timer is late and has not
+      // run; a frame arrives after the deadline.
+      scene: "the loop is parked, the timer late",
+      busy: false,
+    },
+    {
+      // A busy loop reads a frame after the deadline: the frame is ready at
+      // the read itself, so the deadline's timer never gets a turn.
+      scene: "a busy loop, the timer starved",
+      busy: true,
+    },
+  ])("ends as TOTAL_TIMEOUT without writing the frame when $scene", async ({ busy }) => {
+    let startedAt = 0;
+    const stepPastDeadline = () => {
+      vi.setSystemTime(startedAt + PAST_DEADLINE_MS);
+    };
+    const parked = await buildDrivenApp();
+    const busyApp = await buildBusyApp(stepPastDeadline);
+    const t = busy ? busyApp : parked;
+    const release = (text: string) =>
+      busy ? busyApp.busy().release(text) : parked.driven().release(text);
+    vi.useFakeTimers();
+    startedAt = Date.now();
+
+    try {
+      const req = inject(t.app);
+      let ended = false;
+      void req.then(() => {
+        ended = true;
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      if (busy) {
+        busyApp.busy().arm();
+      }
+      release(ONE_CONTENT_FRAME);
+      await vi.advanceTimersByTimeAsync(0);
+
+      if (!busy) {
+        stepPastDeadline();
+        release(LATE_FRAME);
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      expect(t.violations).toStrictEqual([]);
+      expect(
+        t.capture.byEvent("stream_first_token"),
+        "the scene's premise: the first frame crossed the first-frame line before the deadline",
+      ).toHaveLength(1);
+      if (busy) {
+        expect(
+          busyApp.busy().lateFrameServed(),
+          "the scene's premise: the loop's own read moved the clock past the deadline and found the late frame ready",
+        ).toBe(true);
+      }
+      expect(
+        t.signal()?.aborted,
+        "the scene's premise: the deadline's timer has not run, so the request signal is not aborted and only the deadline value can decide",
+      ).toBe(false);
+
+      expect(
+        ended,
+        "the deadline is a value read at the decision point: after the frame read, because a reading taken before it ages inside the wait for the frame, and before the write; a frame read past it ends the stream, so the response has ended",
+      ).toBe(true);
+
+      const res = await req;
+      expect(
+        t.capture.byEvent("stream_done"),
+        "exactly one terminal event",
+      ).toHaveLength(1);
+      expect(
+        t.capture.byEvent("stream_done")[0],
+        "a frame read past the deadline does not outrank it: the terminal is TOTAL_TIMEOUT, gateway-fault",
+      ).toMatchObject({
+        completed: false,
+        terminal: "TOTAL_TIMEOUT",
+        error_class: "gateway-fault",
+      });
+      expect(
+        res.rawPayload,
+        "the frame read past the deadline is never written: the body is the forwarded first frame, then exactly one TOTAL_TIMEOUT sentinel",
+      ).toStrictEqual(
+        Buffer.from(ONE_CONTENT_FRAME + TOTAL_TIMEOUT_SENTINEL, "utf8"),
+      );
+      expect(
+        t.recorded,
+        "the deadline votes INCONCLUSIVE, exactly once",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+    } finally {
+      vi.useRealTimers();
+      await parked.app.close();
+      await busyApp.app.close();
+    }
+  });
+
+  it("ends as TOTAL_TIMEOUT without writing a frame read before the deadline's own abort, with the clock stepped back behind the deadline", async () => {
+    const t = await buildDrivenApp();
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+
+    try {
+      const req = inject(t.app);
+      await vi.advanceTimersByTimeAsync(1_000);
+      t.driven().release(ONE_CONTENT_FRAME);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(t.violations).toStrictEqual([]);
+      expect(
+        t.capture.byEvent("stream_first_token"),
+        "the scene's premise: the first frame crossed the first-frame line before the deadline",
+      ).toHaveLength(1);
+
+      // The late frame resolves the pending read; in the same tick, before
+      // the loop's continuation runs, the deadline's timer fires and aborts,
+      // and the clock steps back behind the deadline value.
+      t.driven().release(LATE_FRAME);
+      vi.advanceTimersByTime(279_000);
+      expect(
+        t.signal()?.reason?.kind,
+        "the scene's premise: the deadline's timer has fired and aborted the request signal with its own reason",
+      ).toBe("total_timeout");
+      vi.setSystemTime(startedAt + 279_990);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const res = await req;
+      expect(
+        t.capture.byEvent("stream_done"),
+        "exactly one terminal event",
+      ).toHaveLength(1);
+      expect(
+        t.capture.byEvent("stream_done")[0],
+        "the deadline's own abort ends the stream as TOTAL_TIMEOUT, gateway-fault",
+      ).toMatchObject({
+        completed: false,
+        terminal: "TOTAL_TIMEOUT",
+        error_class: "gateway-fault",
+      });
+      expect(
+        res.rawPayload,
+        "the deadline's own abort is the deadline at every wake, even with the clock stepped back: a frame read before the abort is never written",
+      ).toStrictEqual(
+        Buffer.from(ONE_CONTENT_FRAME + TOTAL_TIMEOUT_SENTINEL, "utf8"),
+      );
+      expect(
+        t.recorded,
+        "the deadline votes INCONCLUSIVE, exactly once",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+    } finally {
+      vi.useRealTimers();
+      await t.app.close();
+    }
+  });
+});
