@@ -3812,3 +3812,81 @@ describe("streaming flag ON: after the first-frame line, the deadline decides wh
     }
   });
 });
+
+describe("streaming flag ON: after the first-frame line, a rejection the classifier does not recognize ends the stream", () => {
+  const UNRECOGNIZED_REJECTION_SENTINEL =
+    'data: {"error": {"message": "stream ended by an internal error", "type": "internal_error", "code": "unhandled_exception"}, "gateway": {"terminal": "UNRECOGNIZED_REJECTION"}}\n\n';
+  const NO_CAUSE_REJECTION = new Error("the upstream read failed");
+
+  it("ends as UNRECOGNIZED_REJECTION when the read rejects with an error that carries no cause code and no cause message", async () => {
+    const t = await buildDrivenApp();
+    vi.useFakeTimers();
+
+    try {
+      const req = inject(t.app);
+      let ended = false;
+      void req.then(() => {
+        ended = true;
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      t.driven().release(ONE_CONTENT_FRAME);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(t.violations).toStrictEqual([]);
+      expect(
+        t.capture.byEvent("stream_first_token"),
+        "the scene's premise: the first frame crossed the first-frame line",
+      ).toHaveLength(1);
+
+      t.driven().fail(NO_CAUSE_REJECTION);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        t.signal()?.aborted,
+        "the scene's premise: nothing aborted the request signal, so checks (1) and (2) do not hold",
+      ).toBe(false);
+
+      expect(
+        ended,
+        "a rejection the classifier does not recognize still ends the stream: the loop never leaves without a terminal",
+      ).toBe(true);
+      const res = await req;
+      expect(
+        res.statusCode,
+        "the status is sealed at 200 once the first frame is written",
+      ).toBe(200);
+      expect(
+        t.capture.byEvent("stream_done"),
+        "exactly one terminal event",
+      ).toHaveLength(1);
+      expect(
+        t.capture.byEvent("stream_done")[0],
+        "a rejection the classifier does not recognize is never an upstream death: UNRECOGNIZED_REJECTION, gateway-fault",
+      ).toMatchObject({
+        completed: false,
+        terminal: "UNRECOGNIZED_REJECTION",
+        error_class: "gateway-fault",
+      });
+      expect(
+        res.rawPayload,
+        "the stream ends with the forwarded frame and exactly one UNRECOGNIZED_REJECTION sentinel in the byte form of the spec's wire example",
+      ).toStrictEqual(
+        Buffer.from(ONE_CONTENT_FRAME + UNRECOGNIZED_REJECTION_SENTINEL, "utf8"),
+      );
+      expect(
+        t.recorded,
+        "an unrecognized rejection votes INCONCLUSIVE, exactly once",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+      expect(
+        t.capture.logs
+          .filter((log) => typeof log.level === "number" && log.level >= 40)
+          .map((log) => ({ msg: log.msg, abort_identity: log.abort_identity })),
+        "the classifier's boundary line is logged once, and nothing is thrown to the framework's error handler: no other warning or error line",
+      ).toStrictEqual([
+        { msg: "Unrecognized upstream rejection", abort_identity: false },
+      ]);
+    } finally {
+      vi.useRealTimers();
+      await t.app.close();
+    }
+  });
+});

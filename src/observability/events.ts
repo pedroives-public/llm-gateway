@@ -72,7 +72,8 @@ export type StreamDoneTerminal =
   | "UPSTREAM_DEATH"
   | "EOF_WITHOUT_DONE"
   | "PARSER_BUFFER_CAP"
-  | "CLIENT_GONE";
+  | "CLIENT_GONE"
+  | "UNRECOGNIZED_REJECTION";
 
 type OperationalAlertLine = {
   event: "operational_alert";
