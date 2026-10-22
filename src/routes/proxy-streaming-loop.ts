@@ -16,10 +16,11 @@ type SentinelTerminal =
   | "TOTAL_TIMEOUT"
   | "UPSTREAM_DEATH"
   | "EOF_WITHOUT_DONE"
-  | "PARSER_BUFFER_CAP";
+  | "PARSER_BUFFER_CAP"
+  | "UNRECOGNIZED_REJECTION";
 
 type SentinelVocabularyRow = {
-  type: "gateway_timeout" | "upstream_error";
+  type: "gateway_timeout" | "upstream_error" | "internal_error";
   code: string;
   message: string;
 };
@@ -44,6 +45,11 @@ const SENTINEL_VOCABULARY: Record<SentinelTerminal, SentinelVocabularyRow> = {
     type: "upstream_error",
     code: "upstream_decode_error",
     message: "stream frame could not be decoded",
+  },
+  UNRECOGNIZED_REJECTION: {
+    type: "internal_error",
+    code: "unhandled_exception",
+    message: "stream ended by an internal error",
   },
 };
 
@@ -130,7 +136,15 @@ export async function forwardUntilTerminal(
         return;
       }
 
-      const readError = resolveRejection(error, signal, upstreamLog);
+      let readError: ReturnType<typeof resolveRejection>;
+
+      try {
+        readError = resolveRejection(error, signal, upstreamLog);
+      } catch {
+        endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+        return;
+      }
+
       const classification = classify(readError, log, reqId);
       endWithSentinel("UPSTREAM_DEATH", classification.error_class);
       return;
