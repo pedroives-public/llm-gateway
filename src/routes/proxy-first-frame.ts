@@ -26,15 +26,27 @@ import {
 // settled stays in the handler: it is closure state of the request, set
 // before any of these run.
 
+// The deadline condition holds when the re-read clock has reached the
+// deadline, or when its own timer has already aborted: that timer aborts only
+// after reading the deadline value, so the reason on the signal records a
+// reading that held, even if the clock has stepped back since. The reason is
+// read, not the aborted flag, because the flag cannot tell the deadline's
+// abort from any other cause that comes to share this signal.
+export function deadlineConditionHolds(
+  deadlineAt: number,
+  signal: AbortSignal,
+): boolean {
+  return Date.now() >= deadlineAt || signal.reason?.kind === "total_timeout";
+}
+
+// Before the fork both transports share the request's deadline value; only on
+// a streaming request is that value the total-duration deadline.
 export function isTotalTimeout(
   stream: boolean | undefined,
   deadlineAt: number,
   signal: AbortSignal,
 ): boolean {
-  return (
-    stream === true &&
-    (Date.now() >= deadlineAt || signal.reason?.kind === "total_timeout")
-  );
+  return stream === true && deadlineConditionHolds(deadlineAt, signal);
 }
 
 type TotalTimeoutContext = {

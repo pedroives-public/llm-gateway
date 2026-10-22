@@ -10,7 +10,7 @@ import {
   runPostLoop,
   type PostLoopContext,
 } from "./proxy-streaming-post-loop.js";
-import { isTotalTimeout } from "./proxy-first-frame.js";
+import { deadlineConditionHolds } from "./proxy-first-frame.js";
 
 type SentinelTerminal =
   | "TOTAL_TIMEOUT"
@@ -106,7 +106,7 @@ export async function forwardUntilTerminal(
     try {
       frame = await nextFrame();
     } catch (error) {
-      if (isTotalTimeout(true, deadlineAt, signal)) {
+      if (deadlineConditionHolds(deadlineAt, signal)) {
         endWithSentinel("TOTAL_TIMEOUT", "gateway-fault");
         return;
       }
@@ -117,7 +117,7 @@ export async function forwardUntilTerminal(
       return;
     }
 
-    if (isTotalTimeout(true, deadlineAt, signal)) {
+    if (deadlineConditionHolds(deadlineAt, signal)) {
       endWithSentinel("TOTAL_TIMEOUT", "gateway-fault");
       return;
     }

@@ -292,12 +292,6 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         const durationMs = Date.now() - requestStartedAt;
         const gatewayOverheadMs = Math.max(0, durationMs - upstreamDurationMs);
 
-        // The deadline ends the request when the re-read clock has reached it, or
-        // when its own timer has already aborted: that timer aborts only after
-        // reading the deadline value, so the reason on the signal records a
-        // reading that held, even if the clock has stepped back since. The
-        // reason is read, not the aborted flag, because the flag cannot tell the
-        // deadline's abort from any other cause that comes to share this signal.
         if (isTotalTimeout(request.body.stream, deadlineAt, timeout.signal)) {
           terminalDecided = true;
 
