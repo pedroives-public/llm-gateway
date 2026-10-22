@@ -100,12 +100,31 @@ export async function forwardUntilTerminal(
     });
   };
 
+  // The client left: write nothing, not even end(), because no receiver
+  // exists. The level form is read because a destroy is visible at once,
+  // before the departure observer's close event arrives.
+  const finishClientGone = (): void => {
+    decideTerminal();
+
+    runPostLoop(postLoop, {
+      terminal: "CLIENT_GONE",
+      breakerOutcome: "INCONCLUSIVE",
+      completed: false,
+      errorClass: "client-fault",
+    });
+  };
+
   while (true) {
     let frame: SseFrame;
 
     try {
       frame = await nextFrame();
     } catch (error) {
+      if (raw.destroyed) {
+        finishClientGone();
+        return;
+      }
+
       if (deadlineConditionHolds(deadlineAt, signal)) {
         endWithSentinel("TOTAL_TIMEOUT", "gateway-fault");
         return;
@@ -114,6 +133,11 @@ export async function forwardUntilTerminal(
       const readError = resolveRejection(error, signal, upstreamLog);
       const classification = classify(readError, log, reqId);
       endWithSentinel("UPSTREAM_DEATH", classification.error_class);
+      return;
+    }
+
+    if (raw.destroyed) {
+      finishClientGone();
       return;
     }
 

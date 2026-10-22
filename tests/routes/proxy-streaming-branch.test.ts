@@ -2260,7 +2260,8 @@ describe("streaming flag ON: the total-duration deadline spans the first-frame w
 });
 
 // A fake accepted stream the cell drives by hand. `release(text)` makes the
-// pending read resolve with those bytes; an abort of the request signal
+// pending read resolve with those bytes, `end()` closes the body and
+// `fail(error)` errors it; an abort of the request signal
 // errors the stream with the signal's reason, as an undici body does
 // (measured 2026-10-01); and with `holdCancel` the body's cancel() stays
 // pending until the cell calls `finishCancel()`, so a terminal's cleanup can
@@ -2271,6 +2272,8 @@ function drivenAcceptedStream(
 ): {
   stream: AcceptedStream;
   release: (text: string) => void;
+  end: () => void;
+  fail: (error: unknown) => void;
   finishCancel: () => void;
   cancelCalled: () => boolean;
 } {
@@ -2308,6 +2311,18 @@ function drivenAcceptedStream(
         throw new Error("the fake stream has not started");
       }
       controller.enqueue(new TextEncoder().encode(text));
+    },
+    end: () => {
+      if (controller === undefined) {
+        throw new Error("the fake stream has not started");
+      }
+      controller.close();
+    },
+    fail: (error) => {
+      if (controller === undefined) {
+        throw new Error("the fake stream has not started");
+      }
+      controller.error(error);
     },
     finishCancel: () => {
       if (finishCancel === undefined) {
@@ -3484,6 +3499,179 @@ describe("streaming flag ON: after the first-frame line, a frame read past the d
         "the deadline votes INCONCLUSIVE, exactly once",
       ).toStrictEqual(["INCONCLUSIVE"]);
     } finally {
+      vi.useRealTimers();
+      await t.app.close();
+    }
+  });
+});
+
+describe("streaming flag ON: after the first-frame line, a destroyed response is a client departure at every wake", () => {
+  const LATE_FRAME =
+    'data: {"id": "c1", "choices": [{"delta": {"content": "late"}}]}\n\n';
+  const RESET_AFTER_DEPARTURE = Object.assign(new TypeError("terminated"), {
+    cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+  });
+  const DEPARTURE_RULE = "a destroyed response is a client departure at this wake";
+  const JURISDICTION_RULE =
+    "the departure outranks the deadline by jurisdiction over the write";
+
+  type Wake = {
+    driven: ReturnType<typeof drivenAcceptedStream>;
+    startedAt: number;
+  };
+
+  it.each([
+    {
+      wake: "an ordinary frame",
+      act: ({ driven }: Wake) => driven.release(LATE_FRAME),
+      rule: `${DEPARTURE_RULE}: an ordinary frame is never forwarded and the loop does not continue`,
+    },
+    {
+      wake: "the terminating frame",
+      act: ({ driven }: Wake) => driven.release("data: [DONE]\n\n"),
+      rule: `${DEPARTURE_RULE}: the terminating frame never makes it DONE`,
+    },
+    {
+      wake: "an eof between frames",
+      act: ({ driven }: Wake) => driven.end(),
+      rule: `${DEPARTURE_RULE}: an eof between frames never makes it EOF_WITHOUT_DONE`,
+    },
+    {
+      wake: "an eof inside a frame",
+      act: ({ driven }: Wake) => {
+        driven.release('data: {"id": "c1", "choices": [{"delta": {"content": "w');
+        driven.end();
+      },
+      rule: `${DEPARTURE_RULE}: an eof inside a frame never makes it EOF_WITHOUT_DONE`,
+    },
+    {
+      wake: "the reader's cap",
+      act: ({ driven }: Wake) =>
+        driven.release(`data: ${"x".repeat(PARSER_BUFFER_CAP + 1)}`),
+      rule: `${DEPARTURE_RULE}: the reader's cap never makes it PARSER_BUFFER_CAP`,
+    },
+    {
+      wake: "a transport error",
+      act: ({ driven }: Wake) => driven.fail(RESET_AFTER_DEPARTURE),
+      rule: `${DEPARTURE_RULE}: a transport error never makes it UPSTREAM_DEATH`,
+    },
+    {
+      wake: "the deadline's timer firing",
+      act: () => vi.advanceTimersByTime(280_000),
+      rule: `${JURISDICTION_RULE}: the deadline's own abort never makes it TOTAL_TIMEOUT`,
+    },
+    {
+      wake: "a frame past the deadline, timer late",
+      act: ({ driven, startedAt }: Wake) => {
+        vi.setSystemTime(startedAt + 280_200);
+        driven.release(LATE_FRAME);
+      },
+      rule: `${JURISDICTION_RULE}: a frame read past the deadline never makes it TOTAL_TIMEOUT`,
+    },
+  ])("ends as CLIENT_GONE and writes nothing when the loop wakes with $wake", async ({ act, rule }) => {
+    const t = await buildDrivenApp();
+    let serverResponse: http.ServerResponse | undefined;
+    t.app.server.on("request", (_req, res: http.ServerResponse) => {
+      serverResponse = res;
+    });
+    await t.app.listen({ port: 0, host: "127.0.0.1" });
+    const address = t.app.server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("the app did not listen on a TCP port");
+    }
+    // setImmediate stays real so the test can yield to socket I/O while the
+    // clock and the deadline's timer are fake.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const startedAt = Date.now();
+    const yieldToIo = () =>
+      new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    const until = async (ready: () => boolean, sentence: string) => {
+      for (let turn = 0; turn < 200; turn += 1) {
+        if (ready()) return;
+        await yieldToIo();
+      }
+      throw new Error(sentence);
+    };
+
+    const body = JSON.stringify({ ...validBody, stream: true });
+    const client = http.request({
+      host: "127.0.0.1",
+      port: address.port,
+      method: "POST",
+      path: "/v1/chat/completions",
+      headers: {
+        authorization: bearer(),
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(body)),
+      },
+    });
+    client.on("error", () => {});
+    const received: Buffer[] = [];
+    client.on("response", (res) => {
+      res.on("data", (chunk: Buffer) => {
+        received.push(chunk);
+      });
+    });
+
+    try {
+      client.end(body);
+      await until(
+        () => t.calls() === 1,
+        "the scene's premise: the streaming upstream was called once and answered with an accepted head",
+      );
+      t.driven().release(ONE_CONTENT_FRAME);
+      await until(
+        () =>
+          Buffer.concat(received).length >=
+          Buffer.byteLength(ONE_CONTENT_FRAME),
+        "the scene's premise: the client received the first frame, so the stream crossed the first-frame line",
+      );
+      expect(t.violations).toStrictEqual([]);
+
+      client.destroy();
+      await until(
+        () => serverResponse?.destroyed === true,
+        "the scene's premise: the server saw the client leave, so the response is destroyed before the loop wakes",
+      );
+      const response = serverResponse;
+      if (response === undefined) {
+        throw new Error("the server response was not captured");
+      }
+      expect(
+        t.signal()?.aborted,
+        "the scene's premise: nothing has aborted the request signal yet, so only the destroyed response can decide",
+      ).toBe(false);
+      const writes = vi.spyOn(response, "write");
+      const ends = vi.spyOn(response, "end");
+
+      act({ driven: t.driven(), startedAt });
+      await until(() => t.capture.byEvent("stream_done").length > 0, rule);
+
+      expect(
+        t.capture.byEvent("stream_done"),
+        "exactly one terminal event",
+      ).toHaveLength(1);
+      expect(t.capture.byEvent("stream_done")[0], rule).toMatchObject({
+        completed: false,
+        terminal: "CLIENT_GONE",
+        error_class: "client-fault",
+      });
+      expect(
+        writes.mock.calls,
+        "nothing is written after the departure: no frame, no sentinel",
+      ).toStrictEqual([]);
+      expect(
+        ends.mock.calls,
+        "nothing is written after the departure: the response is already destroyed, so the gateway does not end it either",
+      ).toStrictEqual([]);
+      expect(
+        t.recorded,
+        "the departure votes INCONCLUSIVE, exactly once",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+    } finally {
+      client.destroy();
       vi.useRealTimers();
       await t.app.close();
     }
