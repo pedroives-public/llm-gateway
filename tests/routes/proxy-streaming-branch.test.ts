@@ -3677,3 +3677,138 @@ describe("streaming flag ON: after the first-frame line, a destroyed response is
     }
   });
 });
+
+describe("streaming flag ON: after the first-frame line, the deadline decides whatever woke the loop", () => {
+  const TOTAL_TIMEOUT_SENTINEL =
+    'data: {"error": {"message": "stream exceeded the total duration limit", "type": "gateway_timeout", "code": "total_timeout_exceeded"}, "gateway": {"terminal": "TOTAL_TIMEOUT"}}\n\n';
+  const LATE_FRAME =
+    'data: {"id": "c1", "choices": [{"delta": {"content": "late"}}]}\n\n';
+  const RESET_PAST_DEADLINE = Object.assign(new TypeError("terminated"), {
+    cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+  });
+  const WAKE_RULE =
+    "nothing that arrives through the wake outranks the deadline";
+
+  type Scene = {
+    driven: ReturnType<typeof drivenAcceptedStream>;
+    startedAt: number;
+  };
+
+  it.each([
+    {
+      row: "a reset past the deadline",
+      act: ({ driven, startedAt }: Scene) => {
+        vi.setSystemTime(startedAt + 280_200);
+        driven.fail(RESET_PAST_DEADLINE);
+      },
+      aborted: false,
+      noCauseLine: true,
+      rule: `${WAKE_RULE}: a reset read past the deadline is TOTAL_TIMEOUT, never UPSTREAM_DEATH`,
+    },
+    {
+      row: "[DONE] past the deadline",
+      act: ({ driven, startedAt }: Scene) => {
+        vi.setSystemTime(startedAt + 280_200);
+        driven.release("data: [DONE]\n\n");
+      },
+      aborted: false,
+      noCauseLine: false,
+      rule: `${WAKE_RULE}: a terminating frame after the deadline is not forwarded and never makes it DONE`,
+    },
+    {
+      row: "the cap past the deadline",
+      act: ({ driven, startedAt }: Scene) => {
+        vi.setSystemTime(startedAt + 280_200);
+        driven.release(`data: ${"x".repeat(PARSER_BUFFER_CAP + 1)}`);
+      },
+      aborted: false,
+      noCauseLine: false,
+      rule: `${WAKE_RULE}: the reader's cap after the deadline is TOTAL_TIMEOUT with total_timeout_exceeded, never upstream_decode_error`,
+    },
+    {
+      row: "a frame exactly at the deadline",
+      act: ({ driven, startedAt }: Scene) => {
+        vi.setSystemTime(startedAt + 280_000);
+        driven.release(LATE_FRAME);
+      },
+      aborted: false,
+      noCauseLine: false,
+      rule: "`>=` at the boundary: an ordinary frame read with the clock exactly at the deadline is not written",
+    },
+    {
+      row: "the abort, clock stepped back",
+      act: ({ startedAt }: Scene) => {
+        vi.advanceTimersByTime(279_000);
+        vi.setSystemTime(startedAt + 279_995);
+      },
+      aborted: true,
+      noCauseLine: false,
+      rule: "the deadline's own abort is the deadline, even with the clock stepped back",
+    },
+  ])("ends as TOTAL_TIMEOUT with one sentinel when the loop wakes with $row", async ({ act, aborted, noCauseLine, rule }) => {
+    const t = await buildDrivenApp();
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+
+    try {
+      const req = inject(t.app);
+      let ended = false;
+      void req.then(() => {
+        ended = true;
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      t.driven().release(ONE_CONTENT_FRAME);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(t.violations).toStrictEqual([]);
+      expect(
+        t.capture.byEvent("stream_first_token"),
+        "the scene's premise: the first frame crossed the first-frame line before the deadline",
+      ).toHaveLength(1);
+
+      act({ driven: t.driven(), startedAt });
+      expect(
+        t.signal()?.reason?.kind,
+        aborted
+          ? "the scene's premise: the deadline's timer fired on time and aborted the request signal with its own reason"
+          : "the scene's premise: the deadline's timer is late and has not run, so only the deadline value can decide",
+      ).toBe(aborted ? "total_timeout" : undefined);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(ended, rule).toBe(true);
+      const res = await req;
+      expect(
+        res.statusCode,
+        "the status is sealed at 200 once the first frame is written",
+      ).toBe(200);
+      expect(
+        t.capture.byEvent("stream_done"),
+        "exactly one terminal event",
+      ).toHaveLength(1);
+      expect(t.capture.byEvent("stream_done")[0], rule).toMatchObject({
+        completed: false,
+        terminal: "TOTAL_TIMEOUT",
+        error_class: "gateway-fault",
+      });
+      expect(res.rawPayload, rule).toStrictEqual(
+        Buffer.from(ONE_CONTENT_FRAME + TOTAL_TIMEOUT_SENTINEL, "utf8"),
+      );
+      expect(
+        t.recorded,
+        "the deadline votes INCONCLUSIVE, exactly once",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+      if (noCauseLine) {
+        // A net stated as a negation on purpose: the cause line is the
+        // classifier's footprint, and the classifier never runs once the
+        // deadline check holds.
+        expect(
+          t.capture.logs.filter((log) => "cause_code" in log),
+          "the classifier runs only after the deadline check: a deadline end logs no upstream cause",
+        ).toStrictEqual([]);
+      }
+    } finally {
+      vi.useRealTimers();
+      await t.app.close();
+    }
+  });
+});
