@@ -2259,6 +2259,112 @@ describe("streaming flag ON: the total-duration deadline spans the first-frame w
   });
 });
 
+// A fake accepted stream the cell drives by hand. `release(text)` makes the
+// pending read resolve with those bytes; an abort of the request signal
+// errors the stream with the signal's reason, as an undici body does
+// (measured 2026-10-01); and with `holdCancel` the body's cancel() stays
+// pending until the cell calls `finishCancel()`, so a terminal's cleanup can
+// be held open while the deadline fires.
+function drivenAcceptedStream(
+  signal: AbortSignal,
+  holdCancel = false,
+): {
+  stream: AcceptedStream;
+  release: (text: string) => void;
+  finishCancel: () => void;
+  cancelCalled: () => boolean;
+} {
+  let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let finishCancel: (() => void) | undefined;
+  const cancelHeld = new Promise<void>((resolve) => {
+    finishCancel = resolve;
+  });
+  let cancelCalled = false;
+
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+      signal.addEventListener(
+        "abort",
+        () => {
+          c.error(signal.reason);
+        },
+        { once: true },
+      );
+    },
+    pull() {
+      return new Promise<void>(() => {});
+    },
+    cancel() {
+      cancelCalled = true;
+      return holdCancel ? cancelHeld : Promise.resolve();
+    },
+  });
+
+  return {
+    stream: { kind: "accepted_stream", status: 200, reader: body.getReader() },
+    release: (text) => {
+      if (controller === undefined) {
+        throw new Error("the fake stream has not started");
+      }
+      controller.enqueue(new TextEncoder().encode(text));
+    },
+    finishCancel: () => {
+      if (finishCancel === undefined) {
+        throw new Error("the fake stream's cancel is not held");
+      }
+      finishCancel();
+    },
+    cancelCalled: () => cancelCalled,
+  };
+}
+
+async function buildDrivenApp(holdCancel = false) {
+  const capture = makeLogCapture();
+  const violations: string[] = [];
+  const { breaker, recorded } = recordingBreaker();
+  let driven: ReturnType<typeof drivenAcceptedStream> | undefined;
+  let receivedSignal: AbortSignal | undefined;
+  let calls = 0;
+
+  const app = await buildProxyApp({
+    breaker,
+    logger: capture.logger,
+    streamingEnabled: true,
+    upstreamBuffered: bufferedTripwire(violations).seam,
+    upstreamStreaming: (_body, signal) => {
+      calls += 1;
+      receivedSignal = signal;
+      driven = drivenAcceptedStream(signal, holdCancel);
+      return Promise.resolve(driven.stream);
+    },
+  });
+
+  return {
+    app,
+    capture,
+    violations,
+    recorded,
+    calls: () => calls,
+    signal: () => receivedSignal,
+    driven: () => {
+      if (driven === undefined) {
+        throw new Error("the streaming upstream was not called");
+      }
+      return driven;
+    },
+  };
+}
+
+function inject(app: Awaited<ReturnType<typeof buildProxyApp>>) {
+  return app.inject({
+    method: "POST",
+    url: "/v1/chat/completions",
+    headers: { authorization: bearer() },
+    payload: { ...validBody, stream: true },
+  });
+}
+
 describe("streaming flag ON: the first-frame line meets the total-duration deadline", () => {
   const TOTAL_TIMEOUT_BODY = {
     error: {
@@ -2269,112 +2375,6 @@ describe("streaming flag ON: the first-frame line meets the total-duration deadl
   };
   const JSON_FRAME = 'data: {"a":1}\n\n';
   const NOT_JSON_FRAME = "data: not-json\n\n";
-
-  // A fake accepted stream the cell drives by hand. `release(text)` makes the
-  // pending read resolve with those bytes; an abort of the request signal
-  // errors the stream with the signal's reason, as an undici body does
-  // (measured 2026-10-01); and with `holdCancel` the body's cancel() stays
-  // pending until the cell calls `finishCancel()`, so a terminal's cleanup can
-  // be held open while the deadline fires.
-  function drivenAcceptedStream(
-    signal: AbortSignal,
-    holdCancel = false,
-  ): {
-    stream: AcceptedStream;
-    release: (text: string) => void;
-    finishCancel: () => void;
-    cancelCalled: () => boolean;
-  } {
-    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-    let finishCancel: (() => void) | undefined;
-    const cancelHeld = new Promise<void>((resolve) => {
-      finishCancel = resolve;
-    });
-    let cancelCalled = false;
-
-    const body = new ReadableStream<Uint8Array>({
-      start(c) {
-        controller = c;
-        signal.addEventListener(
-          "abort",
-          () => {
-            c.error(signal.reason);
-          },
-          { once: true },
-        );
-      },
-      pull() {
-        return new Promise<void>(() => {});
-      },
-      cancel() {
-        cancelCalled = true;
-        return holdCancel ? cancelHeld : Promise.resolve();
-      },
-    });
-
-    return {
-      stream: { kind: "accepted_stream", status: 200, reader: body.getReader() },
-      release: (text) => {
-        if (controller === undefined) {
-          throw new Error("the fake stream has not started");
-        }
-        controller.enqueue(new TextEncoder().encode(text));
-      },
-      finishCancel: () => {
-        if (finishCancel === undefined) {
-          throw new Error("the fake stream's cancel is not held");
-        }
-        finishCancel();
-      },
-      cancelCalled: () => cancelCalled,
-    };
-  }
-
-  async function buildDrivenApp(holdCancel = false) {
-    const capture = makeLogCapture();
-    const violations: string[] = [];
-    const { breaker, recorded } = recordingBreaker();
-    let driven: ReturnType<typeof drivenAcceptedStream> | undefined;
-    let receivedSignal: AbortSignal | undefined;
-    let calls = 0;
-
-    const app = await buildProxyApp({
-      breaker,
-      logger: capture.logger,
-      streamingEnabled: true,
-      upstreamBuffered: bufferedTripwire(violations).seam,
-      upstreamStreaming: (_body, signal) => {
-        calls += 1;
-        receivedSignal = signal;
-        driven = drivenAcceptedStream(signal, holdCancel);
-        return Promise.resolve(driven.stream);
-      },
-    });
-
-    return {
-      app,
-      capture,
-      violations,
-      recorded,
-      calls: () => calls,
-      signal: () => receivedSignal,
-      driven: () => {
-        if (driven === undefined) {
-          throw new Error("the streaming upstream was not called");
-        }
-        return driven;
-      },
-    };
-  }
-
-  function inject(app: Awaited<ReturnType<typeof buildProxyApp>>) {
-    return app.inject({
-      method: "POST",
-      url: "/v1/chat/completions",
-      headers: { authorization: bearer() },
-      payload: { ...validBody, stream: true },
-    });
-  }
 
   it.each([
     {
