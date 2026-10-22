@@ -117,6 +117,11 @@ export async function forwardUntilTerminal(
       return;
     }
 
+    if (isTotalTimeout(true, deadlineAt, signal)) {
+      endWithSentinel("TOTAL_TIMEOUT", "gateway-fault");
+      return;
+    }
+
     if (frame.kind !== "frame") {
       const terminal =
         frame.kind === "cap" ? "PARSER_BUFFER_CAP" : "EOF_WITHOUT_DONE";
