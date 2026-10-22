@@ -3172,3 +3172,67 @@ describe("streaming flag ON: an upstream that stops without its terminating fram
     },
   );
 });
+
+describe("streaming flag ON: after the first-frame line, the total-duration deadline ends the stream inside it", () => {
+  const TOTAL_TIMEOUT_SENTINEL =
+    'data: {"error": {"message": "stream exceeded the total duration limit", "type": "gateway_timeout", "code": "total_timeout_exceeded"}, "gateway": {"terminal": "TOTAL_TIMEOUT"}}\n\n';
+
+  it("ends a committed stream as TOTAL_TIMEOUT when the deadline's timer fires on time with the loop parked in the frame read", async () => {
+    const t = await buildDrivenApp();
+    vi.useFakeTimers();
+
+    try {
+      const req = inject(t.app);
+      await vi.advanceTimersByTimeAsync(1_000);
+      t.driven().release(ONE_CONTENT_FRAME);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(t.violations).toStrictEqual([]);
+      expect(
+        t.capture.byEvent("stream_first_token"),
+        "the scene's premise: the first frame crossed the first-frame line, so the status is sealed at 200",
+      ).toHaveLength(1);
+      expect(
+        t.signal()?.aborted,
+        "the scene's premise: the deadline's timer has not fired, so the loop is parked in the next frame read",
+      ).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(279_000);
+      expect(
+        t.signal()?.reason?.kind,
+        "the scene's premise: the deadline's timer fired on time and aborted the request signal with its own reason",
+      ).toBe("total_timeout");
+
+      const res = await req;
+      expect(
+        res.statusCode,
+        "the status is sealed at 200 once the first frame is written: the deadline never changes it",
+      ).toBe(200);
+      expect(
+        t.capture.byEvent("stream_done"),
+        "exactly one terminal event",
+      ).toHaveLength(1);
+      expect(
+        t.capture.byEvent("stream_done")[0],
+        "after the first-frame line the deadline's own abort is TOTAL_TIMEOUT, decided before the rejection of the read is classified, never UPSTREAM_DEATH; gateway-fault, the class of the same deadline before the first frame",
+      ).toMatchObject({
+        completed: false,
+        terminal: "TOTAL_TIMEOUT",
+        error_class: "gateway-fault",
+      });
+      expect(
+        res.rawPayload,
+        "the deadline travels inside the stream: the forwarded frame, then exactly one TOTAL_TIMEOUT sentinel in the byte form of the spec's wire example, and never a fabricated terminating frame",
+      ).toStrictEqual(
+        Buffer.from(ONE_CONTENT_FRAME + TOTAL_TIMEOUT_SENTINEL, "utf8"),
+      );
+      expect(
+        t.recorded,
+        "no failure vote after the first-frame line: the deadline votes INCONCLUSIVE, exactly once",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+    } finally {
+      vi.useRealTimers();
+      await t.app.close();
+    }
+  });
+});

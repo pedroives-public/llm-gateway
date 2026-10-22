@@ -488,6 +488,7 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               nextFrame,
               raw: reply.raw,
               signal: timeout.signal,
+              deadlineAt,
               log: request.log,
               reqId: request.reqId,
               upstreamLog,
