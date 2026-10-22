@@ -10,19 +10,26 @@ import {
   runPostLoop,
   type PostLoopContext,
 } from "./proxy-streaming-post-loop.js";
+import { isTotalTimeout } from "./proxy-first-frame.js";
 
 type SentinelTerminal =
+  | "TOTAL_TIMEOUT"
   | "UPSTREAM_DEATH"
   | "EOF_WITHOUT_DONE"
   | "PARSER_BUFFER_CAP";
 
 type SentinelVocabularyRow = {
-  type: "upstream_error";
+  type: "gateway_timeout" | "upstream_error";
   code: string;
   message: string;
 };
 
 const SENTINEL_VOCABULARY: Record<SentinelTerminal, SentinelVocabularyRow> = {
+  TOTAL_TIMEOUT: {
+    type: "gateway_timeout",
+    code: "total_timeout_exceeded",
+    message: "stream exceeded the total duration limit",
+  },
   UPSTREAM_DEATH: {
     type: "upstream_error",
     code: "stream_aborted",
@@ -51,6 +58,7 @@ export interface ForwardingLoopOptions {
   nextFrame: () => Promise<SseFrame>;
   raw: ServerResponse;
   signal: AbortSignal;
+  deadlineAt: number;
   log: ClassifierLog;
   reqId: string;
   upstreamLog: Logger;
@@ -72,6 +80,7 @@ export async function forwardUntilTerminal(
     upstreamLog,
     decideTerminal,
     postLoop,
+    deadlineAt,
   } = options;
 
   const endWithSentinel = (
@@ -97,6 +106,11 @@ export async function forwardUntilTerminal(
     try {
       frame = await nextFrame();
     } catch (error) {
+      if (isTotalTimeout(true, deadlineAt, signal)) {
+        endWithSentinel("TOTAL_TIMEOUT", "gateway-fault");
+        return;
+      }
+
       const readError = resolveRejection(error, signal, upstreamLog);
       const classification = classify(readError, log, reqId);
       endWithSentinel("UPSTREAM_DEATH", classification.error_class);
