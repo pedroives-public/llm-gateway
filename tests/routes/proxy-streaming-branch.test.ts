@@ -3391,6 +3391,13 @@ describe("streaming flag ON: after the first-frame line, a frame read past the d
 
       if (!busy) {
         stepPastDeadline();
+        // Read before the late frame: once the loop decides, the terminal
+        // block aborts the signal itself, so only this reading tells the
+        // timer apart from the decision.
+        expect(
+          t.signal()?.aborted,
+          "the scene's premise: the deadline's timer has not run, so the request signal is not aborted and only the deadline value can decide",
+        ).toBe(false);
         release(LATE_FRAME);
         await vi.advanceTimersByTimeAsync(0);
       }
@@ -3407,9 +3414,9 @@ describe("streaming flag ON: after the first-frame line, a frame read past the d
         ).toBe(true);
       }
       expect(
-        t.signal()?.aborted,
-        "the scene's premise: the deadline's timer has not run, so the request signal is not aborted and only the deadline value can decide",
-      ).toBe(false);
+        t.signal()?.reason,
+        "a deadline decided from its value, with its timer not yet run, still drops the upstream: the terminal block aborts with total_timeout after deciding",
+      ).toEqual({ kind: "total_timeout" });
 
       expect(
         ended,
@@ -4141,6 +4148,103 @@ describe("streaming flag ON: after the first-frame line, a client that leaves wh
       expect(t.calls(), "the upstream is called once").toBe(1);
     } finally {
       client.destroy();
+      vi.useRealTimers();
+      await t.app.close();
+    }
+  });
+});
+
+describe("streaming flag ON: after the first-frame line, a terminal aborts the request signal only when it has an author in the funnel", () => {
+  const LATE_FRAME =
+    'data: {"id": "c1", "choices": [{"delta": {"content": "late"}}]}\n\n';
+  const RESET_AFTER_FIRST_FRAME = Object.assign(new TypeError("terminated"), {
+    cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+  });
+  const STEP3_RULE =
+    "a terminal with an author in the funnel aborts the request signal with its own cause after deciding it, which drops the upstream";
+  const NO_AUTHOR_RULE =
+    "a terminal decided from a settled read has no author in the funnel and never touches the signal";
+
+  type Scene = {
+    driven: ReturnType<typeof drivenAcceptedStream>;
+    startedAt: number;
+  };
+
+  it.each([
+    {
+      row: "the reader's cap",
+      act: ({ driven }: Scene) =>
+        driven.release(`data: ${"x".repeat(PARSER_BUFFER_CAP + 1)}`),
+      terminal: "PARSER_BUFFER_CAP",
+      reason: { kind: "parser_buffer_cap" },
+      rule: STEP3_RULE,
+    },
+    {
+      row: "a frame read past the deadline, the timer late",
+      act: ({ driven, startedAt }: Scene) => {
+        vi.setSystemTime(startedAt + 280_200);
+        driven.release(LATE_FRAME);
+      },
+      terminal: "TOTAL_TIMEOUT",
+      reason: { kind: "total_timeout" },
+      rule: `${STEP3_RULE}: a deadline read from the clock, with its timer not yet run, still drops the upstream`,
+    },
+    {
+      row: "an eof between frames",
+      act: ({ driven }: Scene) => driven.end(),
+      terminal: "EOF_WITHOUT_DONE",
+      reason: undefined,
+      rule: NO_AUTHOR_RULE,
+    },
+    {
+      row: "a transport error",
+      act: ({ driven }: Scene) => driven.fail(RESET_AFTER_FIRST_FRAME),
+      terminal: "UPSTREAM_DEATH",
+      reason: undefined,
+      rule: NO_AUTHOR_RULE,
+    },
+    {
+      row: "the terminating frame",
+      act: ({ driven }: Scene) => driven.release("data: [DONE]\n\n"),
+      terminal: "DONE",
+      reason: undefined,
+      rule: NO_AUTHOR_RULE,
+    },
+  ])("ends as $terminal and leaves the signal's reason as expected when the loop wakes with $row", async ({ act, terminal, reason, rule }) => {
+    const t = await buildDrivenApp();
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+
+    try {
+      const req = inject(t.app);
+      await vi.advanceTimersByTimeAsync(1_000);
+      t.driven().release(ONE_CONTENT_FRAME);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(t.violations).toStrictEqual([]);
+      expect(
+        t.capture.byEvent("stream_first_token"),
+        "the scene's premise: the first frame crossed the first-frame line",
+      ).toHaveLength(1);
+      expect(
+        t.signal()?.aborted,
+        "the scene's premise: nothing has aborted the request signal before the wake",
+      ).toBe(false);
+
+      act({ driven: t.driven(), startedAt });
+      await vi.advanceTimersByTimeAsync(0);
+      await req;
+
+      expect(
+        t.capture.byEvent("stream_done"),
+        "exactly one terminal event",
+      ).toHaveLength(1);
+      expect(
+        t.capture.byEvent("stream_done")[0]?.terminal,
+        "the scene's premise: the wake decides the row's terminal",
+      ).toBe(terminal);
+      expect(t.signal()?.reason, rule).toEqual(reason);
+    } finally {
       vi.useRealTimers();
       await t.app.close();
     }
