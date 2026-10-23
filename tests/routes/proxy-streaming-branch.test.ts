@@ -3728,27 +3728,14 @@ describe("streaming flag ON: after the first-frame line, a rejection the classif
 describe("streaming flag ON: after the first-frame line, a client that stops reading suspends the loop until it drains", () => {
   const TOTAL_TIMEOUT_SENTINEL =
     'data: {"error": {"message": "stream exceeded the total duration limit", "type": "gateway_timeout", "code": "total_timeout_exceeded"}, "gateway": {"terminal": "TOTAL_TIMEOUT"}}\n\n';
-  // Each fill frame stays well under the response's 16 KiB write high-water
-  // mark, so a write returns false because the client's buffers are full,
-  // never merely because one frame is large.
-  const FILL_FRAME = `data: {"id": "c1", "choices": [{"delta": {"content": "${"f".repeat(4_096)}"}}]}\n\n`;
+  const FILL_FRAME =
+    'data: {"id": "c1", "choices": [{"delta": {"content": "fill"}}]}\n\n';
   const HELD_FRAME =
     'data: {"id": "c1", "choices": [{"delta": {"content": "held"}}]}\n\n';
   const DONE_FRAME = "data: [DONE]\n\n";
-  // 64 frames of ~4 KiB per batch, at most 128 batches: the fill stops at
-  // ~32 MiB. A paused loopback client saturated after 768 to 832 frames
-  // (~3.0 to 3.3 MiB; measured 2026-10-23, nine scenes on Linux), so the bound
-  // is about ten times that, and a scene that never saturates fails on its
-  // premise.
-  const FILL_FRAMES_PER_BATCH = 64;
-  const MAX_FILL_BATCHES = 128;
-  // Turns of real socket I/O after a batch before saturation is read: a
-  // false return that the kernel absorbs drains within a few turns, a full
-  // client buffer does not.
+  // Turns of real socket I/O granted to the loop before an absence is read.
   const SETTLE_TURNS = 20;
   const RACE_TURNS = 200;
-  // Turns for the client to read the whole backlog once it resumes.
-  const RESUME_TURNS = 10_000;
   const WAKE_RULE =
     "the deadline's abort wakes the drain wait through the request signal";
   const SENTINEL_PATH_RULE =
@@ -3763,11 +3750,7 @@ describe("streaming flag ON: after the first-frame line, a client that stops rea
       await yieldToIo();
     }
   };
-  const until = async (
-    ready: () => boolean,
-    sentence: string,
-    bound: number,
-  ) => {
+  const until = async (ready: () => boolean, sentence: string, bound: number) => {
     for (let turn = 0; turn < bound; turn += 1) {
       if (ready()) return;
       await yieldToIo();
@@ -3782,9 +3765,14 @@ describe("streaming flag ON: after the first-frame line, a client that stops rea
     throw new Error("a write carried neither text nor bytes");
   };
 
-  // A real socket whose client takes the response head and then stops
-  // reading: the gateway's writes back up until a write returns false and no
-  // drain follows. A frame released after that point must stay unread.
+  // A real socket and a real response, with the backpressure driven by the
+  // scene: once the first frame is out, every write still reaches the socket
+  // but reports a full buffer, and only the test emits the drain. A paused
+  // client was used first, but its kernel buffers kept absorbing bytes for a
+  // while after the first false return (measured 2026-10-23: more than 1 MiB
+  // of queued frames drained during a loaded run), so a scene that waits for
+  // the kernel is not stable. The rule under test is the loop's answer to a
+  // false return and to a drain, not the size of the kernel's buffers.
   async function suspendedClient() {
     const t = await buildDrivenApp();
     let serverResponse: http.ServerResponse | undefined;
@@ -3845,37 +3833,31 @@ describe("streaming flag ON: after the first-frame line, a client that stops rea
         throw new Error("the server response was not captured");
       }
 
-      // Filling the client's buffers takes many drain-and-resume cycles, so a
-      // loop that never resumes after a drain stalls the fill with frames
-      // still unwritten; the write count tells that apart from a client whose
-      // buffers never fill.
-      const writes = vi.spyOn(response, "write");
-      let released = 0;
-      let saturated = false;
-      for (let batch = 0; batch < MAX_FILL_BATCHES && !saturated; batch += 1) {
-        for (let frame = 0; frame < FILL_FRAMES_PER_BATCH; frame += 1) {
-          t.driven().release(FILL_FRAME);
-        }
-        released += FILL_FRAMES_PER_BATCH;
-        await turns(SETTLE_TURNS);
-        saturated = response.writableNeedDrain;
-      }
-      if (!saturated) {
-        throw new Error(
-          writes.mock.calls.length < released
-            ? "the loop resumes on drain: frames released after the response drained were never forwarded"
-            : "the scene's premise: the client stopped reading, so a write returns false and no drain follows",
-        );
-      }
-
-      writes.mockClear();
+      const realWrite = response.write;
+      let bufferFull = true;
+      const writes = vi
+        .spyOn(response, "write")
+        .mockImplementation((...args: unknown[]): boolean => {
+          Reflect.apply(realWrite, response, args);
+          return !bufferFull;
+        });
       const ends = vi.spyOn(response, "end");
+
+      t.driven().release(FILL_FRAME);
+      await until(
+        () => writes.mock.calls.length === 1,
+        "the scene's premise: the loop forwards the next frame and is told the client's buffer is full",
+        RACE_TURNS,
+      );
       t.driven().release(HELD_FRAME);
       await turns(SETTLE_TURNS);
+      // The held frame left unwritten is the evidence that the loop waits:
+      // how it waits is the implementation's, so no listener is counted here.
       expect(
         writes.mock.calls.map(([chunk]) => asText(chunk)),
-        "the loop is suspended while the client's buffer is full: a frame that arrives meanwhile is not read ahead and written",
-      ).toStrictEqual([]);
+        "the loop is suspended while the client's buffer is full: a frame that arrives meanwhile is not read ahead and written before the drain",
+      ).toStrictEqual([FILL_FRAME]);
+      writes.mockClear();
 
       return {
         t,
@@ -3883,10 +3865,11 @@ describe("streaming flag ON: after the first-frame line, a client that stops rea
         writes,
         ends,
         startedAt,
-        released,
         received: () => Buffer.concat(received),
-        // An explicit pause() leaves the body paused when a 'data' listener
-        // is added later, so reading starts only with resume().
+        // The client starts reading and the buffer has room again, so the
+        // drain the scene emits wakes the loop. An explicit pause() leaves
+        // the body paused when a 'data' listener is added later, so reading
+        // starts only with resume().
         resume: () => {
           if (clientResponse === undefined) {
             throw new Error("the client has no response to read");
@@ -3895,6 +3878,8 @@ describe("streaming flag ON: after the first-frame line, a client that stops rea
             received.push(chunk);
           });
           clientResponse.resume();
+          bufferFull = false;
+          response.emit("drain");
         },
         close,
       };
@@ -3912,8 +3897,8 @@ describe("streaming flag ON: after the first-frame line, a client that stops rea
       await until(
         () =>
           s.writes.mock.calls.some(([chunk]) => asText(chunk) === HELD_FRAME),
-        "the loop resumes on drain: the frame held while the client's buffer was full is forwarded once the client reads",
-        RESUME_TURNS,
+        "the loop resumes on drain: the frame held while the client's buffer was full is forwarded once the client drains",
+        RACE_TURNS,
       );
       s.t.driven().release(DONE_FRAME);
       await until(
@@ -3923,16 +3908,13 @@ describe("streaming flag ON: after the first-frame line, a client that stops rea
       );
 
       const expected = Buffer.from(
-        ONE_CONTENT_FRAME +
-          FILL_FRAME.repeat(s.released) +
-          HELD_FRAME +
-          DONE_FRAME,
+        ONE_CONTENT_FRAME + FILL_FRAME + HELD_FRAME + DONE_FRAME,
         "utf8",
       );
       await until(
         () => s.received().length >= expected.length,
         "the client receives the whole stream once it reads",
-        RESUME_TURNS,
+        RACE_TURNS,
       );
       expect(
         s.t.capture.byEvent("stream_done"),
