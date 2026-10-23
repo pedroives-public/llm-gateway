@@ -17,6 +17,7 @@ import {
 } from "./proxy-streaming-post-loop.js";
 import { deadlineConditionHolds } from "./proxy-first-frame.js";
 import { extractCauseLog } from "../upstream/cause-log.js";
+import type { TotalDurationTimeout } from "../reliability/timeouts.js";
 
 type SentinelTerminal =
   | "TOTAL_TIMEOUT"
@@ -82,6 +83,7 @@ export interface ForwardingLoopOptions {
   upstreamLog: Logger;
   decideTerminal: () => void;
   postLoop: PostLoopContext;
+  abortForTerminalAfterDecision: TotalDurationTimeout["abortForTerminalAfterDecision"];
 }
 
 // After the first frame: forward every frame's original bytes until the
@@ -99,6 +101,7 @@ export async function forwardUntilTerminal(
     decideTerminal,
     postLoop,
     deadlineAt,
+    abortForTerminalAfterDecision,
   } = options;
 
   const endWithSentinel = (
@@ -124,6 +127,12 @@ export async function forwardUntilTerminal(
       );
     }
 
+    if (terminal === "TOTAL_TIMEOUT") {
+      abortForTerminalAfterDecision("total_timeout");
+    } else if (terminal === "PARSER_BUFFER_CAP") {
+      abortForTerminalAfterDecision("parser_buffer_cap");
+    }
+
     runPostLoop(postLoop, {
       terminal,
       breakerOutcome: "INCONCLUSIVE",
@@ -137,6 +146,7 @@ export async function forwardUntilTerminal(
   // before the departure observer's close event arrives.
   const finishClientGone = (): void => {
     decideTerminal();
+    abortForTerminalAfterDecision("client_gone");
 
     runPostLoop(postLoop, {
       terminal: "CLIENT_GONE",

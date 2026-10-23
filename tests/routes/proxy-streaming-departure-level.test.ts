@@ -182,21 +182,25 @@ describe("streaming flag ON: after the first-frame line, a destroyed response is
   it.each([
     {
       wake: "an ordinary frame",
+      reason: { kind: "client_gone" },
       act: ({ driven }: Wake) => driven.release(LATE_FRAME),
       rule: `${DEPARTURE_RULE}: an ordinary frame is never forwarded and the loop does not continue`,
     },
     {
       wake: "the terminating frame",
+      reason: { kind: "client_gone" },
       act: ({ driven }: Wake) => driven.release("data: [DONE]\n\n"),
       rule: `${DEPARTURE_RULE}: the terminating frame never makes it DONE`,
     },
     {
       wake: "an eof between frames",
+      reason: { kind: "client_gone" },
       act: ({ driven }: Wake) => driven.end(),
       rule: `${DEPARTURE_RULE}: an eof between frames never makes it EOF_WITHOUT_DONE`,
     },
     {
       wake: "an eof inside a frame",
+      reason: { kind: "client_gone" },
       act: ({ driven }: Wake) => {
         driven.release('data: {"id": "c1", "choices": [{"delta": {"content": "w');
         driven.end();
@@ -205,29 +209,34 @@ describe("streaming flag ON: after the first-frame line, a destroyed response is
     },
     {
       wake: "the reader's cap",
+      reason: { kind: "client_gone" },
       act: ({ driven }: Wake) =>
         driven.release(`data: ${"x".repeat(PARSER_BUFFER_CAP + 1)}`),
       rule: `${DEPARTURE_RULE}: the reader's cap never makes it PARSER_BUFFER_CAP`,
     },
     {
       wake: "a transport error",
+      reason: { kind: "client_gone" },
       act: ({ driven }: Wake) => driven.fail(RESET_AFTER_DEPARTURE),
       rule: `${DEPARTURE_RULE}: a transport error never makes it UPSTREAM_DEATH`,
     },
     {
       wake: "the deadline's timer firing",
+      // The timer aborted first, so its reason stays the signal's reason.
+      reason: { kind: "total_timeout" },
       act: () => vi.advanceTimersByTime(280_000),
       rule: `${JURISDICTION_RULE}: the deadline's own abort never makes it TOTAL_TIMEOUT`,
     },
     {
       wake: "a frame past the deadline, timer late",
+      reason: { kind: "client_gone" },
       act: ({ driven, startedAt }: Wake) => {
         vi.setSystemTime(startedAt + 280_200);
         driven.release(LATE_FRAME);
       },
       rule: `${JURISDICTION_RULE}: a frame read past the deadline never makes it TOTAL_TIMEOUT`,
     },
-  ])("ends as CLIENT_GONE and writes nothing when the loop wakes with $wake", async ({ act, rule }) => {
+  ])("ends as CLIENT_GONE and writes nothing when the loop wakes with $wake", async ({ act, rule, reason }) => {
     const t = await buildDrivenApp();
     let serverResponse: http.ServerResponse | undefined;
     t.app.server.on("request", (_req, res: http.ServerResponse) => {
@@ -329,6 +338,10 @@ describe("streaming flag ON: after the first-frame line, a destroyed response is
         t.recorded,
         "the departure votes INCONCLUSIVE, exactly once",
       ).toStrictEqual(["INCONCLUSIVE"]);
+      expect(
+        t.signal()?.reason,
+        "a departure seen only by the level read still drops the upstream: the terminal block aborts with client_gone after deciding, unless an earlier abort already gave the signal its reason",
+      ).toEqual(reason);
     } finally {
       client.destroy();
       vi.useRealTimers();
