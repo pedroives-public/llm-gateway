@@ -23,7 +23,8 @@ type SentinelTerminal =
   | "UPSTREAM_DEATH"
   | "EOF_WITHOUT_DONE"
   | "PARSER_BUFFER_CAP"
-  | "UNRECOGNIZED_REJECTION";
+  | "UNRECOGNIZED_REJECTION"
+  | "INTERNAL_EXCEPTION";
 
 type SentinelVocabularyRow = {
   type: "gateway_timeout" | "upstream_error" | "internal_error";
@@ -53,6 +54,11 @@ const SENTINEL_VOCABULARY: Record<SentinelTerminal, SentinelVocabularyRow> = {
     message: "stream frame could not be decoded",
   },
   UNRECOGNIZED_REJECTION: {
+    type: "internal_error",
+    code: "unhandled_exception",
+    message: "stream ended by an internal error",
+  },
+  INTERNAL_EXCEPTION: {
     type: "internal_error",
     code: "unhandled_exception",
     message: "stream ended by an internal error",
@@ -101,8 +107,22 @@ export async function forwardUntilTerminal(
   ): void => {
     decideTerminal();
 
-    raw.write(streamSentinel(terminal));
-    raw.end();
+    // Built outside the try: a defect in building the sentinel is the
+    // gateway's own exception, not a write the response refused.
+    const sentinel = streamSentinel(terminal);
+
+    try {
+      raw.write(sentinel);
+      raw.end();
+    } catch (error) {
+      // The terminal decision and post-loop still must run when the response
+      // cannot accept the sentinel, and the client never receiving it must
+      // leave a trace.
+      upstreamLog.error(
+        { err_name: extractErrName(error) },
+        "STREAM_TERMINAL_WRITE_FAILED",
+      );
+    }
 
     runPostLoop(postLoop, {
       terminal,
@@ -142,31 +162,36 @@ export async function forwardUntilTerminal(
         return;
       }
 
-      let readError: ReturnType<typeof resolveRejection>;
-
       try {
-        readError = resolveRejection(error, signal, upstreamLog);
+        let readError: ReturnType<typeof resolveRejection>;
+
+        try {
+          readError = resolveRejection(error, signal, upstreamLog);
+        } catch {
+          endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+          return;
+        }
+
+        if (readError.kind !== "network_failed") {
+          upstreamLog.error(
+            {
+              ...extractCauseLog(error),
+              err_name: extractErrName(error),
+              abort_identity: error === signal.reason,
+            },
+            "STREAM_REJECTION_OUTCOME_UNHANDLED",
+          );
+          endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+          return;
+        }
+
+        const classification = classify(readError, log, reqId);
+        endWithSentinel("UPSTREAM_DEATH", classification.error_class);
+        return;
       } catch {
-        endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+        endWithSentinel("INTERNAL_EXCEPTION", "gateway-fault");
         return;
       }
-
-      if (readError.kind !== "network_failed") {
-        upstreamLog.error(
-          {
-            ...extractCauseLog(error),
-            err_name: extractErrName(error),
-            abort_identity: error === signal.reason,
-          },
-          "STREAM_REJECTION_OUTCOME_UNHANDLED",
-        );
-        endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
-        return;
-      }
-
-      const classification = classify(readError, log, reqId);
-      endWithSentinel("UPSTREAM_DEATH", classification.error_class);
-      return;
     }
 
     if (raw.destroyed) {
@@ -179,52 +204,57 @@ export async function forwardUntilTerminal(
       return;
     }
 
-    if (frame.kind !== "frame") {
-      const terminal =
-        frame.kind === "cap" ? "PARSER_BUFFER_CAP" : "EOF_WITHOUT_DONE";
+    try {
+      if (frame.kind !== "frame") {
+        const terminal =
+          frame.kind === "cap" ? "PARSER_BUFFER_CAP" : "EOF_WITHOUT_DONE";
 
-      endWithSentinel(terminal, "upstream-fault");
-      return;
-    }
-
-    if (frame.data === "[DONE]") {
-      decideTerminal();
-
-      raw.write(frame.bytes);
-      raw.end();
-
-      runPostLoop(postLoop, {
-        terminal: "DONE",
-        breakerOutcome: "SUCCESS",
-        completed: true,
-        errorClass: null,
-      });
-
-      return;
-    }
-
-    const needsDrain = !raw.write(frame.bytes);
-
-    if (needsDrain) {
-      try {
-        await once(raw, "drain", { signal });
-      } catch {
-        if (raw.destroyed) {
-          finishClientGone();
-          return;
-        }
-
-        if (deadlineConditionHolds(deadlineAt, signal)) {
-          endWithSentinel("TOTAL_TIMEOUT", "gateway-fault");
-          return;
-        }
-
-        // Unreachable by design: an abort of the drain wait comes from a
-        // client departure or the deadline, which the checks above read.
-        // Ending here keeps the loop from leaving without a terminal.
-        endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+        endWithSentinel(terminal, "upstream-fault");
         return;
       }
+
+      if (frame.data === "[DONE]") {
+        decideTerminal();
+
+        raw.write(frame.bytes);
+        raw.end();
+
+        runPostLoop(postLoop, {
+          terminal: "DONE",
+          breakerOutcome: "SUCCESS",
+          completed: true,
+          errorClass: null,
+        });
+
+        return;
+      }
+
+      const needsDrain = !raw.write(frame.bytes);
+
+      if (needsDrain) {
+        try {
+          await once(raw, "drain", { signal });
+        } catch {
+          if (raw.destroyed) {
+            finishClientGone();
+            return;
+          }
+
+          if (deadlineConditionHolds(deadlineAt, signal)) {
+            endWithSentinel("TOTAL_TIMEOUT", "gateway-fault");
+            return;
+          }
+
+          // Unreachable by design: an abort of the drain wait comes from a
+          // client departure or the deadline, which the checks above read.
+          // Ending here keeps the loop from leaving without a terminal.
+          endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+          return;
+        }
+      }
+    } catch {
+      endWithSentinel("INTERNAL_EXCEPTION", "gateway-fault");
+      return;
     }
   }
 }
