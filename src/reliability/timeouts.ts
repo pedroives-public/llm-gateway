@@ -1,11 +1,41 @@
 // Hard-timeout helpers. Single abort point by construction: controller and
-// typed abort funnel are module-private and must never be exported —
-// consumers get only the read-only signal plus an idempotent clear().
+// typed abort funnel are module-private and must never be exported. The
+// wall-clock helper hands out only the read-only signal plus an idempotent
+// clear(). The total-duration helper adds two narrowed abort capabilities,
+// each meant for the one piece of code that needs it: the client-departure
+// observer's does nothing once a terminal is decided (a late departure lost
+// that race and must not become the signal's first reason), and the terminal
+// block's throws while no terminal is decided (aborting before deciding is a
+// defect, so it fails loudly instead of being skipped).
 // Rejection recognition matches on the abort reason's `kind`.
+
+class TerminalAbortBeforeDecisionError extends Error {
+  constructor() {
+    super("cannot abort for a terminal before the terminal is decided");
+    this.name = "TerminalAbortBeforeDecisionError";
+  }
+}
+
+type AbortKind =
+  | "wall_clock_expired"
+  | "total_timeout"
+  | "client_gone"
+  | "parser_buffer_cap"
+  | "response_size_cap";
+
+// The kinds a terminal block may abort with after deciding its terminal.
+type TerminalAbortKind = "total_timeout" | "client_gone" | "parser_buffer_cap";
 
 export type ArmedTimeout = {
   signal: AbortSignal;
   clear: () => void;
+};
+
+export type TotalDurationTimeout = {
+  signal: AbortSignal;
+  clear: () => void;
+  abortForClientGoneIfUndecided: () => void;
+  abortForTerminalAfterDecision: (kind: TerminalAbortKind) => void;
 };
 
 // Non-streaming deadline: armed at handler entry, spans the whole request
@@ -40,10 +70,10 @@ export function armWallClockTimeout(ms: number): ArmedTimeout {
 export function armTotalDurationTimeout(
   deadlineAt: number,
   isTerminalDecided: () => boolean,
-): ArmedTimeout {
+): TotalDurationTimeout {
   const controller = new AbortController();
 
-  const abortWith = (kind: "total_timeout") => {
+  const abortWith = (kind: AbortKind) => {
     controller.abort({ kind });
   };
 
@@ -68,8 +98,24 @@ export function armTotalDurationTimeout(
 
   scheduler();
 
+  const abortForClientGoneIfUndecided = (): void => {
+    if (isTerminalDecided()) {
+      return;
+    }
+    abortWith("client_gone");
+  };
+
+  const abortForTerminalAfterDecision = (kind: TerminalAbortKind): void => {
+    if (!isTerminalDecided()) {
+      throw new TerminalAbortBeforeDecisionError();
+    }
+    abortWith(kind);
+  };
+
   return {
     signal: controller.signal,
     clear: () => clearTimeout(timer),
+    abortForClientGoneIfUndecided,
+    abortForTerminalAfterDecision,
   };
 }

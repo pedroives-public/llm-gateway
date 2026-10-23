@@ -204,3 +204,104 @@ describe("armTotalDurationTimeout", () => {
     ).toBe(false);
   });
 });
+
+describe("armTotalDurationTimeout's narrowed abort capabilities", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("the client-departure capability aborts with a client_gone typed reason while no terminal is decided", () => {
+    const armed = armTotalDurationTimeout(
+      Date.now() + STREAM_TOTAL_DURATION_MS,
+      () => false,
+    );
+
+    armed.abortForClientGoneIfUndecided();
+
+    expect(
+      armed.signal.aborted,
+      "a departure observed before any terminal is decided wakes every wait bound to the signal",
+    ).toBe(true);
+    expect(
+      armed.signal.reason,
+      "the abort reason must be exactly the typed kind client_gone",
+    ).toEqual({ kind: "client_gone" });
+
+    armed.clear();
+  });
+
+  it("the client-departure capability does nothing once a terminal is decided, read at the call and not at arming", () => {
+    let isTerminalDecided = false;
+    const armed = armTotalDurationTimeout(
+      Date.now() + STREAM_TOTAL_DURATION_MS,
+      () => isTerminalDecided,
+    );
+
+    isTerminalDecided = true;
+    armed.abortForClientGoneIfUndecided();
+
+    expect(
+      armed.signal.aborted,
+      "a departure observed after a decided terminal is the loser of that race: it must not become the signal's first reason",
+    ).toBe(false);
+
+    armed.clear();
+  });
+
+  it.each([
+    { kind: "total_timeout" },
+    { kind: "client_gone" },
+    { kind: "parser_buffer_cap" },
+  ] as const)("the terminal capability aborts with the $kind typed reason once a terminal is decided", ({ kind }) => {
+    let isTerminalDecided = false;
+    const armed = armTotalDurationTimeout(
+      Date.now() + STREAM_TOTAL_DURATION_MS,
+      () => isTerminalDecided,
+    );
+
+    isTerminalDecided = true;
+    armed.abortForTerminalAfterDecision(kind);
+
+    expect(
+      armed.signal.aborted,
+      "the terminal block aborts with its own terminal's cause after deciding it",
+    ).toBe(true);
+    expect(
+      armed.signal.reason,
+      "the abort reason must be exactly the kind the terminal block passed",
+    ).toEqual({ kind });
+
+    armed.clear();
+  });
+
+  it("the terminal capability throws a named error and leaves the signal unaborted while no terminal is decided", () => {
+    const armed = armTotalDurationTimeout(
+      Date.now() + STREAM_TOTAL_DURATION_MS,
+      () => false,
+    );
+
+    // Caught here and asserted after the signal, so each rule fails on its own
+    // sentence: an abort that went through, and a refusal that stayed silent.
+    let thrown: unknown;
+    try {
+      armed.abortForTerminalAfterDecision("total_timeout");
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(
+      armed.signal.aborted,
+      "the terminal abort comes only after a decided terminal: a call before the decision leaves the signal as it was",
+    ).toBe(false);
+    expect(
+      thrown instanceof Error ? thrown.name : thrown,
+      "a terminal abort before the decision fails loudly: the refused call throws the named error instead of being skipped",
+    ).toBe("TerminalAbortBeforeDecisionError");
+
+    armed.clear();
+  });
+});
