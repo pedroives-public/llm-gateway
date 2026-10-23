@@ -4033,3 +4033,116 @@ describe("streaming flag ON: after the first-frame line, a client that stops rea
     }
   });
 });
+
+describe("streaming flag ON: after the first-frame line, a client that leaves while the loop waits for a frame ends the stream as CLIENT_GONE", () => {
+  const WAKE_RULE =
+    "a departure wakes the parked loop: the observer aborts the request signal with client_gone";
+  const NO_RECEIVER_RULE = "the departure is the only author with no receiver";
+
+  it("aborts the upstream, writes nothing and ends as CLIENT_GONE when the client leaves with the loop parked in the frame read", async () => {
+    const t = await buildDrivenApp();
+    let serverResponse: http.ServerResponse | undefined;
+    t.app.server.on("request", (_req, res: http.ServerResponse) => {
+      serverResponse = res;
+    });
+    await t.app.listen({ port: 0, host: "127.0.0.1" });
+    const address = t.app.server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("the app did not listen on a TCP port");
+    }
+    // setImmediate stays real so the test can yield to socket I/O while the
+    // clock and the deadline's timer are fake.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const yieldToIo = () =>
+      new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    const until = async (ready: () => boolean, sentence: string) => {
+      for (let turn = 0; turn < 200; turn += 1) {
+        if (ready()) return;
+        await yieldToIo();
+      }
+      throw new Error(sentence);
+    };
+
+    const body = JSON.stringify({ ...validBody, stream: true });
+    const client = http.request({
+      host: "127.0.0.1",
+      port: address.port,
+      method: "POST",
+      path: "/v1/chat/completions",
+      headers: {
+        authorization: bearer(),
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(body)),
+      },
+    });
+    client.on("error", () => {});
+    const received: Buffer[] = [];
+    client.on("response", (res) => {
+      res.on("data", (chunk: Buffer) => {
+        received.push(chunk);
+      });
+    });
+
+    try {
+      client.end(body);
+      await until(
+        () => t.calls() === 1,
+        "the scene's premise: the streaming upstream was called once and answered with an accepted head",
+      );
+      t.driven().release(ONE_CONTENT_FRAME);
+      await until(
+        () =>
+          Buffer.concat(received).length >=
+          Buffer.byteLength(ONE_CONTENT_FRAME),
+        "the scene's premise: the client received the first frame, so the stream crossed the first-frame line",
+      );
+      expect(t.violations).toStrictEqual([]);
+      const response = serverResponse;
+      if (response === undefined) {
+        throw new Error("the server response was not captured");
+      }
+      expect(
+        t.signal()?.aborted,
+        "the scene's premise: nothing has aborted the request signal, so the loop is parked in the frame read",
+      ).toBe(false);
+      const writes = vi.spyOn(response, "write");
+      const ends = vi.spyOn(response, "end");
+
+      client.destroy();
+      await until(() => t.capture.byEvent("stream_done").length > 0, WAKE_RULE);
+
+      expect(
+        t.signal()?.reason,
+        `${WAKE_RULE}: the upstream is aborted with the departure's own reason`,
+      ).toEqual({ kind: "client_gone" });
+      expect(
+        t.capture.byEvent("stream_done"),
+        "exactly one terminal event",
+      ).toHaveLength(1);
+      expect(t.capture.byEvent("stream_done")[0], NO_RECEIVER_RULE).toMatchObject({
+        completed: false,
+        terminal: "CLIENT_GONE",
+        error_class: "client-fault",
+      });
+      expect(
+        writes.mock.calls,
+        `${NO_RECEIVER_RULE}: nothing is written after the departure, no frame and no sentinel`,
+      ).toStrictEqual([]);
+      expect(
+        ends.mock.calls,
+        `${NO_RECEIVER_RULE}: the response is already gone, so the gateway does not end it either`,
+      ).toStrictEqual([]);
+      expect(
+        t.recorded,
+        "the departure votes INCONCLUSIVE, exactly once",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+      expect(t.calls(), "the upstream is called once").toBe(1);
+    } finally {
+      client.destroy();
+      vi.useRealTimers();
+      await t.app.close();
+    }
+  });
+});
