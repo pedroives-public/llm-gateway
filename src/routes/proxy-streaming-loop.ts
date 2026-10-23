@@ -5,13 +5,18 @@ import {
   classify,
   type MinLogger as ClassifierLog,
 } from "../upstream/classify.js";
-import { resolveRejection, type Logger } from "../upstream/rejection.js";
+import {
+  resolveRejection,
+  extractErrName,
+  type Logger,
+} from "../upstream/rejection.js";
 import type { SseFrame } from "../upstream/sse-frame-reader.js";
 import {
   runPostLoop,
   type PostLoopContext,
 } from "./proxy-streaming-post-loop.js";
 import { deadlineConditionHolds } from "./proxy-first-frame.js";
+import { extractCauseLog } from "../upstream/cause-log.js";
 
 type SentinelTerminal =
   | "TOTAL_TIMEOUT"
@@ -142,6 +147,19 @@ export async function forwardUntilTerminal(
       try {
         readError = resolveRejection(error, signal, upstreamLog);
       } catch {
+        endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+        return;
+      }
+
+      if (readError.kind !== "network_failed") {
+        upstreamLog.error(
+          {
+            ...extractCauseLog(error),
+            err_name: extractErrName(error),
+            abort_identity: error === signal.reason,
+          },
+          "STREAM_REJECTION_OUTCOME_UNHANDLED",
+        );
         endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
         return;
       }
