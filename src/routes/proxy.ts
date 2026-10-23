@@ -16,6 +16,8 @@ import { retry } from "../reliability/retry.js";
 import {
   armWallClockTimeout,
   armTotalDurationTimeout,
+  type ArmedTimeout,
+  type TotalDurationTimeout,
 } from "../reliability/timeouts.js";
 import { classify } from "../upstream/classify.js";
 import {
@@ -48,6 +50,7 @@ import {
   type PostLoopContext,
 } from "./proxy-streaming-post-loop.js";
 import { forwardUntilTerminal } from "./proxy-streaming-loop.js";
+import { observeClientDeparture } from "./proxy-client-departure.js";
 
 const WALL_CLOCK_MS = 30_000;
 const BODY_LIMIT_BYTES = 262_144;
@@ -228,14 +231,23 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
 
       const armedAt = Date.now();
       let terminalDecided = false;
+      let timeout: ArmedTimeout | TotalDurationTimeout;
 
-      const timeout =
-        request.body.stream === true
-          ? armTotalDurationTimeout(
-              armedAt + STREAM_TOTAL_DURATION_MS,
-              () => terminalDecided,
-            )
-          : armWallClockTimeout(WALL_CLOCK_MS);
+      if (request.body.stream === true) {
+        const streamingTimeout = armTotalDurationTimeout(
+          armedAt + STREAM_TOTAL_DURATION_MS,
+          () => terminalDecided,
+        );
+
+        observeClientDeparture(
+          reply.raw,
+          streamingTimeout.abortForClientGoneIfUndecided,
+        );
+
+        timeout = streamingTimeout;
+      } else {
+        timeout = armWallClockTimeout(WALL_CLOCK_MS);
+      }
       const deadlineAt =
         request.body.stream === true
           ? armedAt + STREAM_TOTAL_DURATION_MS
