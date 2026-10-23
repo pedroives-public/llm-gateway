@@ -73,7 +73,8 @@ export type StreamDoneTerminal =
   | "EOF_WITHOUT_DONE"
   | "PARSER_BUFFER_CAP"
   | "CLIENT_GONE"
-  | "UNRECOGNIZED_REJECTION";
+  | "UNRECOGNIZED_REJECTION"
+  | "INTERNAL_EXCEPTION";
 
 type OperationalAlertLine = {
   event: "operational_alert";
