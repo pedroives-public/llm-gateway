@@ -3890,3 +3890,319 @@ describe("streaming flag ON: after the first-frame line, a rejection the classif
     }
   });
 });
+
+describe("streaming flag ON: after the first-frame line, a client that stops reading suspends the loop until it drains", () => {
+  const TOTAL_TIMEOUT_SENTINEL =
+    'data: {"error": {"message": "stream exceeded the total duration limit", "type": "gateway_timeout", "code": "total_timeout_exceeded"}, "gateway": {"terminal": "TOTAL_TIMEOUT"}}\n\n';
+  // Each fill frame stays well under the response's 16 KiB write high-water
+  // mark, so a write returns false because the client's buffers are full,
+  // never merely because one frame is large.
+  const FILL_FRAME = `data: {"id": "c1", "choices": [{"delta": {"content": "${"f".repeat(4_096)}"}}]}\n\n`;
+  const HELD_FRAME =
+    'data: {"id": "c1", "choices": [{"delta": {"content": "held"}}]}\n\n';
+  const DONE_FRAME = "data: [DONE]\n\n";
+  // 64 frames of ~4 KiB per batch, at most 128 batches: the fill stops at
+  // ~32 MiB. A paused loopback client saturated after 768 to 832 frames
+  // (~3.0 to 3.3 MiB; measured 2026-10-23, nine scenes on Linux), so the bound
+  // is about ten times that, and a scene that never saturates fails on its
+  // premise.
+  const FILL_FRAMES_PER_BATCH = 64;
+  const MAX_FILL_BATCHES = 128;
+  // Turns of real socket I/O after a batch before saturation is read: a
+  // false return that the kernel absorbs drains within a few turns, a full
+  // client buffer does not.
+  const SETTLE_TURNS = 20;
+  const RACE_TURNS = 200;
+  // Turns for the client to read the whole backlog once it resumes.
+  const RESUME_TURNS = 10_000;
+  const WAKE_RULE =
+    "the deadline's abort wakes the drain wait through the request signal";
+  const SENTINEL_PATH_RULE =
+    "the sentinel path contains no wait bound to the request signal";
+
+  const yieldToIo = () =>
+    new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+  const turns = async (count: number) => {
+    for (let turn = 0; turn < count; turn += 1) {
+      await yieldToIo();
+    }
+  };
+  const until = async (
+    ready: () => boolean,
+    sentence: string,
+    bound: number,
+  ) => {
+    for (let turn = 0; turn < bound; turn += 1) {
+      if (ready()) return;
+      await yieldToIo();
+    }
+    throw new Error(sentence);
+  };
+  const asText = (chunk: unknown): string => {
+    if (typeof chunk === "string") return chunk;
+    if (chunk instanceof Uint8Array) {
+      return Buffer.from(chunk).toString("utf8");
+    }
+    throw new Error("a write carried neither text nor bytes");
+  };
+
+  // A real socket whose client takes the response head and then stops
+  // reading: the gateway's writes back up until a write returns false and no
+  // drain follows. A frame released after that point must stay unread.
+  async function suspendedClient() {
+    const t = await buildDrivenApp();
+    let serverResponse: http.ServerResponse | undefined;
+    t.app.server.on("request", (_req, res: http.ServerResponse) => {
+      serverResponse = res;
+    });
+    await t.app.listen({ port: 0, host: "127.0.0.1" });
+    const address = t.app.server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("the app did not listen on a TCP port");
+    }
+    // setImmediate stays real so the test can yield to socket I/O while the
+    // clock and the deadline's timer are fake.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const startedAt = Date.now();
+
+    const body = JSON.stringify({ ...validBody, stream: true });
+    const client = http.request({
+      host: "127.0.0.1",
+      port: address.port,
+      method: "POST",
+      path: "/v1/chat/completions",
+      headers: {
+        authorization: bearer(),
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(body)),
+      },
+    });
+    client.on("error", () => {});
+    let clientResponse: http.IncomingMessage | undefined;
+    client.on("response", (res) => {
+      clientResponse = res;
+      res.pause();
+    });
+    const received: Buffer[] = [];
+    const close = async () => {
+      client.destroy();
+      vi.useRealTimers();
+      await t.app.close();
+    };
+
+    try {
+      client.end(body);
+      await until(
+        () => t.calls() === 1,
+        "the scene's premise: the streaming upstream was called once and answered with an accepted head",
+        RACE_TURNS,
+      );
+      t.driven().release(ONE_CONTENT_FRAME);
+      await until(
+        () => t.capture.byEvent("stream_first_token").length === 1,
+        "the scene's premise: the first frame crossed the first-frame line",
+        RACE_TURNS,
+      );
+      expect(t.violations).toStrictEqual([]);
+      const response = serverResponse;
+      if (response === undefined) {
+        throw new Error("the server response was not captured");
+      }
+
+      // Filling the client's buffers takes many drain-and-resume cycles, so a
+      // loop that never resumes after a drain stalls the fill with frames
+      // still unwritten; the write count tells that apart from a client whose
+      // buffers never fill.
+      const writes = vi.spyOn(response, "write");
+      let released = 0;
+      let saturated = false;
+      for (let batch = 0; batch < MAX_FILL_BATCHES && !saturated; batch += 1) {
+        for (let frame = 0; frame < FILL_FRAMES_PER_BATCH; frame += 1) {
+          t.driven().release(FILL_FRAME);
+        }
+        released += FILL_FRAMES_PER_BATCH;
+        await turns(SETTLE_TURNS);
+        saturated = response.writableNeedDrain;
+      }
+      if (!saturated) {
+        throw new Error(
+          writes.mock.calls.length < released
+            ? "the loop resumes on drain: frames released after the response drained were never forwarded"
+            : "the scene's premise: the client stopped reading, so a write returns false and no drain follows",
+        );
+      }
+
+      writes.mockClear();
+      const ends = vi.spyOn(response, "end");
+      t.driven().release(HELD_FRAME);
+      await turns(SETTLE_TURNS);
+      expect(
+        writes.mock.calls.map(([chunk]) => asText(chunk)),
+        "the loop is suspended while the client's buffer is full: a frame that arrives meanwhile is not read ahead and written",
+      ).toStrictEqual([]);
+
+      return {
+        t,
+        response,
+        writes,
+        ends,
+        startedAt,
+        released,
+        received: () => Buffer.concat(received),
+        // An explicit pause() leaves the body paused when a 'data' listener
+        // is added later, so reading starts only with resume().
+        resume: () => {
+          if (clientResponse === undefined) {
+            throw new Error("the client has no response to read");
+          }
+          clientResponse.on("data", (chunk: Buffer) => {
+            received.push(chunk);
+          });
+          clientResponse.resume();
+        },
+        close,
+      };
+    } catch (error) {
+      await close();
+      throw error;
+    }
+  }
+
+  it("resumes forwarding on drain and forwards every frame once, in order, through the terminating frame", async () => {
+    const s = await suspendedClient();
+
+    try {
+      s.resume();
+      await until(
+        () =>
+          s.writes.mock.calls.some(([chunk]) => asText(chunk) === HELD_FRAME),
+        "the loop resumes on drain: the frame held while the client's buffer was full is forwarded once the client reads",
+        RESUME_TURNS,
+      );
+      s.t.driven().release(DONE_FRAME);
+      await until(
+        () => s.t.capture.byEvent("stream_done").length > 0,
+        "after the drain the loop reads on and reaches the terminating frame",
+        RACE_TURNS,
+      );
+
+      const expected = Buffer.from(
+        ONE_CONTENT_FRAME +
+          FILL_FRAME.repeat(s.released) +
+          HELD_FRAME +
+          DONE_FRAME,
+        "utf8",
+      );
+      await until(
+        () => s.received().length >= expected.length,
+        "the client receives the whole stream once it reads",
+        RESUME_TURNS,
+      );
+      expect(
+        s.t.capture.byEvent("stream_done"),
+        "exactly one terminal event",
+      ).toHaveLength(1);
+      expect(
+        s.t.capture.byEvent("stream_done")[0],
+        "a stream suspended by a slow client still ends at its terminating frame",
+      ).toMatchObject({ completed: true, terminal: "DONE" });
+      expect(
+        s.received().equals(expected),
+        "every frame reaches the client once and in order across the suspension: nothing is lost, duplicated or reordered",
+      ).toBe(true);
+      expect(
+        s.t.recorded,
+        "the terminating frame votes SUCCESS, exactly once",
+      ).toStrictEqual(["SUCCESS"]);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it.each([
+    {
+      row: "the deadline's timer firing on time",
+      act: () => {
+        vi.advanceTimersByTime(280_000);
+      },
+      rule: `${WAKE_RULE}: the woken loop ends as TOTAL_TIMEOUT`,
+    },
+    {
+      row: "the deadline's abort, clock stepped back",
+      act: (startedAt: number) => {
+        vi.advanceTimersByTime(280_000);
+        vi.setSystemTime(startedAt + 279_995);
+      },
+      rule: "the deadline's own abort is the deadline, even with the clock stepped back",
+    },
+  ])("ends as TOTAL_TIMEOUT with the sentinel in an accepted write when the drain wait wakes with $row", async ({ act, rule }) => {
+    const s = await suspendedClient();
+
+    try {
+      const signal = s.t.signal();
+      if (signal === undefined) {
+        throw new Error("the streaming upstream received no signal");
+      }
+      // Counted on the response and its socket, wherever the wait listens:
+      // the abort settles a signal-bound wait by removing its listener before
+      // any later abort listener runs, so a lower count at the abort means the
+      // wait woke. Read only to name the rule a hang breaks.
+      const drainListeners = () =>
+        s.response.listenerCount("drain") +
+        (s.response.socket?.listenerCount("drain") ?? 0);
+      const atSuspension = drainListeners();
+      let atAbort: number | undefined;
+      signal.addEventListener(
+        "abort",
+        () => {
+          atAbort = drainListeners();
+        },
+        { once: true },
+      );
+
+      act(s.startedAt);
+      expect(
+        signal.reason?.kind,
+        "the scene's premise: the deadline's timer fired and aborted the request signal with its own reason",
+      ).toBe("total_timeout");
+
+      await until(
+        () => s.t.capture.byEvent("stream_done").length > 0,
+        "",
+        RACE_TURNS,
+      ).catch(() => {
+        throw new Error(
+          atAbort !== undefined && atAbort < atSuspension
+            ? SENTINEL_PATH_RULE
+            : WAKE_RULE,
+        );
+      });
+
+      expect(
+        s.t.capture.byEvent("stream_done"),
+        "exactly one terminal event",
+      ).toHaveLength(1);
+      expect(s.t.capture.byEvent("stream_done")[0], rule).toMatchObject({
+        completed: false,
+        terminal: "TOTAL_TIMEOUT",
+        error_class: "gateway-fault",
+      });
+      expect(
+        s.writes.mock.calls.map(([chunk]) => asText(chunk)),
+        `${SENTINEL_PATH_RULE}: the sentinel is the only write after the suspension, and the held frame is never written`,
+      ).toStrictEqual([TOTAL_TIMEOUT_SENTINEL]);
+      expect(
+        s.ends.mock.calls.length,
+        `${SENTINEL_PATH_RULE}: the response is ended once`,
+      ).toBe(1);
+      expect(
+        s.t.recorded,
+        "the deadline votes INCONCLUSIVE, exactly once",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+    } finally {
+      await s.close();
+    }
+  });
+});

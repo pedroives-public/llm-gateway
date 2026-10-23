@@ -1,4 +1,5 @@
 import type { ServerResponse } from "node:http";
+import { once } from "node:events";
 import type { ErrorClass } from "../observability/events.js";
 import {
   classify,
@@ -184,6 +185,28 @@ export async function forwardUntilTerminal(
       return;
     }
 
-    raw.write(frame.bytes);
+    const needsDrain = !raw.write(frame.bytes);
+
+    if (needsDrain) {
+      try {
+        await once(raw, "drain", { signal });
+      } catch {
+        if (raw.destroyed) {
+          finishClientGone();
+          return;
+        }
+
+        if (deadlineConditionHolds(deadlineAt, signal)) {
+          endWithSentinel("TOTAL_TIMEOUT", "gateway-fault");
+          return;
+        }
+
+        // Unreachable by design: an abort of the drain wait comes from a
+        // client departure or the deadline, which the checks above read.
+        // Ending here keeps the loop from leaving without a terminal.
+        endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+        return;
+      }
+    }
   }
 }
