@@ -232,6 +232,9 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
       const armedAt = Date.now();
       let terminalDecided = false;
       let timeout: ArmedTimeout | TotalDurationTimeout;
+      let abortForTerminalAfterDecision:
+        | TotalDurationTimeout["abortForTerminalAfterDecision"]
+        | undefined;
 
       if (request.body.stream === true) {
         const streamingTimeout = armTotalDurationTimeout(
@@ -244,6 +247,8 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           streamingTimeout.abortForClientGoneIfUndecided,
         );
 
+        abortForTerminalAfterDecision =
+          streamingTimeout.abortForTerminalAfterDecision;
         timeout = streamingTimeout;
       } else {
         timeout = armWallClockTimeout(WALL_CLOCK_MS);
@@ -325,6 +330,16 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
         }
 
         if (isAcceptedStream(outcome)) {
+          // Only a stream: true request reaches the streaming upstream, the one
+          // source of an accepted stream, so the terminal abort capability is
+          // armed here; its absence is a wiring defect, raised before any byte
+          // reaches the client.
+          if (abortForTerminalAfterDecision === undefined) {
+            throw new Error(
+              "an accepted stream reached a request without a streaming deadline",
+            );
+          }
+
           const stream = outcome;
           const nextFrame = createSseFrameReader(stream.reader);
           let firstFrame: SseFrame | undefined;
@@ -502,6 +517,7 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
                 terminalDecided = true;
               },
               postLoop,
+              abortForTerminalAfterDecision,
             });
 
             return;
