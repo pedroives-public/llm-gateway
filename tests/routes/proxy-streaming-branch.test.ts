@@ -3881,6 +3881,9 @@ describe("streaming flag ON: after the first-frame line, a client that stops rea
           bufferFull = false;
           response.emit("drain");
         },
+        depart: () => {
+          client.destroy();
+        },
         close,
       };
     } catch (error) {
@@ -4021,6 +4024,69 @@ describe("streaming flag ON: after the first-frame line, a client that stops rea
       await s.close();
     }
   });
+
+  const DEPARTURE_WAKE_RULE =
+    "the departure's abort wakes the drain wait through the request signal";
+
+  it.each([
+    {
+      row: "the deadline still ahead",
+      clockPastDeadline: false,
+      rule: "a client that leaves while the loop waits for a drain ends the stream as CLIENT_GONE",
+    },
+    {
+      row: "the deadline passed and its timer late",
+      clockPastDeadline: true,
+      rule: "the departure comes first, by jurisdiction over the write: a client that leaves during the drain wait with the deadline passed ends as CLIENT_GONE, never with the TOTAL_TIMEOUT sentinel",
+    },
+  ])("ends as CLIENT_GONE and writes nothing when the client leaves during the drain wait with $row", async ({ clockPastDeadline, rule }) => {
+    const s = await suspendedClient();
+
+    try {
+      expect(
+        s.t.signal()?.aborted,
+        "the scene's premise: nothing has aborted the request signal, so the loop waits for the drain",
+      ).toBe(false);
+      if (clockPastDeadline) {
+        vi.setSystemTime(s.startedAt + 280_000 + 200);
+      }
+
+      s.depart();
+      await until(
+        () => s.t.capture.byEvent("stream_done").length > 0,
+        DEPARTURE_WAKE_RULE,
+        RACE_TURNS,
+      );
+
+      expect(
+        s.t.signal()?.reason,
+        `${DEPARTURE_WAKE_RULE}: the signal carries the departure's own reason`,
+      ).toEqual({ kind: "client_gone" });
+      expect(
+        s.t.capture.byEvent("stream_done"),
+        "exactly one terminal event",
+      ).toHaveLength(1);
+      expect(s.t.capture.byEvent("stream_done")[0], rule).toMatchObject({
+        completed: false,
+        terminal: "CLIENT_GONE",
+        error_class: "client-fault",
+      });
+      expect(
+        s.writes.mock.calls.map(([chunk]) => asText(chunk)),
+        `${rule}: no held frame and no sentinel reach a client that is gone`,
+      ).toStrictEqual([]);
+      expect(
+        s.ends.mock.calls,
+        `${rule}: the response is already gone, so the gateway does not end it either`,
+      ).toStrictEqual([]);
+      expect(
+        s.t.recorded,
+        "the departure votes INCONCLUSIVE, exactly once",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+    } finally {
+      await s.close();
+    }
+  });
 });
 
 describe("streaming flag ON: after the first-frame line, a client that leaves while the loop waits for a frame ends the stream as CLIENT_GONE", () => {
@@ -4028,7 +4094,18 @@ describe("streaming flag ON: after the first-frame line, a client that leaves wh
     "a departure wakes the parked loop: the observer aborts the request signal with client_gone";
   const NO_RECEIVER_RULE = "the departure is the only author with no receiver";
 
-  it("aborts the upstream, writes nothing and ends as CLIENT_GONE when the client leaves with the loop parked in the frame read", async () => {
+  it.each([
+    {
+      row: "the deadline still ahead",
+      clockPastDeadline: false,
+      rule: NO_RECEIVER_RULE,
+    },
+    {
+      row: "the deadline passed and its timer late",
+      clockPastDeadline: true,
+      rule: "the departure comes first, by jurisdiction over the write: a client that leaves during the frame read with the deadline passed ends as CLIENT_GONE, never with the TOTAL_TIMEOUT sentinel",
+    },
+  ])("aborts the upstream, writes nothing and ends as CLIENT_GONE when the client leaves with the loop parked in the frame read and $row", async ({ clockPastDeadline, rule }) => {
     const t = await buildDrivenApp();
     let serverResponse: http.ServerResponse | undefined;
     t.app.server.on("request", (_req, res: http.ServerResponse) => {
@@ -4042,6 +4119,7 @@ describe("streaming flag ON: after the first-frame line, a client that leaves wh
     // setImmediate stays real so the test can yield to socket I/O while the
     // clock and the deadline's timer are fake.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const startedAt = Date.now();
     const yieldToIo = () =>
       new Promise<void>((resolve) => {
         setImmediate(resolve);
@@ -4098,6 +4176,9 @@ describe("streaming flag ON: after the first-frame line, a client that leaves wh
       ).toBe(false);
       const writes = vi.spyOn(response, "write");
       const ends = vi.spyOn(response, "end");
+      if (clockPastDeadline) {
+        vi.setSystemTime(startedAt + 280_000 + 200);
+      }
 
       client.destroy();
       await until(() => t.capture.byEvent("stream_done").length > 0, WAKE_RULE);
@@ -4110,14 +4191,14 @@ describe("streaming flag ON: after the first-frame line, a client that leaves wh
         t.capture.byEvent("stream_done"),
         "exactly one terminal event",
       ).toHaveLength(1);
-      expect(t.capture.byEvent("stream_done")[0], NO_RECEIVER_RULE).toMatchObject({
+      expect(t.capture.byEvent("stream_done")[0], rule).toMatchObject({
         completed: false,
         terminal: "CLIENT_GONE",
         error_class: "client-fault",
       });
       expect(
         writes.mock.calls,
-        `${NO_RECEIVER_RULE}: nothing is written after the departure, no frame and no sentinel`,
+        `${rule}: nothing is written after the departure, no frame and no sentinel`,
       ).toStrictEqual([]);
       expect(
         ends.mock.calls,
