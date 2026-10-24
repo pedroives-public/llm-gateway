@@ -4093,19 +4093,43 @@ describe("streaming flag ON: after the first-frame line, a client that leaves wh
   const WAKE_RULE =
     "a departure wakes the parked loop: the observer aborts the request signal with client_gone";
   const NO_RECEIVER_RULE = "the departure is the only author with no receiver";
+  const ONE_EMITTER_RULE =
+    "exactly one terminal event: the emitter is selected by state, never by listener order";
+  const RACE_FRAME =
+    'data: {"id": "c1", "choices": [{"delta": {"content": "race"}}]}\n\n';
+  const asText = (chunk: unknown): string => {
+    if (typeof chunk === "string") return chunk;
+    if (chunk instanceof Uint8Array) {
+      return Buffer.from(chunk).toString("utf8");
+    }
+    throw new Error("a write carried neither text nor bytes");
+  };
 
   it.each([
     {
       row: "the deadline still ahead",
       clockPastDeadline: false,
+      raceFrame: false,
       rule: NO_RECEIVER_RULE,
+      allowedWrites: [],
     },
     {
       row: "the deadline passed and its timer late",
       clockPastDeadline: true,
+      raceFrame: false,
       rule: "the departure comes first, by jurisdiction over the write: a client that leaves during the frame read with the deadline passed ends as CLIENT_GONE, never with the TOTAL_TIMEOUT sentinel",
+      allowedWrites: [],
     },
-  ])("aborts the upstream, writes nothing and ends as CLIENT_GONE when the client leaves with the loop parked in the frame read and $row", async ({ clockPastDeadline, rule }) => {
+    // The frame is read and forwarded before the server learns of the
+    // departure, so its own bytes may still be written; nothing else may.
+    {
+      row: "an upstream frame arriving in the same turn",
+      clockPastDeadline: false,
+      raceFrame: true,
+      rule: NO_RECEIVER_RULE,
+      allowedWrites: [RACE_FRAME],
+    },
+  ])("aborts the upstream, writes nothing and ends as CLIENT_GONE when the client leaves with the loop parked in the frame read and $row", async ({ clockPastDeadline, raceFrame, rule, allowedWrites }) => {
     const t = await buildDrivenApp();
     let serverResponse: http.ServerResponse | undefined;
     t.app.server.on("request", (_req, res: http.ServerResponse) => {
@@ -4180,25 +4204,31 @@ describe("streaming flag ON: after the first-frame line, a client that leaves wh
         vi.setSystemTime(startedAt + 280_000 + 200);
       }
 
+      if (raceFrame) {
+        t.driven().release(RACE_FRAME);
+      }
       client.destroy();
       await until(() => t.capture.byEvent("stream_done").length > 0, WAKE_RULE);
+      // Turns for a second terminal event to surface, if one is coming.
+      for (let turn = 0; turn < 20; turn += 1) {
+        await yieldToIo();
+      }
 
       expect(
         t.signal()?.reason,
         `${WAKE_RULE}: the upstream is aborted with the departure's own reason`,
       ).toEqual({ kind: "client_gone" });
-      expect(
-        t.capture.byEvent("stream_done"),
-        "exactly one terminal event",
-      ).toHaveLength(1);
+      expect(t.capture.byEvent("stream_done"), ONE_EMITTER_RULE).toHaveLength(1);
       expect(t.capture.byEvent("stream_done")[0], rule).toMatchObject({
         completed: false,
         terminal: "CLIENT_GONE",
         error_class: "client-fault",
       });
       expect(
-        writes.mock.calls,
-        `${rule}: nothing is written after the departure, no frame and no sentinel`,
+        writes.mock.calls
+          .map(([chunk]) => asText(chunk))
+          .filter((text) => !allowedWrites.includes(text)),
+        `${rule}: nothing is written after the departure but a frame already forwarded, and never a sentinel`,
       ).toStrictEqual([]);
       expect(
         ends.mock.calls,
