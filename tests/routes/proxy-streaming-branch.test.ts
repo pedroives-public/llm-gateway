@@ -4351,6 +4351,29 @@ describe("streaming flag ON: a client that leaves before the first frame ends th
     "a client departure is never a retry-eligible connection failure";
   const DEPARTURE_BEFORE_DEADLINE_RULE =
     "the departure is checked before the deadline, because with no receiver no write is possible: a client that leaves with the clock already past the deadline ends as CLIENT_GONE, never as a written 504";
+  const ANSWER_AFTER_DEPARTURE_RULE =
+    "the departure decides before the attempt's own answer: an upstream that still answers after the client left ends the request as CLIENT_GONE, never as that answer's terminal written to a gone client";
+  const SAME_TURN_RULE =
+    "the departure is checked before the first-frame commit: a response already destroyed when the first frame arrives ends the request as CLIENT_GONE, with no head and no frame written";
+
+  type DepartureScene = {
+    client: http.ClientRequest;
+    response: http.ServerResponse;
+    releaseFrame: (text: string) => void;
+  };
+  const clientLeaves = ({ client }: DepartureScene) => {
+    client.destroy();
+  };
+  // A server-side destroy makes `destroyed` true at once, while the
+  // observer's close comes later: the state a departure leaves when it lands
+  // in the same turn as the first frame.
+  const firstFrameMeetsADestroyedResponse = ({
+    response,
+    releaseFrame,
+  }: DepartureScene) => {
+    releaseFrame(ONE_CONTENT_FRAME);
+    response.destroy();
+  };
 
   // The upstream call never answers on its own: like a real fetch, it rejects
   // with the signal's reason once the request signal is aborted.
@@ -4388,6 +4411,50 @@ describe("streaming flag ON: a client that leaves before the first frame ends th
       recorded,
       calls: () => calls,
       signal: () => receivedSignal,
+      // No accepted head, so no frame to release and no body to cancel.
+      driven: null,
+    };
+  }
+
+  // The upstream call answers anyway: once the request signal is aborted it
+  // resolves with an upstream 503 instead of rejecting, as a response read in
+  // full just before the departure would.
+  async function buildAnswerAfterAbortApp() {
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+    let receivedSignal: AbortSignal | undefined;
+    let calls = 0;
+
+    const app = await buildProxyApp({
+      breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: (_body, signal) => {
+        calls += 1;
+        receivedSignal = signal;
+        return new Promise<StreamingAdapter>((resolve) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              resolve({ kind: "upstream_error", status: 503, body_raw: "{}" });
+            },
+            { once: true },
+          );
+        });
+      },
+    });
+
+    return {
+      app,
+      capture,
+      violations,
+      recorded,
+      calls: () => calls,
+      signal: () => receivedSignal,
+      // No accepted head, so no frame to release and no body to cancel.
+      driven: null,
     };
   }
 
@@ -4396,24 +4463,43 @@ describe("streaming flag ON: a client that leaves before the first frame ends th
       row: "the upstream call still in flight",
       build: buildHeldHeadApp,
       clockPastDeadline: false,
+      depart: clientLeaves,
       rule: DEPARTURE_RULE,
-      cancelSites: [],
+      bodyCancelled: false,
     },
     {
       row: "the accepted head waiting for the first frame",
       build: () => buildDrivenApp(),
       clockPastDeadline: false,
+      depart: clientLeaves,
       rule: DEPARTURE_RULE,
-      cancelSites: ["proxy_route"],
+      bodyCancelled: true,
     },
     {
       row: "the accepted head waiting and the clock already at the deadline",
       build: () => buildDrivenApp(),
       clockPastDeadline: true,
+      depart: clientLeaves,
       rule: DEPARTURE_BEFORE_DEADLINE_RULE,
-      cancelSites: ["proxy_route"],
+      bodyCancelled: true,
     },
-  ])("aborts the upstream, writes nothing and emits req_complete as CLIENT_GONE with $row", async ({ build, clockPastDeadline, rule, cancelSites }) => {
+    {
+      row: "the upstream still answering a 503 after the departure",
+      build: buildAnswerAfterAbortApp,
+      clockPastDeadline: false,
+      depart: clientLeaves,
+      rule: ANSWER_AFTER_DEPARTURE_RULE,
+      bodyCancelled: false,
+    },
+    {
+      row: "the first frame arriving at a response already destroyed",
+      build: () => buildDrivenApp(),
+      clockPastDeadline: false,
+      depart: firstFrameMeetsADestroyedResponse,
+      rule: SAME_TURN_RULE,
+      bodyCancelled: true,
+    },
+  ])("aborts the upstream, writes nothing and emits req_complete as CLIENT_GONE with $row", async ({ build, clockPastDeadline, depart, rule, bodyCancelled }) => {
     const t = await build();
     let serverResponse: http.ServerResponse | undefined;
     t.app.server.on("request", (_req, res: http.ServerResponse) => {
@@ -4486,7 +4572,16 @@ describe("streaming flag ON: a client that leaves before the first frame ends th
         vi.setSystemTime(startedAt + 280_000);
       }
 
-      client.destroy();
+      depart({
+        client,
+        response,
+        releaseFrame: (text) => {
+          if (t.driven === null) {
+            throw new Error("this row's upstream has no frame to release");
+          }
+          t.driven().release(text);
+        },
+      });
       await until(
         () =>
           t.capture.byEvent("req_complete").length > 0 ||
@@ -4532,15 +4627,17 @@ describe("streaming flag ON: a client that leaves before the first frame ends th
         },
         `${rule}: no header, no byte and no end reach a client that is gone`,
       ).toStrictEqual({ heads: 0, writes: 0, ends: 0 });
-      // The abort already errored the accepted body, so the route's cancel is
-      // seen as the cancel-rejected observation; with no accepted head there
-      // is no body to cancel.
+      // When the departure's abort errored the accepted body first, the
+      // route's cancel is seen as the cancel-rejected observation; when the
+      // cancel comes first, the fake's own cancel runs. With no accepted head
+      // there is no body to cancel.
       expect(
         t.capture
           .byEvent("upstream_cancel_rejected")
-          .map((event) => event.site),
-        "the route, not the adapter, cancels the accepted body it received, and only when it received one",
-      ).toStrictEqual(cancelSites);
+          .some((event) => event.site === "proxy_route") ||
+          (t.driven !== null && t.driven().cancelCalled()),
+        "the route cancels the accepted body it received, and only when it received one",
+      ).toBe(bodyCancelled);
       expect(
         t.recorded,
         "the departure votes INCONCLUSIVE, exactly once",

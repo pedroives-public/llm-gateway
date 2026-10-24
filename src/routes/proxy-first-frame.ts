@@ -7,6 +7,7 @@ import {
   type MinLogger,
   type ReqCompleteTerminal,
 } from "../observability/events.js";
+import type { TotalDurationTimeout } from "../reliability/timeouts.js";
 import {
   cancelStream,
   type AcceptedStream,
@@ -76,6 +77,7 @@ const CLIENT_GONE_STATUS = 499;
 
 type ClientGoneContext = Omit<TotalTimeoutContext, "outcome"> & {
   outcome?: AttemptResult;
+  abortForTerminalAfterDecision: TotalDurationTimeout["abortForTerminalAfterDecision"];
 };
 
 // The client left before the first frame: no header and no byte are written,
@@ -88,6 +90,8 @@ type ClientGoneContext = Omit<TotalTimeoutContext, "outcome"> & {
 export async function finishClientGoneBeforeFirstFrame(
   context: ClientGoneContext,
 ): Promise<void> {
+  context.abortForTerminalAfterDecision("client_gone");
+
   const errorClass: ErrorClass = "client-fault";
 
   try {
