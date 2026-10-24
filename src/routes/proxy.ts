@@ -303,9 +303,17 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           });
         } catch (error) {
           if (request.body.stream === true && reply.raw.destroyed) {
+            if (abortForTerminalAfterDecision === undefined) {
+              throw new Error(
+                "a streaming request reached a client-gone terminal without a streaming deadline",
+                { cause: error },
+              );
+            }
+
             terminalDecided = true;
 
             return finishClientGoneBeforeFirstFrame({
+              abortForTerminalAfterDecision,
               attempts,
               requestStartedAt,
               upstreamDurationMs,
@@ -323,6 +331,33 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
           terminalDecided = true;
           opts.breaker.recordResult("INCONCLUSIVE");
           throw error;
+        }
+
+        if (request.body.stream === true && reply.raw.destroyed) {
+          if (abortForTerminalAfterDecision === undefined) {
+            throw new Error(
+              "a streaming request reached a client-gone terminal without a streaming deadline",
+            );
+          }
+
+          terminalDecided = true;
+
+          return finishClientGoneBeforeFirstFrame({
+            abortForTerminalAfterDecision,
+            acceptedStream: isAcceptedStream(outcome) ? outcome : undefined,
+            outcome,
+            attempts,
+            requestStartedAt,
+            upstreamDurationMs,
+            request: {
+              log: request.log,
+              reqId: request.reqId,
+            },
+            reply,
+            signal: timeout.signal,
+            upstreamLog,
+            breaker: opts.breaker,
+          });
         }
 
         const durationMs = Date.now() - requestStartedAt;
@@ -374,6 +409,7 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               terminalDecided = true;
 
               return finishClientGoneBeforeFirstFrame({
+                abortForTerminalAfterDecision,
                 acceptedStream: stream,
                 outcome: stream,
                 attempts,
@@ -475,6 +511,27 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
             reader: stream.reader,
             upstreamLog,
           };
+
+          if (request.body.stream === true && reply.raw.destroyed) {
+            terminalDecided = true;
+
+            return finishClientGoneBeforeFirstFrame({
+              abortForTerminalAfterDecision,
+              acceptedStream: stream,
+              outcome: stream,
+              attempts,
+              requestStartedAt,
+              upstreamDurationMs,
+              request: {
+                log: request.log,
+                reqId: request.reqId,
+              },
+              reply,
+              signal: timeout.signal,
+              upstreamLog,
+              breaker: opts.breaker,
+            });
+          }
 
           if (isTotalTimeout(request.body.stream, deadlineAt, timeout.signal)) {
             terminalDecided = true;
