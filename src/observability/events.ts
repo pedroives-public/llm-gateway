@@ -64,7 +64,8 @@ export type ReqCompleteTerminal =
   | "RESPONSE_TOO_LARGE"
   | "200_NON_SSE"
   | "RETRY_EXHAUSTED"
-  | "FAST_FAIL";
+  | "FAST_FAIL"
+  | "CLIENT_GONE";
 
 export type StreamDoneTerminal =
   | "DONE"
