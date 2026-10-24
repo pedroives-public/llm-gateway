@@ -4247,6 +4247,92 @@ describe("streaming flag ON: after the first-frame line, a client that leaves wh
   });
 });
 
+describe("streaming flag ON: the departure observer listens to the response, never to the request", () => {
+  const RESPONSE_NOT_REQUEST_RULE =
+    "the departure is read from the response, never from the request: a client still connected after its body is read is never gone";
+  // The request side closes 2–8 ms after its body is read (measured
+  // 2026-10-19); the scene waits well past that, with real timers, while the
+  // client stays connected.
+  const AFTER_REQUEST_CLOSE_MS = 50;
+  const DONE_FRAME = "data: [DONE]\n\n";
+
+  it("keeps the stream alive after the request side closes and ends it at its terminating frame", async () => {
+    const t = await buildDrivenApp();
+    let requestClosed = false;
+    t.app.server.on("request", (req: http.IncomingMessage) => {
+      req.once("close", () => {
+        requestClosed = true;
+      });
+    });
+    await t.app.listen({ port: 0, host: "127.0.0.1" });
+    const address = t.app.server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("the app did not listen on a TCP port");
+    }
+    const yieldToIo = () =>
+      new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    const until = async (ready: () => boolean, sentence: string) => {
+      for (let turn = 0; turn < 200; turn += 1) {
+        if (ready()) return;
+        await yieldToIo();
+      }
+      throw new Error(sentence);
+    };
+
+    const body = JSON.stringify({ ...validBody, stream: true });
+    const client = http.request({
+      host: "127.0.0.1",
+      port: address.port,
+      method: "POST",
+      path: "/v1/chat/completions",
+      headers: {
+        authorization: bearer(),
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(body)),
+      },
+    });
+    client.on("error", () => {});
+    client.on("response", (res) => {
+      res.resume();
+    });
+
+    try {
+      client.end(body);
+      await until(
+        () => t.calls() === 1,
+        "the scene's premise: the streaming upstream was called once and answered with an accepted head",
+      );
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, AFTER_REQUEST_CLOSE_MS);
+      });
+      expect(
+        requestClosed,
+        "the scene's premise: the request side closed once its body was read, with the client still connected",
+      ).toBe(true);
+      expect(t.signal()?.aborted, RESPONSE_NOT_REQUEST_RULE).toBe(false);
+
+      t.driven().release(ONE_CONTENT_FRAME + DONE_FRAME);
+      await until(
+        () => t.capture.byEvent("stream_done").length > 0,
+        `${RESPONSE_NOT_REQUEST_RULE}: the stream reaches its terminating frame`,
+      );
+      expect(
+        t.capture.byEvent("stream_done")[0],
+        RESPONSE_NOT_REQUEST_RULE,
+      ).toMatchObject({ completed: true, terminal: "DONE" });
+      expect(
+        t.recorded,
+        "the terminating frame votes SUCCESS, exactly once",
+      ).toStrictEqual(["SUCCESS"]);
+    } finally {
+      client.destroy();
+      await t.app.close();
+    }
+  });
+});
+
 describe("streaming flag ON: after the first-frame line, a terminal aborts the request signal only when it has an author in the funnel", () => {
   const LATE_FRAME =
     'data: {"id": "c1", "choices": [{"delta": {"content": "late"}}]}\n\n';
