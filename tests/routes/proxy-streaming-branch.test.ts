@@ -4232,3 +4232,213 @@ describe("streaming flag ON: after the first-frame line, a terminal aborts the r
     }
   });
 });
+
+describe("streaming flag ON: a client that leaves before the first frame ends the request as CLIENT_GONE", () => {
+  const DEPARTURE_RULE =
+    "a departure before the first frame ends the request as CLIENT_GONE: nothing is written and req_complete names it";
+  const ONE_ATTEMPT_RULE =
+    "a client departure is never a retry-eligible connection failure";
+  const DEPARTURE_BEFORE_DEADLINE_RULE =
+    "the departure is checked before the deadline, because with no receiver no write is possible: a client that leaves with the clock already past the deadline ends as CLIENT_GONE, never as a written 504";
+
+  // The upstream call never answers on its own: like a real fetch, it rejects
+  // with the signal's reason once the request signal is aborted.
+  async function buildHeldHeadApp() {
+    const capture = makeLogCapture();
+    const violations: string[] = [];
+    const { breaker, recorded } = recordingBreaker();
+    let receivedSignal: AbortSignal | undefined;
+    let calls = 0;
+
+    const app = await buildProxyApp({
+      breaker,
+      logger: capture.logger,
+      streamingEnabled: true,
+      upstreamBuffered: bufferedTripwire(violations).seam,
+      upstreamStreaming: (_body, signal) => {
+        calls += 1;
+        receivedSignal = signal;
+        return new Promise<AcceptedStream>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      },
+    });
+
+    return {
+      app,
+      capture,
+      violations,
+      recorded,
+      calls: () => calls,
+      signal: () => receivedSignal,
+    };
+  }
+
+  it.each([
+    {
+      row: "the upstream call still in flight",
+      build: buildHeldHeadApp,
+      clockPastDeadline: false,
+      rule: DEPARTURE_RULE,
+      cancelSites: [],
+    },
+    {
+      row: "the accepted head waiting for the first frame",
+      build: () => buildDrivenApp(),
+      clockPastDeadline: false,
+      rule: DEPARTURE_RULE,
+      cancelSites: ["proxy_route"],
+    },
+    {
+      row: "the accepted head waiting and the clock already at the deadline",
+      build: () => buildDrivenApp(),
+      clockPastDeadline: true,
+      rule: DEPARTURE_BEFORE_DEADLINE_RULE,
+      cancelSites: ["proxy_route"],
+    },
+  ])("aborts the upstream, writes nothing and emits req_complete as CLIENT_GONE with $row", async ({ build, clockPastDeadline, rule, cancelSites }) => {
+    const t = await build();
+    let serverResponse: http.ServerResponse | undefined;
+    t.app.server.on("request", (_req, res: http.ServerResponse) => {
+      serverResponse = res;
+    });
+    await t.app.listen({ port: 0, host: "127.0.0.1" });
+    const address = t.app.server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("the app did not listen on a TCP port");
+    }
+    // setImmediate stays real so the test can yield to socket I/O while the
+    // clock and the deadline's timer are fake.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const startedAt = Date.now();
+    const yieldToIo = () =>
+      new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    const until = async (ready: () => boolean, sentence: string) => {
+      for (let turn = 0; turn < 200; turn += 1) {
+        if (ready()) return;
+        await yieldToIo();
+      }
+      throw new Error(sentence);
+    };
+
+    const body = JSON.stringify({ ...validBody, stream: true });
+    const client = http.request({
+      host: "127.0.0.1",
+      port: address.port,
+      method: "POST",
+      path: "/v1/chat/completions",
+      headers: {
+        authorization: bearer(),
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(body)),
+      },
+    });
+    client.on("error", () => {});
+
+    try {
+      client.end(body);
+      await until(
+        () => t.calls() === 1,
+        "the scene's premise: the streaming upstream was called once",
+      );
+      // A few turns for an accepted head to be taken in, so the second row
+      // really waits for its first frame.
+      for (let turn = 0; turn < 5; turn += 1) {
+        await yieldToIo();
+      }
+      expect(t.violations).toStrictEqual([]);
+      expect(
+        t.capture.byEvent("stream_first_token"),
+        "the scene's premise: no frame has crossed the first-frame line",
+      ).toHaveLength(0);
+      const response = serverResponse;
+      if (response === undefined) {
+        throw new Error("the server response was not captured");
+      }
+      const heads = vi.spyOn(response, "writeHead");
+      const writes = vi.spyOn(response, "write");
+      const ends = vi.spyOn(response, "end");
+
+      if (clockPastDeadline) {
+        expect(
+          t.signal()?.aborted,
+          "the scene's premise: the deadline's timer has not fired, so the request signal is not aborted",
+        ).toBe(false);
+        vi.setSystemTime(startedAt + 280_000);
+      }
+
+      client.destroy();
+      await until(
+        () =>
+          t.capture.byEvent("req_complete").length > 0 ||
+          t.capture.byEvent("stream_done").length > 0,
+        rule,
+      );
+      for (let turn = 0; turn < 20; turn += 1) {
+        await yieldToIo();
+      }
+
+      expect(
+        t.signal()?.reason,
+        `${DEPARTURE_RULE}: the upstream call is aborted with the departure's own reason`,
+      ).toEqual({ kind: "client_gone" });
+      // 499 because no status reaches the client; ineligible because a
+      // departure is never retry-eligible, with an accepted head or without
+      // any outcome at all.
+      expect(
+        t.capture.byEvent("req_complete").map((event) => ({
+          status: event.status,
+          error_class: event.error_class,
+          terminal: event.terminal,
+          retry_disposition: event.retry_disposition,
+        })),
+        rule,
+      ).toStrictEqual([
+        {
+          status: 499,
+          error_class: "client-fault",
+          terminal: "CLIENT_GONE",
+          retry_disposition: "ineligible",
+        },
+      ]);
+      expect(
+        t.capture.byEvent("stream_done"),
+        `${DEPARTURE_RULE}: no stream was committed, so there is no stream_done`,
+      ).toHaveLength(0);
+      expect(
+        {
+          heads: heads.mock.calls.length,
+          writes: writes.mock.calls.length,
+          ends: ends.mock.calls.length,
+        },
+        `${rule}: no header, no byte and no end reach a client that is gone`,
+      ).toStrictEqual({ heads: 0, writes: 0, ends: 0 });
+      // The abort already errored the accepted body, so the route's cancel is
+      // seen as the cancel-rejected observation; with no accepted head there
+      // is no body to cancel.
+      expect(
+        t.capture
+          .byEvent("upstream_cancel_rejected")
+          .map((event) => event.site),
+        "the route, not the adapter, cancels the accepted body it received, and only when it received one",
+      ).toStrictEqual(cancelSites);
+      expect(
+        t.recorded,
+        "the departure votes INCONCLUSIVE, exactly once",
+      ).toStrictEqual(["INCONCLUSIVE"]);
+      expect(t.calls(), ONE_ATTEMPT_RULE).toBe(1);
+    } finally {
+      client.destroy();
+      vi.useRealTimers();
+      await t.app.close();
+    }
+  });
+});

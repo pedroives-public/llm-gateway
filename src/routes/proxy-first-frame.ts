@@ -19,8 +19,9 @@ import {
 } from "./proxy-error-outcome.js";
 
 // Terminals the streaming branch reaches before a first frame is committed to
-// the client: the total-duration deadline (504, one INCONCLUSIVE vote) and the
-// first-frame faults (502, one FAILURE vote). Each takes its context
+// the client: the client's departure (nothing written, one INCONCLUSIVE vote),
+// the total-duration deadline (504, one INCONCLUSIVE vote) and the first-frame
+// faults (502, one FAILURE vote). Each takes its context
 // explicitly, so the route handler keeps only the decision of WHICH terminal
 // applies. The flag that tells the deadline timer a terminal is already
 // settled stays in the handler: it is closure state of the request, set
@@ -64,6 +65,68 @@ type TotalTimeoutContext = {
   upstreamLog: Logger & MinLogger;
   breaker: CircuitBreaker;
 };
+
+// The status recorded for a client that left before any response was
+// committed. Nothing reaches the client, so no real HTTP code exists: 499 is
+// the conventional "client closed request" code (nginx's), which keeps the
+// departure out of both the success (2xx) and the server-error (5xx) counts.
+// The reply's default 200 would count it as a success; 0 would read as a
+// missing value.
+const CLIENT_GONE_STATUS = 499;
+
+type ClientGoneContext = Omit<TotalTimeoutContext, "outcome"> & {
+  outcome?: AttemptResult;
+};
+
+// The client left before the first frame: no header and no byte are written,
+// because no receiver exists; the vote, the upstream teardown and the
+// request-complete event still happen. The hijack says so explicitly instead
+// of relying on Fastify skipping the send for a destroyed socket, and it comes
+// LAST, after every step that can throw: a throw before it reaches the route's
+// error handler, which logs only the error's name, while after a hijack
+// Fastify itself would log the whole error object.
+export async function finishClientGoneBeforeFirstFrame(
+  context: ClientGoneContext,
+): Promise<void> {
+  const errorClass: ErrorClass = "client-fault";
+
+  try {
+    context.breaker.recordResult("INCONCLUSIVE");
+  } finally {
+    if (context.acceptedStream !== undefined) {
+      await cancelStream(
+        context.acceptedStream.reader,
+        context.upstreamLog,
+        "proxy_route",
+      );
+    }
+  }
+
+  const terminalDurationMs = Date.now() - context.requestStartedAt;
+  const terminalGatewayOverheadMs = Math.max(
+    0,
+    terminalDurationMs - context.upstreamDurationMs,
+  );
+
+  emitReqComplete(context.request.log, {
+    req_id: context.request.reqId,
+    status: CLIENT_GONE_STATUS,
+    error_class: errorClass,
+    stream: true,
+    attempts: context.attempts,
+    duration_ms: terminalDurationMs,
+    upstream_duration_ms: context.upstreamDurationMs,
+    gateway_overhead_ms: terminalGatewayOverheadMs,
+    retry_disposition: deriveRetryDisposition(
+      context.attempts,
+      context.outcome,
+      context.signal,
+    ),
+    terminal: "CLIENT_GONE",
+  });
+
+  context.reply.hijack();
+}
 
 export async function finishTotalTimeout(
   context: TotalTimeoutContext,

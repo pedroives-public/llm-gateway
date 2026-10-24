@@ -32,6 +32,7 @@ import {
 } from "../upstream/sse-frame-reader.js";
 import { STREAM_TOTAL_DURATION_MS } from "../config.js";
 import {
+  finishClientGoneBeforeFirstFrame,
   finishFirstFrameFault,
   finishTotalTimeout,
   isTotalTimeout,
@@ -301,6 +302,24 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
             firstByteFlushed: () => false,
           });
         } catch (error) {
+          if (request.body.stream === true && reply.raw.destroyed) {
+            terminalDecided = true;
+
+            return finishClientGoneBeforeFirstFrame({
+              attempts,
+              requestStartedAt,
+              upstreamDurationMs,
+              request: {
+                log: request.log,
+                reqId: request.reqId,
+              },
+              reply,
+              signal: timeout.signal,
+              upstreamLog,
+              breaker: opts.breaker,
+            });
+          }
+
           terminalDecided = true;
           opts.breaker.recordResult("INCONCLUSIVE");
           throw error;
@@ -351,6 +370,26 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
               firstFrame = await nextFrame();
             }
           } catch (error) {
+            if (request.body.stream === true && reply.raw.destroyed) {
+              terminalDecided = true;
+
+              return finishClientGoneBeforeFirstFrame({
+                acceptedStream: stream,
+                outcome: stream,
+                attempts,
+                requestStartedAt,
+                upstreamDurationMs,
+                request: {
+                  log: request.log,
+                  reqId: request.reqId,
+                },
+                reply,
+                signal: timeout.signal,
+                upstreamLog,
+                breaker: opts.breaker,
+              });
+            }
+
             if (
               isTotalTimeout(request.body.stream, deadlineAt, timeout.signal)
             ) {

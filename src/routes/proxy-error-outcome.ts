@@ -35,16 +35,22 @@ export const UPSTREAM_DECODE_ERROR_BODY = {
 
 // Reconstructs WHY a request did or did not retry from what the retry
 // primitive leaves behind (attempts, outcome, signal). Callers pass a real
-// upstream outcome (attempts >= 1); the breaker-OPEN fast-fail sets
-// `ineligible` directly. Exported so a unit test can pin the no-Retry-After
-// budget-skip, a path unreachable end-to-end.
+// upstream outcome (attempts >= 1), except a client departure that ended the
+// retry with a rejection, which leaves no outcome: a departure is never
+// retry-eligible, so only a second attempt already made changes the answer.
+// The breaker-OPEN fast-fail sets `ineligible` directly. Exported so a unit
+// test can pin the no-Retry-After budget-skip, a path unreachable end-to-end.
 export function deriveRetryDisposition(
   attempts: number,
-  outcome: AttemptResult,
+  outcome: AttemptResult | undefined,
   signal: AbortSignal,
 ): RetryDisposition {
   if (attempts === 2) {
     return "attempted";
+  }
+
+  if (outcome === undefined) {
+    return "ineligible";
   }
 
   if (isAcceptedStream(outcome) || outcome.kind === "ok") {
