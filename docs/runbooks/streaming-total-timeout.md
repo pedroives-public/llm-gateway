@@ -5,22 +5,33 @@ reported by a consumer, or from the `req_complete` line below.
 
 **Log line**
 
+Before the first frame reached the client:
+
 ```json
 {"level":30,"event":"req_complete","req_id":"...","status":504,"error_class":"gateway-fault","stream":true,"attempts":1,"duration_ms":280012,"upstream_duration_ms":280009,"gateway_overhead_ms":3,"retry_disposition":"ineligible","terminal":"TOTAL_TIMEOUT"}
 ```
 
+After it (duration fields omitted):
+
+```json
+{"level":30,"event":"stream_done","req_id":"...","completed":false,"terminal":"TOTAL_TIMEOUT","attempts":1,"error_class":"gateway-fault"}
+```
+
 **Where it can happen today**
 
-Only where the streaming flag is on (`STREAMING_ENABLED=true`). Production
-refuses to boot with the flag on until the streaming path is complete, so no
-production request meets this deadline yet. Until then this entry describes
-development and test deployments.
+On any `stream: true` request while the streaming flag is on
+(`STREAMING_ENABLED=true`, set in `fly.toml`). With the flag off, `stream: true`
+is rejected with `400` before it reaches the upstream, and no request meets
+this deadline.
 
 **Impact**
 
-One request. The client gets `504` with `x-gateway-error-class: gateway-fault`
-and code `total_timeout_exceeded`, and the gateway makes no further attempt on
-its behalf. Whatever the upstream had already computed is lost, and it may
+One request. Before the first frame, the client gets `504` with
+`x-gateway-error-class: gateway-fault` and code `total_timeout_exceeded`. After
+it, the response status is already `200`: the stream ends with one error event
+carrying code `total_timeout_exceeded` and `"gateway": {"terminal":
+"TOTAL_TIMEOUT"}`, then closes. Either way the gateway makes no further attempt
+on its behalf. Whatever the upstream had already computed is lost, and it may
 still be billed by the provider. The circuit breaker records INCONCLUSIVE:
 other requests and other tenants are not affected, and a run of these lines
 never opens the breaker.
@@ -29,14 +40,20 @@ never opens the breaker.
 
 A `stream: true` request may hold an admission slot for 280 seconds, counted
 once from the start of the handler and across every attempt. This line means
-that deadline passed before the gateway had a response to deliver. It proves
-the request outlived its budget. It does not prove the upstream failed:
+that deadline passed, either before the gateway had a response to deliver or
+while the stream was still open. It proves the request outlived its budget. It does not prove the upstream failed:
 silence is what a queued request, a long reasoning phase and a dead upstream
 all look like from here.
 
 If the upstream answers after the deadline, the answer does not change the
 outcome: the request stays `TOTAL_TIMEOUT`, and the late answer is not logged.
 Recording it is planned.
+
+A response whose content was fully delivered can still end this way, when the
+upstream's terminating frame arrives after the deadline. Retrying it blindly is
+the consumer's choice and costs the operator a second execution. That cost is
+reopened by a measured count of such endings, or by a decision to serve
+reasoning effort `high`.
 
 **What still fits inside the deadline**
 
@@ -70,17 +87,3 @@ effort, a smaller output, a smaller prompt. The deadline is not a setting. It
 is a derived constant (`STREAM_TOTAL_DURATION_MS`, `src/config.ts`) held under
 the outbound client's 300-second limit, and changing it means changing the
 constant, its comment, its test and this entry in the same change.
-
-**Planned, not current**
-
-Today a stream the upstream accepts is not delivered to the client yet, so
-this deadline only ends requests before any byte of a response is written.
-After the first frame the response status will already be `200`, and the
-deadline will end the stream from inside it: one error event carrying
-`"gateway": {"terminal": "TOTAL_TIMEOUT"}`, then close. A response whose
-content was fully delivered can still end that way, when the upstream's
-terminating frame arrives after the deadline; retrying it blindly is the
-consumer's choice and costs the operator a second execution. That cost is
-reopened by a measured count of such endings, or by a decision to serve
-reasoning effort `high`. This section becomes current in the change that
-delivers streams to the client.

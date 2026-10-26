@@ -2,8 +2,8 @@
 
 Self-hosted LLM API gateway. V1 ships an authenticated buffered proxy with a
 full reliability envelope (retry, circuit breaker, timeouts, response cap,
-cost caps). Rate limiting, idempotency replay, semantic caching, and SSE
-streaming are roadmap (V1.1+).
+cost caps); V1.1 adds SSE streaming. Rate limiting, idempotency replay, and
+semantic caching are roadmap.
 
 Operating model: one deployment per operating company; tenants are the
 company's internal consumers (teams/apps/keys), and the upstream credential
@@ -21,11 +21,13 @@ belongs to the deployment operator — never to a tenant.
 - **Deploy:** Docker + Fly.io
 - **CI:** GitHub Actions
 
-## Proxy route (V1 — buffered)
+## Proxy route
 
-`POST /v1/chat/completions` — OpenAI-compatible chat completions, buffered
-only: `stream: true` is rejected with `400` until streaming lands in V1.1.
-Auth via `Authorization: Bearer lkey_...`. The body must carry `model` and a
+`POST /v1/chat/completions` — OpenAI-compatible chat completions, buffered or
+streamed. With `stream: true` the upstream's SSE frames are forwarded to the
+client unchanged as they arrive; a stream the gateway ends before the
+upstream's `[DONE]` closes with one SSE error event carrying
+`"gateway": {"terminal": "<reason>"}`. Auth via `Authorization: Bearer lkey_...`. The body must carry `model` and a
 non-empty `messages[]`. Cost-containment caps on the shared operator account:
 `max_tokens`/`max_completion_tokens` ≤ 16384 (injected when absent) and
 `n` fixed at 1.
@@ -35,7 +37,8 @@ network failure proven to have happened before the request left the process
 (pinned error-code whitelist). Every upstream error status is retry-ineligible
 by default: no status proves the upstream did not start, and bill, the
 execution. `Retry-After` on `429`/`503` is parsed (delta-seconds) but grants no
-retry. 30-second wall-clock; 1 MiB response cap; circuit breaker (5 failures /
+retry. 30-second wall-clock on buffered requests and one 280-second total
+deadline on streaming requests; 1 MiB response cap; circuit breaker (5 failures /
 30 s → open 60 s, single half-open probe); per-phase admission control
 (10 pre-auth and 41 post-auth requests in flight, immediate `503` beyond
 that, no queue).
@@ -58,7 +61,8 @@ The three `upstream-*` operator-culpable classes always answer with a
 deterministic sanitized `502` body — no upstream body fragment or header
 reaches the consumer. Requests rejected before any upstream attempt carry
 per-field `error.code` values such as `malformed_json`, `empty_body`,
-`unsupported_content_type`, `stream_not_supported`, `n_not_supported`,
+`unsupported_content_type`, `stream_not_supported` (streaming flag off),
+`n_not_supported`,
 `max_tokens_too_large`, or `max_completion_tokens_too_large`.
 
 ### Idempotency-Key (V1: accepted, no-op)
@@ -72,8 +76,8 @@ store ships (post-V1).
 
 - A large `max_tokens` can push a single generation past the 30-second
   wall-clock: the gateway answers `504`/`gateway-fault` even though the
-  upstream may still bill the completed call. Prefer modest `max_tokens` in
-  V1; the 120-second streaming budget arrives with V1.1.
+  upstream may still bill the completed call. Prefer modest `max_tokens` on
+  buffered requests, or `stream: true`, whose deadline is 280 seconds.
 
 ## Fly.io Secrets
 
@@ -222,4 +226,5 @@ V1 buffered proxy feature-complete (July 2026): auth, request validation and
 cost caps, retry/breaker/timeout envelope, error classification with
 sanitized operator-fault responses, structured observability events.
 Per-phase admission control and the CD pipeline landed in August 2026.
-Streaming (SSE) is the V1.1 milestone. See commit history for details.
+SSE streaming (V1.1) landed in October 2026 behind a boot-time flag,
+`STREAMING_ENABLED`, kept as a kill switch. See commit history for details.
