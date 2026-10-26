@@ -11,6 +11,9 @@ primary_region = 'gru'
   PORT = '3000'
   NODE_ENV = 'production'
   LOG_LEVEL = 'info'
+  # Kill switch for SSE streaming: 'false' rejects stream:true with 400 at the
+  # schema, before the circuit breaker and the upstream see the request.
+  STREAMING_ENABLED = 'true'
 
 [http_service]
   internal_port = 3000
