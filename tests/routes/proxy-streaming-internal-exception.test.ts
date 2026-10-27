@@ -8,7 +8,7 @@ import type { AcceptedStream } from "../../src/upstream/stream.js";
 import { bearer } from "../helpers/fake-auth-db.js";
 import { buildProxyApp } from "../helpers/proxy-app.js";
 import { bufferedTripwire } from "../helpers/streaming-seams.js";
-import { makeLogCapture } from "../log-capture.js";
+import { makeLogCapture, type CapturedLog } from "../log-capture.js";
 
 // The classifier is pure and cannot be made to throw from outside, so one row
 // forces it: the mock passes every call through to the real classifier until
@@ -43,8 +43,11 @@ const ONE_CONTENT_FRAME =
   'data: {"id": "c1", "choices": [{"delta": {"content": "Hel"}}]}\n\n';
 const SECOND_FRAME =
   'data: {"id": "c1", "choices": [{"delta": {"content": "lo"}}]}\n\n';
+const DONE_FRAME = "data: [DONE]\n\n";
 const INTERNAL_EXCEPTION_SENTINEL =
   'data: {"error": {"message": "stream ended by an internal error", "type": "internal_error", "code": "unhandled_exception"}, "gateway": {"terminal": "INTERNAL_EXCEPTION"}}\n\n';
+const UPSTREAM_DEATH_SENTINEL =
+  'data: {"error": {"message": "stream interrupted", "type": "upstream_error", "code": "stream_aborted"}, "gateway": {"terminal": "UPSTREAM_DEATH"}}\n\n';
 const RESET_AFTER_FIRST_FRAME = Object.assign(new TypeError("terminated"), {
   cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
 });
@@ -60,6 +63,18 @@ const ALLOWED_LINE_KEYS = new Set([
   "msg",
   "err_name",
 ]);
+const BASE_LINE_KEYS = new Set([
+  "level",
+  "time",
+  "pid",
+  "hostname",
+  "reqId",
+  "req_id",
+]);
+const lineFields = (line: CapturedLog): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(line).filter(([key]) => !BASE_LINE_KEYS.has(key)),
+  );
 const RACE_TURNS = 200;
 // Turns left for a second terminal to show up after the first one, so its
 // absence is read after the loop had every chance to produce it.
@@ -70,18 +85,27 @@ const ONE_TERMINAL_RULE =
   "a gateway exception still ends in one terminal and the post-loop";
 const TERMINAL_WRITE_RULE =
   "a failed terminal write neither escapes nor creates a second terminal";
+const ONE_BLOCK_RULE =
+  "a decided terminal runs its terminal block at most once";
 
-function recordingBreaker(): {
+// The vote is the one post-loop step a fake can make throw, so a row that
+// needs the post-loop to fail after its terminal is decided arms it here.
+function recordingBreaker(voteThrowsOnce: boolean): {
   breaker: CircuitBreaker;
   recorded: ProbeOutcome[];
 } {
   const recorded: ProbeOutcome[] = [];
+  let voteFaultArmed = voteThrowsOnce;
   return {
     recorded,
     breaker: {
       tryAcquire: () => ({ kind: "NORMAL" }),
       recordResult: (outcome) => {
         recorded.push(outcome);
+        if (voteFaultArmed) {
+          voteFaultArmed = false;
+          throw new Error("a defect inside the breaker vote");
+        }
       },
       getState: () => "CLOSED",
     },
@@ -144,10 +168,12 @@ const until = async (ready: () => boolean, sentence: string) => {
 
 // A real socket, so the test holds the very response object the loop writes
 // to and can make its write() throw after the first frame crossed the line.
-async function committedStream() {
+async function committedStream(
+  options: { voteThrowsOnce: boolean } = { voteThrowsOnce: false },
+) {
   const capture = makeLogCapture();
   const violations: string[] = [];
-  const { breaker, recorded } = recordingBreaker();
+  const { breaker, recorded } = recordingBreaker(options.voteThrowsOnce);
   let driven: ReturnType<typeof drivenAcceptedStream> | undefined;
 
   const app = await buildProxyApp({
@@ -251,7 +277,7 @@ describe("streaming flag ON: after the first-frame line, a gateway exception is 
       },
       body: ONE_CONTENT_FRAME + INTERNAL_EXCEPTION_SENTINEL,
       endsResponse: true,
-      lines: [],
+      lines: [{ msg: "STREAM_INTERNAL_EXCEPTION", err_name: "Error" }],
       absence: ONE_TERMINAL_RULE,
       rule: NOT_UNRECOGNIZED_RULE,
     },
@@ -265,9 +291,13 @@ describe("streaming flag ON: after the first-frame line, a gateway exception is 
       },
       body: ONE_CONTENT_FRAME,
       endsResponse: false,
-      // The absorbed sentinel write still leaves a trace: one line naming the
-      // failure, so a terminal the client never received is not silent.
-      lines: [{ msg: "STREAM_TERMINAL_WRITE_FAILED", err_name: "Error" }],
+      // Two absorbed failures, two lines in order: the forwarding write's,
+      // caught before any terminal is decided, then the sentinel write's, so a
+      // terminal the client never received is not silent.
+      lines: [
+        { msg: "STREAM_INTERNAL_EXCEPTION", err_name: "Error" },
+        { msg: "STREAM_TERMINAL_WRITE_FAILED", err_name: "Error" },
+      ],
       absence: TERMINAL_WRITE_RULE,
       rule: TERMINAL_WRITE_RULE,
     },
@@ -279,7 +309,7 @@ describe("streaming flag ON: after the first-frame line, a gateway exception is 
       },
       body: ONE_CONTENT_FRAME + INTERNAL_EXCEPTION_SENTINEL,
       endsResponse: true,
-      lines: [],
+      lines: [{ msg: "STREAM_INTERNAL_EXCEPTION", err_name: "TypeError" }],
       absence: ONE_TERMINAL_RULE,
       rule: NOT_UNRECOGNIZED_RULE,
     },
@@ -321,7 +351,7 @@ describe("streaming flag ON: after the first-frame line, a gateway exception is 
       );
       expect(
         warnings.map((log) => ({ msg: log.msg, err_name: log.err_name })),
-        `${absence}: nothing is thrown to the framework's error handler, and an absorbed terminal write leaves one line`,
+        `${absence}: nothing is thrown to the framework's error handler, and every absorbed exception leaves one line naming it`,
       ).toStrictEqual(lines);
       for (const line of warnings) {
         expect(
@@ -333,4 +363,91 @@ describe("streaming flag ON: after the first-frame line, a gateway exception is 
       await s.close();
     }
   });
+});
+
+describe("streaming flag ON: a decided terminal runs its terminal block at most once", () => {
+  it.each([
+    {
+      row: "UPSTREAM_DEATH",
+      act: ({ upstream }: Scene) => {
+        upstream.fail(RESET_AFTER_FIRST_FRAME);
+      },
+      body: ONE_CONTENT_FRAME + UPSTREAM_DEATH_SENTINEL,
+      votes: ["INCONCLUSIVE"],
+      // The classified failure leaves its cause line before the absorbed
+      // throw leaves its own.
+      lines: [
+        {
+          cause_code: RESET_AFTER_FIRST_FRAME.cause.code,
+          cause_name: RESET_AFTER_FIRST_FRAME.cause.name,
+        },
+        { msg: "STREAM_THROW_AFTER_TERMINAL", err_name: "Error" },
+      ],
+    },
+    {
+      row: "[DONE]",
+      act: ({ upstream }: Scene) => {
+        upstream.release(DONE_FRAME);
+      },
+      body: ONE_CONTENT_FRAME + DONE_FRAME,
+      votes: ["SUCCESS"],
+      lines: [{ msg: "STREAM_THROW_AFTER_TERMINAL", err_name: "Error" }],
+    },
+  ])(
+    "absorbs a post-loop throw after $row without a second terminal block",
+    async ({ act, body, votes, lines }) => {
+      const s = await committedStream({ voteThrowsOnce: true });
+      const write = vi.spyOn(s.response, "write");
+      const end = vi.spyOn(s.response, "end");
+
+      try {
+        act(s);
+        await until(
+          s.clientEnded,
+          `${ONE_BLOCK_RULE}: the decided terminal writes its closing bytes and ends the response`,
+        );
+        for (let turn = 0; turn < AFTERMATH_TURNS; turn += 1) {
+          await yieldToIo();
+        }
+        const responseCalls = [
+          ...write.mock.invocationCallOrder.map((at) => ({
+            at,
+            call: "write",
+          })),
+          ...end.mock.invocationCallOrder.map((at) => ({ at, call: "end" })),
+        ]
+          .toSorted((a, b) => a.at - b.at)
+          .map(({ call }) => call);
+        const warnings = s.capture.logs.filter(
+          (log) => typeof log.level === "number" && log.level >= 40,
+        );
+
+        expect(
+          responseCalls,
+          `${ONE_BLOCK_RULE}: after the first frame the response sees one closing write and one end(), and nothing after end()`,
+        ).toStrictEqual(["write", "end"]);
+        expect(
+          s.received(),
+          `${ONE_BLOCK_RULE}: the client sees the forwarded first frame and the decided terminal's closing bytes, once`,
+        ).toBe(body);
+        expect(
+          s.recorded,
+          `${ONE_BLOCK_RULE}: the breaker sees one vote, the decided terminal's`,
+        ).toStrictEqual(votes);
+        expect(
+          s.capture.byEvent("stream_done"),
+          `${ONE_BLOCK_RULE}: no second terminal event (a post-loop that throws before its event loses it, an accepted residual)`,
+        ).toStrictEqual([]);
+        // Every warn-or-above line without Pino's base keys and the request
+        // ids, so the exact list allowlists every line and every field: a
+        // framework error line would add its message and stack.
+        expect(
+          warnings.map(lineFields),
+          `${ONE_BLOCK_RULE}: the absorbed throw leaves one diagnostic line, and nothing reaches the framework's error handler`,
+        ).toStrictEqual(lines);
+      } finally {
+        await s.close();
+      }
+    },
+  );
 });
