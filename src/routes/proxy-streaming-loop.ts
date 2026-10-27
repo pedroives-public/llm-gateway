@@ -104,15 +104,26 @@ export async function forwardUntilTerminal(
     abortForTerminalAfterDecision,
   } = options;
 
+  // Whether this loop already decided the stream's terminal. Only a boundary
+  // catch reads it: an exception that arrives after the decision was thrown
+  // by the terminal block itself, which must not run a second time.
+  let terminalDecided = false;
+  const decide = (): void => {
+    terminalDecided = true;
+    decideTerminal();
+  };
+
   const endWithSentinel = (
     terminal: SentinelTerminal,
     errorClass: ErrorClass,
   ): void => {
-    decideTerminal();
-
-    // Built outside the try: a defect in building the sentinel is the
-    // gateway's own exception, not a write the response refused.
+    // Built before the decision and outside the try: a defect in building the
+    // sentinel is the gateway's own exception, and it must reach the boundary
+    // catch while no terminal is decided, so that catch can still end the
+    // stream.
     const sentinel = streamSentinel(terminal);
+
+    decide();
 
     try {
       raw.write(sentinel);
@@ -145,7 +156,7 @@ export async function forwardUntilTerminal(
   // exists. The level form is read because a destroy is visible at once,
   // before the departure observer's close event arrives.
   const finishClientGone = (): void => {
-    decideTerminal();
+    decide();
     abortForTerminalAfterDecision("client_gone");
 
     runPostLoop(postLoop, {
@@ -154,6 +165,23 @@ export async function forwardUntilTerminal(
       completed: false,
       errorClass: "client-fault",
     });
+  };
+
+  // A boundary catch holds the gateway's own exception. Before the decision it
+  // ends the stream as INTERNAL_EXCEPTION. After it, the throw came from the
+  // terminal block, which already ran up to that throw; running it again
+  // would write after end() and vote a second time, so the line naming the
+  // throw is the only effect left.
+  const absorbAtBoundary = (error: unknown): void => {
+    const errName = extractErrName(error);
+
+    if (terminalDecided) {
+      upstreamLog.error({ err_name: errName }, "STREAM_THROW_AFTER_TERMINAL");
+      return;
+    }
+
+    upstreamLog.error({ err_name: errName }, "STREAM_INTERNAL_EXCEPTION");
+    endWithSentinel("INTERNAL_EXCEPTION", "gateway-fault");
   };
 
   while (true) {
@@ -198,8 +226,8 @@ export async function forwardUntilTerminal(
         const classification = classify(readError, log, reqId);
         endWithSentinel("UPSTREAM_DEATH", classification.error_class);
         return;
-      } catch {
-        endWithSentinel("INTERNAL_EXCEPTION", "gateway-fault");
+      } catch (error) {
+        absorbAtBoundary(error);
         return;
       }
     }
@@ -224,7 +252,7 @@ export async function forwardUntilTerminal(
       }
 
       if (frame.data === "[DONE]") {
-        decideTerminal();
+        decide();
 
         raw.write(frame.bytes);
         raw.end();
@@ -262,8 +290,8 @@ export async function forwardUntilTerminal(
           return;
         }
       }
-    } catch {
-      endWithSentinel("INTERNAL_EXCEPTION", "gateway-fault");
+    } catch (error) {
+      absorbAtBoundary(error);
       return;
     }
   }
