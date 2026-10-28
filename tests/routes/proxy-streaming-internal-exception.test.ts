@@ -85,8 +85,12 @@ const ONE_TERMINAL_RULE =
   "a gateway exception still ends in one terminal and the post-loop";
 const TERMINAL_WRITE_RULE =
   "a failed terminal write neither escapes nor creates a second terminal";
+const ENDED_RULE =
+  "every terminal but CLIENT_GONE ends the response, even when its terminal write failed";
 const ONE_BLOCK_RULE =
   "a decided terminal runs its terminal block at most once";
+const CLIENT_STEP_RULE =
+  "a failure in the terminal block's client step leaves one line, and the post-loop still runs once";
 
 // The vote is the one post-loop step a fake can make throw, so a row that
 // needs the post-loop to fail after its terminal is decided arms it here.
@@ -255,6 +259,11 @@ async function committedStream(
       upstream,
       received: () => Buffer.concat(received).toString("utf8"),
       clientEnded: () => clientEnded,
+      // The client leaves without reading on: its socket closes, so the
+      // server response closes and the departure observer fires.
+      depart: () => {
+        client.destroy();
+      },
       close,
     };
   } catch (error) {
@@ -290,10 +299,11 @@ describe("streaming flag ON: after the first-frame line, a gateway exception is 
         upstream.release(SECOND_FRAME);
       },
       body: ONE_CONTENT_FRAME,
-      endsResponse: false,
+      endsResponse: true,
       // Two absorbed failures, two lines in order: the forwarding write's,
       // caught before any terminal is decided, then the sentinel write's, so a
-      // terminal the client never received is not silent.
+      // terminal the client never received is not silent. The response still
+      // ends: a failed sentinel write does not skip end().
       lines: [
         { msg: "STREAM_INTERNAL_EXCEPTION", err_name: "Error" },
         { msg: "STREAM_TERMINAL_WRITE_FAILED", err_name: "Error" },
@@ -322,7 +332,7 @@ describe("streaming flag ON: after the first-frame line, a gateway exception is 
       if (endsResponse) {
         await until(
           s.clientEnded,
-          `${rule}: the sentinel is written and the response is ended`,
+          `${ENDED_RULE}: the client saw the response end`,
         );
       }
       for (let turn = 0; turn < AFTERMATH_TURNS; turn += 1) {
@@ -444,6 +454,164 @@ describe("streaming flag ON: a decided terminal runs its terminal block at most 
         expect(
           warnings.map(lineFields),
           `${ONE_BLOCK_RULE}: the absorbed throw leaves one diagnostic line, and nothing reaches the framework's error handler`,
+        ).toStrictEqual(lines);
+      } finally {
+        await s.close();
+      }
+    },
+  );
+
+  // A departure decides CLIENT_GONE outside a wake's interpretation, so only
+  // a boundary around the whole loop can hold a throw from its post-loop.
+  it.each([
+    {
+      row: "a client departure",
+      act: ({ depart }: Scene) => {
+        depart();
+      },
+      body: ONE_CONTENT_FRAME,
+      calls: [],
+      votes: ["INCONCLUSIVE"],
+      events: [],
+      lines: [{ msg: "STREAM_THROW_AFTER_TERMINAL", err_name: "Error" }],
+    },
+  ])(
+    "absorbs a post-loop throw after $row without a second terminal block",
+    async ({ act, body, calls, votes, events, lines }) => {
+      const s = await committedStream({ voteThrowsOnce: true });
+      const write = vi.spyOn(s.response, "write");
+      const end = vi.spyOn(s.response, "end");
+
+      try {
+        act(s);
+        await until(
+          () => s.recorded.length > 0,
+          `${ONE_BLOCK_RULE}: the departure's post-loop reaches the breaker vote`,
+        );
+        for (let turn = 0; turn < AFTERMATH_TURNS; turn += 1) {
+          await yieldToIo();
+        }
+        const responseCalls = [
+          ...write.mock.invocationCallOrder.map((at) => ({
+            at,
+            call: "write",
+          })),
+          ...end.mock.invocationCallOrder.map((at) => ({ at, call: "end" })),
+        ]
+          .toSorted((a, b) => a.at - b.at)
+          .map(({ call }) => call);
+        const warnings = s.capture.logs.filter(
+          (log) => typeof log.level === "number" && log.level >= 40,
+        );
+
+        expect(
+          responseCalls,
+          `${ONE_BLOCK_RULE}: a departed client gets no write and no end()`,
+        ).toStrictEqual(calls);
+        expect(
+          s.received(),
+          `${ONE_BLOCK_RULE}: the client keeps only what it read before leaving`,
+        ).toBe(body);
+        expect(
+          s.recorded,
+          `${ONE_BLOCK_RULE}: the breaker sees one vote, the departure's`,
+        ).toStrictEqual(votes);
+        expect(
+          s.capture.byEvent("stream_done"),
+          `${ONE_BLOCK_RULE}: no second terminal event (a post-loop that throws before its event loses it, an accepted residual)`,
+        ).toStrictEqual(events);
+        expect(
+          warnings.map(lineFields),
+          `${ONE_BLOCK_RULE}: the absorbed throw leaves one diagnostic line, and nothing reaches the framework's error handler`,
+        ).toStrictEqual(lines);
+      } finally {
+        await s.close();
+      }
+    },
+  );
+});
+
+describe("streaming flag ON: a failure in the terminal block's client step is absorbed", () => {
+  it.each([
+    {
+      row: "end() throwing after the UPSTREAM_DEATH sentinel",
+      act: ({ response, upstream }: Scene) => {
+        vi.spyOn(response, "end").mockImplementationOnce(() => {
+          throw new Error("the response end failed");
+        });
+        upstream.fail(RESET_AFTER_FIRST_FRAME);
+      },
+      body: ONE_CONTENT_FRAME + UPSTREAM_DEATH_SENTINEL,
+      endsResponse: false,
+      terminal: "UPSTREAM_DEATH",
+      completed: false,
+      votes: ["INCONCLUSIVE"],
+      lines: [
+        {
+          cause_code: RESET_AFTER_FIRST_FRAME.cause.code,
+          cause_name: RESET_AFTER_FIRST_FRAME.cause.name,
+        },
+        { msg: "STREAM_TERMINAL_END_FAILED", err_name: "Error" },
+      ],
+    },
+    {
+      row: "the [DONE] frame's write throwing",
+      act: ({ response, upstream }: Scene) => {
+        vi.spyOn(response, "write").mockImplementationOnce(() => {
+          throw new Error("the socket write failed");
+        });
+        upstream.release(DONE_FRAME);
+      },
+      body: ONE_CONTENT_FRAME,
+      endsResponse: true,
+      terminal: "DONE",
+      completed: true,
+      votes: ["SUCCESS"],
+      lines: [{ msg: "STREAM_TERMINAL_WRITE_FAILED", err_name: "Error" }],
+    },
+  ])(
+    "runs the post-loop once with $row",
+    async ({ act, body, endsResponse, terminal, completed, votes, lines }) => {
+      const s = await committedStream();
+
+      try {
+        act(s);
+        await until(
+          () => s.capture.byEvent("stream_done").length > 0,
+          `${CLIENT_STEP_RULE}: the post-loop runs and emits its terminal event`,
+        );
+        if (endsResponse) {
+          await until(
+            s.clientEnded,
+            `${ENDED_RULE}: the client saw the response end`,
+          );
+        }
+        for (let turn = 0; turn < AFTERMATH_TURNS; turn += 1) {
+          await yieldToIo();
+        }
+        const warnings = s.capture.logs.filter(
+          (log) => typeof log.level === "number" && log.level >= 40,
+        );
+
+        expect(
+          s.capture.byEvent("stream_done"),
+          `${CLIENT_STEP_RULE}: exactly one terminal event`,
+        ).toHaveLength(1);
+        expect(
+          s.capture.byEvent("stream_done")[0],
+          `${CLIENT_STEP_RULE}: the decided terminal stands`,
+        ).toMatchObject({ terminal, completed });
+        expect(
+          s.received(),
+          `${CLIENT_STEP_RULE}: the client sees only the bytes whose write succeeded`,
+        ).toBe(body);
+        expect(
+          s.recorded,
+          `${CLIENT_STEP_RULE}: the breaker sees one vote, the decided terminal's`,
+        ).toStrictEqual(votes);
+        expect(
+          warnings.map(lineFields),
+          `${CLIENT_STEP_RULE}: every absorbed failure leaves one line naming it, and nothing reaches the framework's error handler`,
         ).toStrictEqual(lines);
       } finally {
         await s.close();
