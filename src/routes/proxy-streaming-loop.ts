@@ -127,7 +127,6 @@ export async function forwardUntilTerminal(
 
     try {
       raw.write(sentinel);
-      raw.end();
     } catch (error) {
       // The terminal decision and post-loop still must run when the response
       // cannot accept the sentinel, and the client never receiving it must
@@ -135,6 +134,17 @@ export async function forwardUntilTerminal(
       upstreamLog.error(
         { err_name: extractErrName(error) },
         "STREAM_TERMINAL_WRITE_FAILED",
+      );
+    }
+
+    // Attempted even when the write above threw. Its own try names a failed
+    // end() apart from a failed write, and the post-loop still runs.
+    try {
+      raw.end();
+    } catch (error) {
+      upstreamLog.error(
+        { err_name: extractErrName(error) },
+        "STREAM_TERMINAL_END_FAILED",
       );
     }
 
@@ -184,12 +194,58 @@ export async function forwardUntilTerminal(
     endWithSentinel("INTERNAL_EXCEPTION", "gateway-fault");
   };
 
-  while (true) {
-    let frame: SseFrame;
+  // A net around the whole loop: a departure or the deadline read outside a
+  // wake's interpretation still starts a terminal block whose post-loop can
+  // throw, and the gateway's own exception must not leave this function.
+  try {
+    while (true) {
+      let frame: SseFrame;
 
-    try {
-      frame = await nextFrame();
-    } catch (error) {
+      try {
+        frame = await nextFrame();
+      } catch (error) {
+        if (raw.destroyed) {
+          finishClientGone();
+          return;
+        }
+
+        if (deadlineConditionHolds(deadlineAt, signal)) {
+          endWithSentinel("TOTAL_TIMEOUT", "gateway-fault");
+          return;
+        }
+
+        try {
+          let readError: ReturnType<typeof resolveRejection>;
+
+          try {
+            readError = resolveRejection(error, signal, upstreamLog);
+          } catch {
+            endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+            return;
+          }
+
+          if (readError.kind !== "network_failed") {
+            upstreamLog.error(
+              {
+                ...extractCauseLog(error),
+                err_name: extractErrName(error),
+                abort_identity: error === signal.reason,
+              },
+              "STREAM_REJECTION_OUTCOME_UNHANDLED",
+            );
+            endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+            return;
+          }
+
+          const classification = classify(readError, log, reqId);
+          endWithSentinel("UPSTREAM_DEATH", classification.error_class);
+          return;
+        } catch (error) {
+          absorbAtBoundary(error);
+          return;
+        }
+      }
+
       if (raw.destroyed) {
         finishClientGone();
         return;
@@ -201,98 +257,77 @@ export async function forwardUntilTerminal(
       }
 
       try {
-        let readError: ReturnType<typeof resolveRejection>;
+        if (frame.kind !== "frame") {
+          const terminal =
+            frame.kind === "cap" ? "PARSER_BUFFER_CAP" : "EOF_WITHOUT_DONE";
 
-        try {
-          readError = resolveRejection(error, signal, upstreamLog);
-        } catch {
-          endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+          endWithSentinel(terminal, "upstream-fault");
           return;
         }
 
-        if (readError.kind !== "network_failed") {
-          upstreamLog.error(
-            {
-              ...extractCauseLog(error),
-              err_name: extractErrName(error),
-              abort_identity: error === signal.reason,
-            },
-            "STREAM_REJECTION_OUTCOME_UNHANDLED",
-          );
-          endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+        if (frame.data === "[DONE]") {
+          decide();
+
+          // The upstream finished, so the terminal stays DONE whatever the
+          // response does next: a failed write or end() is absorbed here with
+          // its own line, as in endWithSentinel, and the post-loop still runs.
+          try {
+            raw.write(frame.bytes);
+          } catch (error) {
+            upstreamLog.error(
+              { err_name: extractErrName(error) },
+              "STREAM_TERMINAL_WRITE_FAILED",
+            );
+          }
+
+          try {
+            raw.end();
+          } catch (error) {
+            upstreamLog.error(
+              { err_name: extractErrName(error) },
+              "STREAM_TERMINAL_END_FAILED",
+            );
+          }
+
+          runPostLoop(postLoop, {
+            terminal: "DONE",
+            breakerOutcome: "SUCCESS",
+            completed: true,
+            errorClass: null,
+          });
+
           return;
         }
 
-        const classification = classify(readError, log, reqId);
-        endWithSentinel("UPSTREAM_DEATH", classification.error_class);
-        return;
+        const needsDrain = !raw.write(frame.bytes);
+
+        if (needsDrain) {
+          try {
+            await once(raw, "drain", { signal });
+          } catch {
+            if (raw.destroyed) {
+              finishClientGone();
+              return;
+            }
+
+            if (deadlineConditionHolds(deadlineAt, signal)) {
+              endWithSentinel("TOTAL_TIMEOUT", "gateway-fault");
+              return;
+            }
+
+            // Unreachable by design: an abort of the drain wait comes from a
+            // client departure or the deadline, which the checks above read.
+            // Ending here keeps the loop from leaving without a terminal.
+            endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
+            return;
+          }
+        }
       } catch (error) {
         absorbAtBoundary(error);
         return;
       }
     }
-
-    if (raw.destroyed) {
-      finishClientGone();
-      return;
-    }
-
-    if (deadlineConditionHolds(deadlineAt, signal)) {
-      endWithSentinel("TOTAL_TIMEOUT", "gateway-fault");
-      return;
-    }
-
-    try {
-      if (frame.kind !== "frame") {
-        const terminal =
-          frame.kind === "cap" ? "PARSER_BUFFER_CAP" : "EOF_WITHOUT_DONE";
-
-        endWithSentinel(terminal, "upstream-fault");
-        return;
-      }
-
-      if (frame.data === "[DONE]") {
-        decide();
-
-        raw.write(frame.bytes);
-        raw.end();
-
-        runPostLoop(postLoop, {
-          terminal: "DONE",
-          breakerOutcome: "SUCCESS",
-          completed: true,
-          errorClass: null,
-        });
-
-        return;
-      }
-
-      const needsDrain = !raw.write(frame.bytes);
-
-      if (needsDrain) {
-        try {
-          await once(raw, "drain", { signal });
-        } catch {
-          if (raw.destroyed) {
-            finishClientGone();
-            return;
-          }
-
-          if (deadlineConditionHolds(deadlineAt, signal)) {
-            endWithSentinel("TOTAL_TIMEOUT", "gateway-fault");
-            return;
-          }
-
-          // Unreachable by design: an abort of the drain wait comes from a
-          // client departure or the deadline, which the checks above read.
-          // Ending here keeps the loop from leaving without a terminal.
-          endWithSentinel("UNRECOGNIZED_REJECTION", "gateway-fault");
-          return;
-        }
-      }
-    } catch (error) {
-      absorbAtBoundary(error);
-      return;
-    }
+  } catch (error) {
+    absorbAtBoundary(error);
   }
 }
