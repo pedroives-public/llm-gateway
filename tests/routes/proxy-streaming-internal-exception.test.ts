@@ -116,10 +116,11 @@ function recordingBreaker(voteThrowsOnce: boolean): {
   };
 }
 
-// A defect the loop meets outside a wake's interpretation: the next read of
-// the response's destroyed flag throws, once. The flag is an own data
-// property of the response, so an accessor replaces it for the rest of the
-// scene, and every later read and write still sees the real value.
+// A defect the loop meets in its departure check, outside the catches around
+// a read's handling: the next read of the response's destroyed flag throws,
+// once. The flag is an own data property of the response, so an accessor
+// replaces it for the rest of the scene, and every later read and write still
+// sees the real value.
 function destroyedReadThrowsOnce(response: http.ServerResponse): void {
   let armed = true;
   let destroyed = response.destroyed;
@@ -505,8 +506,9 @@ describe("streaming flag ON: a decided terminal runs its terminal block at most 
     },
   );
 
-  // A departure decides CLIENT_GONE outside a wake's interpretation, so only
-  // a boundary around the whole loop can hold a throw from its post-loop.
+  // A departure decides CLIENT_GONE in a check outside the catches around a
+  // read's handling, so only a boundary around the whole loop can hold a
+  // throw from its post-loop.
   it.each([
     {
       row: "a client departure",

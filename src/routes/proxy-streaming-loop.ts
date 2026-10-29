@@ -194,9 +194,10 @@ export async function forwardUntilTerminal(
     endWithSentinel("INTERNAL_EXCEPTION", "gateway-fault");
   };
 
-  // A net around the whole loop: a departure or the deadline read outside a
-  // wake's interpretation still starts a terminal block whose post-loop can
-  // throw, and the gateway's own exception must not leave this function.
+  // A net around the whole loop: the departure and deadline checks that follow
+  // each read sit outside the catches around that read's handling, yet they
+  // still start a terminal block whose post-loop can throw, and the gateway's
+  // own exception must not leave this function.
   try {
     while (true) {
       let frame: SseFrame;
