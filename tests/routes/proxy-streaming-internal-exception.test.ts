@@ -192,14 +192,17 @@ const until = async (ready: () => boolean, sentence: string) => {
   throw new Error(sentence);
 };
 
-// A real socket, so the test holds the very response object the loop writes
-// to and can make its write() throw after the first frame crossed the line.
+// A real socket, so the test holds the very response object the route writes
+// to and can make its write() throw. The scene starts after the first frame
+// crossed the line, unless a row about the first frame itself asks to start
+// before it: the upstream called and nothing released yet.
 async function committedStream(
-  options: { voteThrowsOnce: boolean } = { voteThrowsOnce: false },
+  options: { voteThrowsOnce?: boolean; crossFirstFrame?: boolean } = {},
 ) {
+  const { voteThrowsOnce = false, crossFirstFrame = true } = options;
   const capture = makeLogCapture();
   const violations: string[] = [];
-  const { breaker, recorded } = recordingBreaker(options.voteThrowsOnce);
+  const { breaker, recorded } = recordingBreaker(voteThrowsOnce);
   let driven: ReturnType<typeof drivenAcceptedStream> | undefined;
 
   const app = await buildProxyApp({
@@ -261,13 +264,15 @@ async function committedStream(
     if (upstream === undefined) {
       throw new Error("the streaming upstream was not called");
     }
-    upstream.release(ONE_CONTENT_FRAME);
-    await until(
-      () =>
-        Buffer.concat(received).length >=
-        Buffer.byteLength(ONE_CONTENT_FRAME),
-      "the scene's premise: the client received the first frame, so the stream crossed the first-frame line",
-    );
+    if (crossFirstFrame) {
+      upstream.release(ONE_CONTENT_FRAME);
+      await until(
+        () =>
+          Buffer.concat(received).length >=
+          Buffer.byteLength(ONE_CONTENT_FRAME),
+        "the scene's premise: the client received the first frame, so the stream crossed the first-frame line",
+      );
+    }
     expect(violations).toStrictEqual([]);
     const response = serverResponse;
     if (response === undefined) {
@@ -608,10 +613,54 @@ describe("streaming flag ON: a failure in the terminal block's client step is ab
       votes: ["SUCCESS"],
       lines: [{ msg: "STREAM_TERMINAL_WRITE_FAILED", err_name: "Error" }],
     },
+    // The first frame can itself be [DONE]: the route closes the stream
+    // before any forwarding loop exists, so this row arms the response
+    // before the first frame arrives.
+    {
+      row: "the first frame's [DONE] write throwing",
+      crossFirstFrame: false,
+      act: ({ response, upstream }: Scene) => {
+        vi.spyOn(response, "write").mockImplementationOnce(() => {
+          throw new Error("the socket write failed");
+        });
+        upstream.release(DONE_FRAME);
+      },
+      body: "",
+      endsResponse: true,
+      terminal: "DONE",
+      completed: true,
+      votes: ["SUCCESS"],
+      lines: [{ msg: "STREAM_TERMINAL_WRITE_FAILED", err_name: "Error" }],
+    },
+    {
+      row: "the first frame's [DONE] end() throwing",
+      crossFirstFrame: false,
+      act: ({ response, upstream }: Scene) => {
+        vi.spyOn(response, "end").mockImplementationOnce(() => {
+          throw new Error("the response end failed");
+        });
+        upstream.release(DONE_FRAME);
+      },
+      body: DONE_FRAME,
+      endsResponse: false,
+      terminal: "DONE",
+      completed: true,
+      votes: ["SUCCESS"],
+      lines: [{ msg: "STREAM_TERMINAL_END_FAILED", err_name: "Error" }],
+    },
   ])(
     "runs the post-loop once with $row",
-    async ({ act, body, endsResponse, terminal, completed, votes, lines }) => {
-      const s = await committedStream();
+    async ({
+      act,
+      crossFirstFrame,
+      body,
+      endsResponse,
+      terminal,
+      completed,
+      votes,
+      lines,
+    }) => {
+      const s = await committedStream({ crossFirstFrame });
 
       try {
         act(s);
