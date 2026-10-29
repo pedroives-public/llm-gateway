@@ -1,7 +1,11 @@
 import type { FastifyError, FastifyPluginAsync } from "fastify";
 import type { CircuitBreaker } from "../reliability/circuit-breaker.js";
 import type { ErrorOutcome, Outcome } from "../upstream/outcome.js";
-import { resolveRejection, type Logger } from "../upstream/rejection.js";
+import {
+  resolveRejection,
+  extractErrName,
+  type Logger,
+} from "../upstream/rejection.js";
 import {
   emitReqStart,
   emitReqComplete,
@@ -574,8 +578,27 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
                 "cache-control": "no-cache",
                 connection: "keep-alive",
               });
-              reply.raw.write(firstFrame.bytes);
-              reply.raw.end();
+
+              // As in the forwarding loop's [DONE], the terminal stays DONE
+              // whatever the response does next: a failed write or end()
+              // leaves its own line, and the post-loop still runs.
+              try {
+                reply.raw.write(firstFrame.bytes);
+              } catch (error) {
+                upstreamLog.error(
+                  { err_name: extractErrName(error) },
+                  "STREAM_TERMINAL_WRITE_FAILED",
+                );
+              }
+
+              try {
+                reply.raw.end();
+              } catch (error) {
+                upstreamLog.error(
+                  { err_name: extractErrName(error) },
+                  "STREAM_TERMINAL_END_FAILED",
+                );
+              }
 
               runPostLoop(postLoop, {
                 terminal: "DONE",
