@@ -328,6 +328,18 @@ export async function forwardUntilTerminal(
       }
     }
   } catch (error) {
-    absorbAtBoundary(error);
+    // The INTERNAL_EXCEPTION block started here can throw too, and no catch is
+    // left above this one. The line names that throw as after the terminal
+    // without reading the decision: before it, the block only names and logs
+    // the first exception and builds the sentinel from a constant table, none
+    // of which throws, so a throw that reaches here came after the decision.
+    try {
+      absorbAtBoundary(error);
+    } catch (escaped) {
+      upstreamLog.error(
+        { err_name: extractErrName(escaped) },
+        "STREAM_THROW_AFTER_TERMINAL",
+      );
+    }
   }
 }
