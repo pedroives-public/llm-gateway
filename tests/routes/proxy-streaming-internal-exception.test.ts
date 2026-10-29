@@ -116,6 +116,28 @@ function recordingBreaker(voteThrowsOnce: boolean): {
   };
 }
 
+// A defect the loop meets outside a wake's interpretation: the next read of
+// the response's destroyed flag throws, once. The flag is an own data
+// property of the response, so an accessor replaces it for the rest of the
+// scene, and every later read and write still sees the real value.
+function destroyedReadThrowsOnce(response: http.ServerResponse): void {
+  let armed = true;
+  let destroyed = response.destroyed;
+  Object.defineProperty(response, "destroyed", {
+    configurable: true,
+    get() {
+      if (armed) {
+        armed = false;
+        throw new TypeError("a defect reading the response state");
+      }
+      return destroyed;
+    },
+    set(value: boolean) {
+      destroyed = value;
+    },
+  });
+}
+
 // An accepted stream whose frames the test releases by hand and whose read it
 // can fail with a transport error.
 function drivenAcceptedStream(signal: AbortSignal): {
@@ -403,6 +425,23 @@ describe("streaming flag ON: a decided terminal runs its terminal block at most 
       votes: ["SUCCESS"],
       lines: [{ msg: "STREAM_THROW_AFTER_TERMINAL", err_name: "Error" }],
     },
+    // Two gateway defects: the first reaches the net around the loop before
+    // any terminal is decided, and the INTERNAL_EXCEPTION block that net
+    // starts throws in its post-loop. No catch is left above that second
+    // throw but the function's own.
+    {
+      row: "INTERNAL_EXCEPTION decided by the net around the loop",
+      act: ({ response, upstream }: Scene) => {
+        destroyedReadThrowsOnce(response);
+        upstream.release(SECOND_FRAME);
+      },
+      body: ONE_CONTENT_FRAME + INTERNAL_EXCEPTION_SENTINEL,
+      votes: ["INCONCLUSIVE"],
+      lines: [
+        { msg: "STREAM_INTERNAL_EXCEPTION", err_name: "TypeError" },
+        { msg: "STREAM_THROW_AFTER_TERMINAL", err_name: "Error" },
+      ],
+    },
   ])(
     "absorbs a post-loop throw after $row without a second terminal block",
     async ({ act, body, votes, lines }) => {
@@ -453,7 +492,7 @@ describe("streaming flag ON: a decided terminal runs its terminal block at most 
         // framework error line would add its message and stack.
         expect(
           warnings.map(lineFields),
-          `${ONE_BLOCK_RULE}: the absorbed throw leaves one diagnostic line, and nothing reaches the framework's error handler`,
+          `${ONE_BLOCK_RULE}: every absorbed throw leaves one diagnostic line, and nothing reaches the framework's error handler`,
         ).toStrictEqual(lines);
       } finally {
         await s.close();
