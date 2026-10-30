@@ -36,7 +36,7 @@
     "testcontainers": "^12.2.1",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.72.0",
+    "typescript-eslint": "^8.72.1",
     "vitest": "^4.1.11"
   },
   "dependencies": {
