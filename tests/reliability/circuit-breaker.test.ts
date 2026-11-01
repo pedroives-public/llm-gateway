@@ -11,8 +11,12 @@ import {
 type TestLog = { info: (obj: object) => void };
 const noopLog: TestLog = { info: () => {} };
 
-function makeBreaker(log: TestLog = noopLog): CircuitBreaker {
+function makeCircuit(log: TestLog = noopLog) {
   return createCircuitBreaker(log);
+}
+
+function makeBreaker(log: TestLog = noopLog): CircuitBreaker {
+  return makeCircuit(log).breaker;
 }
 
 // A freshly constructed breaker is CLOSED and admits the next request
@@ -148,34 +152,158 @@ describe("circuit breaker — HALF_OPEN probe outcomes", () => {
   });
 
   it("closes when the probe succeeds and admits normally again", () => {
-    const breaker = makeBreaker();
+    const circuit = makeCircuit();
+    const breaker = circuit.breaker;
     admitProbe(breaker);
 
-    breaker.recordResult("SUCCESS");
+    circuit.probe.recordProbeResult("SUCCESS");
 
     expect(breaker.getState()).toBe("CLOSED");
     expect(breaker.tryAcquire()).toEqual({ kind: "NORMAL" });
   });
 
   it("re-opens for another cooldown when the probe fails", () => {
-    const breaker = makeBreaker();
+    const circuit = makeCircuit();
+    const breaker = circuit.breaker;
     admitProbe(breaker);
 
-    breaker.recordResult("FAILURE");
+    circuit.probe.recordProbeResult("FAILURE");
 
     expect(breaker.getState()).toBe("OPEN");
     expect(breaker.tryAcquire()).toEqual({ kind: "FAST_FAIL" }); // inside the fresh 60s
+    vi.advanceTimersByTime(OPEN_MS + 1_000);
+    expect(
+      breaker.tryAcquire(),
+      "a failed probe must release the slot: the next attempt needs it",
+    ).toEqual({ kind: "PROBE" });
   });
 
   it("stays HALF_OPEN on an inconclusive probe and admits the next request as a fresh probe", () => {
-    const breaker = makeBreaker();
+    const circuit = makeCircuit();
+    const breaker = circuit.breaker;
     admitProbe(breaker);
 
-    breaker.recordResult("INCONCLUSIVE");
+    circuit.probe.recordProbeResult("INCONCLUSIVE");
 
     expect(breaker.getState()).toBe("HALF_OPEN");
-    expect(breaker.tryAcquire()).toEqual({ kind: "PROBE" }); // slot released — no wedge
+    expect(
+      breaker.tryAcquire(),
+      "an inconclusive probe must release the slot: a stuck slot holds HALF_OPEN until restart",
+    ).toEqual({ kind: "PROBE" });
   });
+
+  it("releases the probe slot when state-change logging throws", () => {
+    let shouldThrow = false;
+    const circuit = makeCircuit({
+      info: () => {
+        if (shouldThrow) throw new Error("probe event failed");
+      },
+    });
+    const breaker = circuit.breaker;
+    admitProbe(breaker);
+
+    shouldThrow = true;
+    expect(() => circuit.probe.recordProbeResult("SUCCESS")).toThrow(
+      "probe event failed",
+    );
+    expect(breaker.getState()).toBe("CLOSED");
+    expect(breaker.tryAcquire()).toEqual({ kind: "NORMAL" });
+
+    shouldThrow = false;
+    recordFailures(breaker, 5);
+    vi.advanceTimersByTime(OPEN_MS + 1_000);
+
+    expect(
+      breaker.tryAcquire(),
+      "a logging exception must not strand the next probe",
+    ).toEqual({ kind: "PROBE" });
+  });
+});
+
+describe("circuit breaker — tenant outcomes while HALF_OPEN", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    {
+      outcome: "SUCCESS",
+      expectedState: "HALF_OPEN",
+      expectedAdmission: "FAST_FAIL",
+      because:
+        "a tenant vote during HALF_OPEN must not close the breaker: only the probe of the current attempt proves recovery",
+    },
+    {
+      outcome: "FAILURE",
+      expectedState: "HALF_OPEN",
+      expectedAdmission: "FAST_FAIL",
+      because:
+        "a tenant vote during HALF_OPEN must not reopen the breaker: it is not the result of the probe in flight",
+    },
+    {
+      outcome: "INCONCLUSIVE",
+      expectedState: "HALF_OPEN",
+      expectedAdmission: "FAST_FAIL",
+      because:
+        "a tenant vote during HALF_OPEN must not release the probe slot: a second probe would run beside the one in flight",
+    },
+  ] as const)(
+    "a tenant $outcome vote during HALF_OPEN moves nothing",
+    ({ outcome, expectedState, expectedAdmission, because }) => {
+      const breaker = makeBreaker();
+      admitProbe(breaker);
+
+      breaker.recordResult(outcome);
+
+      expect(breaker.getState(), because).toBe(expectedState);
+      expect(breaker.tryAcquire(), because).toEqual({ kind: expectedAdmission });
+    },
+  );
+});
+
+describe("circuit breaker — tenant votes while OPEN", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    {
+      outcome: "SUCCESS",
+      because:
+        "a tenant SUCCESS vote during OPEN moves nothing: the state stays OPEN and the 60s count from the original opening",
+    },
+    {
+      outcome: "FAILURE",
+      because:
+        "a tenant FAILURE vote during OPEN moves nothing: failing tenants must not postpone recovery by restarting the 60s",
+    },
+    {
+      outcome: "INCONCLUSIVE",
+      because:
+        "a tenant INCONCLUSIVE vote during OPEN moves nothing: the state stays OPEN and the 60s count from the original opening",
+    },
+  ] as const)(
+    "keeps the original cooldown after an OPEN tenant $outcome vote",
+    ({ outcome, because }) => {
+      const breaker = makeBreaker();
+      recordFailures(breaker, 5);
+      vi.advanceTimersByTime(30_000);
+
+      breaker.recordResult(outcome);
+
+      expect(breaker.getState(), because).toBe("OPEN");
+      vi.advanceTimersByTime(31_000);
+      expect(breaker.tryAcquire(), because).toEqual({ kind: "PROBE" });
+    },
+  );
 });
 
 // Each transition emits cb_state_change. failure_count / window_start_ms are a
@@ -228,13 +356,14 @@ describe("circuit breaker — cb_state_change events", () => {
 
   it("emits HALF_OPEN -> CLOSED with an empty-window snapshot when the probe succeeds", () => {
     const info = vi.fn();
-    const breaker = makeBreaker({ info });
+    const circuit = makeCircuit({ info });
+    const breaker = circuit.breaker;
     recordFailures(breaker, 5);
     vi.advanceTimersByTime(OPEN_MS + 1_000);
     breaker.tryAcquire(); // OPEN -> HALF_OPEN
     info.mockClear();
 
-    breaker.recordResult("SUCCESS");
+    circuit.probe.recordProbeResult("SUCCESS");
 
     expect(info).toHaveBeenCalledTimes(1);
     expect(info).toHaveBeenCalledWith({
@@ -248,13 +377,14 @@ describe("circuit breaker — cb_state_change events", () => {
 
   it("emits HALF_OPEN -> OPEN with an empty-window snapshot when the probe fails", () => {
     const info = vi.fn();
-    const breaker = makeBreaker({ info });
+    const circuit = makeCircuit({ info });
+    const breaker = circuit.breaker;
     recordFailures(breaker, 5);
     vi.advanceTimersByTime(OPEN_MS + 1_000);
     breaker.tryAcquire(); // OPEN -> HALF_OPEN
     info.mockClear();
 
-    breaker.recordResult("FAILURE");
+    circuit.probe.recordProbeResult("FAILURE");
 
     expect(info).toHaveBeenCalledTimes(1);
     expect(info).toHaveBeenCalledWith({
@@ -281,9 +411,10 @@ describe("circuit breaker — failure-window isolation across recovery", () => {
   });
 
   it("requires a full 5 fresh failures to re-open after a probe-success close", () => {
-    const breaker = makeBreaker();
+    const circuit = makeCircuit();
+    const breaker = circuit.breaker;
     admitProbe(breaker);
-    breaker.recordResult("SUCCESS");
+    circuit.probe.recordProbeResult("SUCCESS");
 
     recordFailures(breaker, 4);
 
