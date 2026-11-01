@@ -6,9 +6,10 @@ const OPEN_COOLDOWN_MS = 60_000;
 
 export type CircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
 export type ProbeOutcome = "SUCCESS" | "FAILURE" | "INCONCLUSIVE";
+export type ProbeVote = (outcome: ProbeOutcome) => void;
 
 export interface CircuitAdmission {
-  kind: "NORMAL" | "PROBE" | "FAST_FAIL";
+  kind: "NORMAL" | "FAST_FAIL";
 }
 
 // Minimal logger the breaker needs; structurally compatible with events.ts.
@@ -23,7 +24,7 @@ export interface CircuitBreaker {
 }
 
 export interface CircuitBreakerProbe {
-  recordProbeResult(outcome: ProbeOutcome): void;
+  startAttempt(): ProbeVote | null;
 }
 
 export interface CircuitBreakerInstance {
@@ -89,44 +90,52 @@ export function createCircuitBreaker(log: CbLogger): CircuitBreakerInstance {
     },
 
     tryAcquire() {
-      const now = Date.now();
+      if (state === "CLOSED") return { kind: "NORMAL" };
+      return { kind: "FAST_FAIL" };
+    },
+  };
 
-      if (
-        state === "OPEN" &&
-        openedAt !== null &&
-        now - openedAt >= OPEN_COOLDOWN_MS
-      ) {
+  const recordProbeResult = (outcome: ProbeOutcome): void => {
+    try {
+      if (outcome === "SUCCESS") {
+        state = "CLOSED";
+        emitStateChange("HALF_OPEN", "CLOSED");
+      } else if (outcome === "FAILURE") {
+        state = "OPEN";
+        openedAt = Date.now();
+        emitStateChange("HALF_OPEN", "OPEN");
+      }
+    } finally {
+      // Every probe terminal releases the slot, including inconclusive
+      // results and exceptions while emitting a state transition.
+      probeInFlight = false;
+    }
+  };
+
+  const probe: CircuitBreakerProbe = {
+    startAttempt() {
+      if (state === "CLOSED") return null;
+
+      if (state === "OPEN") {
+        const now = Date.now();
+        if (openedAt === null || now - openedAt < OPEN_COOLDOWN_MS) {
+          return null;
+        }
+
         state = "HALF_OPEN";
         emitStateChange("OPEN", "HALF_OPEN");
       }
 
-      if (state === "CLOSED") return { kind: "NORMAL" };
-      if (state === "OPEN") return { kind: "FAST_FAIL" };
-      if (probeInFlight) return { kind: "FAST_FAIL" };
+      if (probeInFlight) return null;
 
       probeInFlight = true;
-      return { kind: "PROBE" };
-    },
-  };
+      let voted = false;
+      return (outcome) => {
+        if (voted) return;
 
-  const probe: CircuitBreakerProbe = {
-    recordProbeResult(outcome) {
-      if (state !== "HALF_OPEN" || !probeInFlight) return;
-
-      try {
-        if (outcome === "SUCCESS") {
-          state = "CLOSED";
-          emitStateChange("HALF_OPEN", "CLOSED");
-        } else if (outcome === "FAILURE") {
-          state = "OPEN";
-          openedAt = Date.now();
-          emitStateChange("HALF_OPEN", "OPEN");
-        }
-      } finally {
-        // Every probe terminal releases the slot, including inconclusive
-        // results and exceptions while emitting a state transition.
-        probeInFlight = false;
-      }
+        voted = true;
+        recordProbeResult(outcome);
+      };
     },
   };
 
