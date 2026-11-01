@@ -115,13 +115,13 @@ export async function buildApp(
     if (options.registerProtected) {
       await options.registerProtected(scope);
     } else {
-      const breaker = createCircuitBreaker(app.log);
+      const circuit = createCircuitBreaker(app.log);
       const upstream = createOpenAIClient({
         apiKey: openaiApiKey,
         baseURL: openaiBaseUrl,
       });
       await scope.register(proxyRoute, {
-        breaker,
+        breaker: circuit.breaker,
         streamingEnabled,
         upstreamBuffered: upstream.buffered,
         upstreamStreaming: upstream.streaming,

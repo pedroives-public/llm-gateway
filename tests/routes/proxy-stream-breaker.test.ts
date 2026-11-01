@@ -99,7 +99,7 @@ describe("stream:true must not open the shared circuit breaker", () => {
       // reaches the real state machine; injecting the client avoids mutating
       // OPENAI_BASE_URL. The buffered seam guards the forbidden pattern and
       // otherwise delegates to the real client, which serves the victim.
-      const heldBreaker = createCircuitBreaker(noopLog);
+      const heldBreaker = createCircuitBreaker(noopLog).breaker;
       const recorded: ProbeOutcome[] = [];
       const votingBreaker: CircuitBreaker = {
         tryAcquire: () => heldBreaker.tryAcquire(),

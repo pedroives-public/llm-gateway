@@ -910,7 +910,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
     async () => {
       const capture = makeLogCapture();
       const cbEvents: object[] = [];
-      const breaker = createCircuitBreaker({ info: (o) => cbEvents.push(o) });
+      const breaker = createCircuitBreaker({ info: (o) => cbEvents.push(o) }).breaker;
       let upstreamCalls = 0;
       const failing503 = (): Promise<Outcome> => {
         upstreamCalls += 1;
@@ -1031,7 +1031,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
   });
 
   it("8.10 wall-clock on the REAL breaker: six concurrent expiries in one window leave it CLOSED and the next request reaches the upstream", async () => {
-    const breaker = createCircuitBreaker({ info: () => {} });
+    const breaker = createCircuitBreaker({ info: () => {} }).breaker;
     let calls = 0;
     // The first six calls hang until the gateway's own deadline fires; the
     // seventh answers at once, so it only succeeds if the breaker let it in.

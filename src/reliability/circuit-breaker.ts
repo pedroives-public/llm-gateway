@@ -22,7 +22,16 @@ export interface CircuitBreaker {
   recordResult(outcome: ProbeOutcome): void;
 }
 
-export function createCircuitBreaker(log: CbLogger): CircuitBreaker {
+export interface CircuitBreakerProbe {
+  recordProbeResult(outcome: ProbeOutcome): void;
+}
+
+export interface CircuitBreakerInstance {
+  breaker: CircuitBreaker;
+  probe: CircuitBreakerProbe;
+}
+
+export function createCircuitBreaker(log: CbLogger): CircuitBreakerInstance {
   // Append-only failure instants (epoch ms). Read only via liveFailureStamps,
   // so the 30s window has one definition and the open-decision and event
   // snapshot can't drift.
@@ -49,7 +58,7 @@ export function createCircuitBreaker(log: CbLogger): CircuitBreaker {
     });
   };
 
-  return {
+  const breaker: CircuitBreaker = {
     recordResult(outcome) {
       switch (state) {
         case "CLOSED":
@@ -66,21 +75,7 @@ export function createCircuitBreaker(log: CbLogger): CircuitBreaker {
           return;
 
         case "HALF_OPEN":
-          try {
-            if (outcome === "SUCCESS") {
-              state = "CLOSED";
-              emitStateChange("HALF_OPEN", "CLOSED");
-            } else if (outcome === "FAILURE") {
-              state = "OPEN";
-              openedAt = Date.now();
-              emitStateChange("HALF_OPEN", "OPEN");
-            }
-          } finally {
-            // Free the probe slot on EVERY terminal — success, re-open,
-            // inconclusive no-op, or a throw mid-record. In finally, not the
-            // branches, so a probe can never wedge the breaker HALF_OPEN.
-            probeInFlight = false;
-          }
+          // Tenant outcomes cannot transition or release the active probe.
           return;
 
         case "OPEN":
@@ -113,4 +108,27 @@ export function createCircuitBreaker(log: CbLogger): CircuitBreaker {
       return { kind: "PROBE" };
     },
   };
+
+  const probe: CircuitBreakerProbe = {
+    recordProbeResult(outcome) {
+      if (state !== "HALF_OPEN" || !probeInFlight) return;
+
+      try {
+        if (outcome === "SUCCESS") {
+          state = "CLOSED";
+          emitStateChange("HALF_OPEN", "CLOSED");
+        } else if (outcome === "FAILURE") {
+          state = "OPEN";
+          openedAt = Date.now();
+          emitStateChange("HALF_OPEN", "OPEN");
+        }
+      } finally {
+        // Every probe terminal releases the slot, including inconclusive
+        // results and exceptions while emitting a state transition.
+        probeInFlight = false;
+      }
+    },
+  };
+
+  return { breaker, probe };
 }
