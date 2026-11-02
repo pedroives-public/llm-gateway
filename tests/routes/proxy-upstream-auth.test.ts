@@ -146,7 +146,7 @@ const SANITIZED_ACCESS_BODY = {
 describe("upstream 403 — sanitized access denial (breaker-neutral)", () => {
   it("a 403 storm sanitizes every response to 502 and never opens the REAL breaker", async () => {
     const cbEvents: object[] = [];
-    const breaker = createCircuitBreaker({ info: (o) => cbEvents.push(o) }).breaker;
+    const breaker = createCircuitBreaker({ info: (o) => cbEvents.push(o) });
     let upstreamCalls = 0;
     const upstream403 = (): Promise<Outcome> => {
       upstreamCalls += 1;
