@@ -74,16 +74,7 @@ export function createCircuitBreaker(
             if (failureTimeStamps.length >= FAILURE_LIMIT) {
               state = "OPEN";
               openedAt = now;
-
-              if (runProbe !== undefined) {
-                setTimeout(() => {
-                  const vote = probe.startAttempt();
-                  if (vote !== null) {
-                    runProbe(vote);
-                  }
-                }, OPEN_COOLDOWN_MS);
-              }
-
+              armProbeTimer();
               emitStateChange("CLOSED", "OPEN");
             }
           }
@@ -117,6 +108,7 @@ export function createCircuitBreaker(
       } else {
         state = "OPEN";
         openedAt = Date.now();
+        armProbeTimer();
         emitStateChange("HALF_OPEN", "OPEN");
       }
     } finally {
@@ -151,6 +143,17 @@ export function createCircuitBreaker(
         recordProbeResult(outcome);
       };
     },
+  };
+
+  const armProbeTimer = (): void => {
+    if (runProbe === undefined) return;
+
+    setTimeout(() => {
+      const vote = probe.startAttempt();
+      if (vote !== null) {
+        runProbe(vote);
+      }
+    }, OPEN_COOLDOWN_MS);
   };
 
   return { breaker, probe };
