@@ -33,7 +33,10 @@ export interface CircuitBreakerInstance {
   probe: CircuitBreakerProbe;
 }
 
-export function createCircuitBreaker(log: CbLogger): CircuitBreakerInstance {
+export function createCircuitBreaker(
+  log: CbLogger,
+  runProbe?: (vote: ProbeVote) => void,
+): CircuitBreakerInstance {
   // Append-only failure instants (epoch ms). Read only via liveFailureStamps,
   // so the 30s window has one definition and the open-decision and event
   // snapshot can't drift.
@@ -71,6 +74,16 @@ export function createCircuitBreaker(log: CbLogger): CircuitBreakerInstance {
             if (failureTimeStamps.length >= FAILURE_LIMIT) {
               state = "OPEN";
               openedAt = now;
+
+              if (runProbe !== undefined) {
+                setTimeout(() => {
+                  const vote = probe.startAttempt();
+                  if (vote !== null) {
+                    runProbe(vote);
+                  }
+                }, OPEN_COOLDOWN_MS);
+              }
+
               emitStateChange("CLOSED", "OPEN");
             }
           }
