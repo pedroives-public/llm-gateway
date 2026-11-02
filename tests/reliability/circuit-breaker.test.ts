@@ -27,7 +27,10 @@ describe("circuit breaker — initial state", () => {
     const circuit = makeCircuit();
     const breaker = circuit.breaker;
 
-    expect(circuit.probe.startAttempt()).toBeNull();
+    expect(
+      circuit.probe.startAttempt(),
+      "no recovery attempt may start while CLOSED: there is nothing to recover from",
+    ).toBeNull();
     expect(breaker.getState()).toBe("CLOSED");
     expect(breaker.tryAcquire()).toEqual({ kind: "NORMAL" });
   });
@@ -112,9 +115,15 @@ describe("circuit breaker — OPEN and HALF_OPEN transitions", () => {
     recordFailures(breaker, 5); // opens
     vi.advanceTimersByTime(WINDOW_MS + 1_000); // window emptied, still inside the 60s OPEN
 
-    expect(circuit.probe.startAttempt()).toBeNull();
+    expect(
+      circuit.probe.startAttempt(),
+      "a recovery attempt must wait the full 60s of OPEN: the failure window emptying at 30s does not shorten it",
+    ).toBeNull();
     expect(breaker.getState()).toBe("OPEN");
-    expect(breaker.tryAcquire()).toEqual({ kind: "FAST_FAIL" });
+    expect(
+      breaker.tryAcquire(),
+      "no tenant request passes during OPEN: the upstream is resting for the 60s",
+    ).toEqual({ kind: "FAST_FAIL" });
   });
 
   it("transitions to HALF_OPEN and admits one probe after 60s OPEN", () => {
@@ -126,7 +135,10 @@ describe("circuit breaker — OPEN and HALF_OPEN transitions", () => {
 
     expect(circuit.probe.startAttempt()).toBeTypeOf("function");
     expect(breaker.getState()).toBe("HALF_OPEN");
-    expect(breaker.tryAcquire()).toEqual({ kind: "FAST_FAIL" });
+    expect(
+      breaker.tryAcquire(),
+      "no tenant request passes during HALF_OPEN: only the probe reaches the upstream",
+    ).toEqual({ kind: "FAST_FAIL" });
   });
 
   it("admits only one probe — a second acquire while the probe is in flight fast-fails", () => {
@@ -137,8 +149,14 @@ describe("circuit breaker — OPEN and HALF_OPEN transitions", () => {
     vi.advanceTimersByTime(OPEN_MS + 1_000);
 
     expect(circuit.probe.startAttempt()).toBeTypeOf("function");
-    expect(circuit.probe.startAttempt()).toBeNull(); // no second probe
-    expect(breaker.tryAcquire()).toEqual({ kind: "FAST_FAIL" });
+    expect(
+      circuit.probe.startAttempt(),
+      "at most one probe per process: a second attempt would give one recovery two votes",
+    ).toBeNull();
+    expect(
+      breaker.tryAcquire(),
+      "no tenant request passes during HALF_OPEN: only the probe reaches the upstream",
+    ).toEqual({ kind: "FAST_FAIL" });
   });
 
   it("a tenant request after the 60s neither starts an attempt nor moves the breaker", () => {
@@ -193,7 +211,10 @@ describe("circuit breaker — HALF_OPEN probe outcomes", () => {
     vote("FAILURE");
 
     expect(breaker.getState()).toBe("OPEN");
-    expect(breaker.tryAcquire()).toEqual({ kind: "FAST_FAIL" }); // inside the fresh 60s
+    expect(
+      breaker.tryAcquire(),
+      "no tenant request passes during OPEN: a failed probe starts a fresh 60s",
+    ).toEqual({ kind: "FAST_FAIL" });
     vi.advanceTimersByTime(OPEN_MS + 1_000);
     expect(
       circuit.probe.startAttempt(),
@@ -213,7 +234,10 @@ describe("circuit breaker — HALF_OPEN probe outcomes", () => {
       circuit.probe.startAttempt(),
       "an inconclusive probe must release the slot: a stuck slot holds HALF_OPEN until restart",
     ).toBeTypeOf("function");
-    expect(breaker.tryAcquire()).toEqual({ kind: "FAST_FAIL" });
+    expect(
+      breaker.tryAcquire(),
+      "no tenant request passes during HALF_OPEN: an inconclusive probe leaves the next attempt to the probe",
+    ).toEqual({ kind: "FAST_FAIL" });
   });
 
   it("releases the probe slot when state-change logging throws", () => {
