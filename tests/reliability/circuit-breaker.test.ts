@@ -21,26 +21,45 @@ import {
 type TestLog = { info: (obj: object) => void };
 const noopLog: TestLog = { info: () => {} };
 
+// Every recovery attempt reaches this runner, so a test drives the probe by
+// advancing the clock and reads each attempt's vote from the recorded calls.
 function makeCircuit(log: TestLog = noopLog) {
-  return createCircuitBreaker(log);
+  const runProbe = vi.fn<(vote: ProbeVote) => void>();
+  return { breaker: createCircuitBreaker(log, runProbe), runProbe };
 }
 
 function makeBreaker(log: TestLog = noopLog): CircuitBreaker {
   return makeCircuit(log).breaker;
 }
 
+function latestVote(circuit: ReturnType<typeof makeCircuit>): ProbeVote {
+  const vote = circuit.runProbe.mock.lastCall?.[0];
+  if (!vote) throw new Error("Expected a probe vote: no attempt has started");
+  return vote;
+}
+
 // A freshly constructed breaker is CLOSED and admits the next request
 // normally. Fake timers and outcome/time helpers are introduced alongside
 // the sliding-window and CLOSED -> OPEN behaviour that first needs them.
 describe("circuit breaker — initial state", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("starts CLOSED and admits a request as { kind: 'NORMAL' }", () => {
     const circuit = makeCircuit();
     const breaker = circuit.breaker;
 
+    vi.advanceTimersByTime(OPEN_MS * 2);
+
     expect(
-      circuit.probe.startAttempt(),
+      circuit.runProbe,
       "no recovery attempt may start while CLOSED: there is nothing to recover from",
-    ).toBeNull();
+    ).not.toHaveBeenCalled();
     expect(breaker.getState()).toBe("CLOSED");
     expect(breaker.tryAcquire()).toEqual({ kind: "NORMAL" });
   });
@@ -121,10 +140,9 @@ describe("circuit breaker — scheduled recovery probe", () => {
   it("starts the probe at the 60s boundary", () => {
     let stateAtProbeCall: CircuitState | undefined;
     const runProbe = vi.fn(() => {
-      stateAtProbeCall = circuit.breaker.getState();
+      stateAtProbeCall = breaker.getState();
     });
-    const circuit = createCircuitBreaker(noopLog, runProbe);
-    const breaker = circuit.breaker;
+    const breaker = createCircuitBreaker(noopLog, runProbe);
 
     recordFailures(breaker, 5);
 
@@ -154,7 +172,7 @@ describe("circuit breaker — scheduled recovery probe", () => {
   it("arms the probe even when logging the opening throws", () => {
     let shouldThrow = true;
     const runProbe = vi.fn();
-    const circuit = createCircuitBreaker(
+    const breaker = createCircuitBreaker(
       {
         info: () => {
           if (shouldThrow) throw new Error("open event failed");
@@ -163,7 +181,7 @@ describe("circuit breaker — scheduled recovery probe", () => {
       runProbe,
     );
 
-    expect(() => recordFailures(circuit.breaker, 5)).toThrow(
+    expect(() => recordFailures(breaker, 5)).toThrow(
       "open event failed",
     );
     shouldThrow = false;
@@ -175,10 +193,23 @@ describe("circuit breaker — scheduled recovery probe", () => {
     ).toHaveBeenCalledTimes(1);
   });
 
+  it("starts the probe on time when the wall clock moves back", () => {
+    const { breaker, runProbe } = makeCircuit();
+
+    recordFailures(breaker, 5);
+    vi.setSystemTime(Date.now() - 1);
+    vi.advanceTimersByTime(OPEN_MS);
+
+    expect(
+      runProbe,
+      "the timer alone decides the 60s: a wall-clock check must not refuse its firing",
+    ).toHaveBeenCalledTimes(1);
+    expect(breaker.getState()).toBe("HALF_OPEN");
+  });
+
   it("rearms the probe timer after a failed probe vote", () => {
     const runProbe = vi.fn<(vote: ProbeVote) => void>();
-    const circuit = createCircuitBreaker(noopLog, runProbe);
-    const breaker = circuit.breaker;
+    const breaker = createCircuitBreaker(noopLog, runProbe);
 
     recordFailures(breaker, 5);
     vi.advanceTimersByTime(OPEN_MS);
@@ -209,7 +240,7 @@ describe("circuit breaker — scheduled recovery probe", () => {
   it("rearms the probe timer even when logging the reopening throws", () => {
     let shouldThrow = false;
     const runProbe = vi.fn<(vote: ProbeVote) => void>();
-    const circuit = createCircuitBreaker(
+    const breaker = createCircuitBreaker(
       {
         info: () => {
           if (shouldThrow) throw new Error("reopen event failed");
@@ -218,7 +249,7 @@ describe("circuit breaker — scheduled recovery probe", () => {
       runProbe,
     );
 
-    recordFailures(circuit.breaker, 5);
+    recordFailures(breaker, 5);
     vi.advanceTimersByTime(OPEN_MS);
     const firstVote = runProbe.mock.calls[0]?.[0];
     if (!firstVote) throw new Error("Expected the first probe vote");
@@ -252,9 +283,9 @@ describe("circuit breaker — OPEN and HALF_OPEN transitions", () => {
     vi.advanceTimersByTime(WINDOW_MS + 1_000); // window emptied, still inside the 60s OPEN
 
     expect(
-      circuit.probe.startAttempt(),
+      circuit.runProbe,
       "a recovery attempt must wait the full 60s of OPEN: the failure window emptying at 30s does not shorten it",
-    ).toBeNull();
+    ).not.toHaveBeenCalled();
     expect(breaker.getState()).toBe("OPEN");
     expect(
       breaker.tryAcquire(),
@@ -269,7 +300,7 @@ describe("circuit breaker — OPEN and HALF_OPEN transitions", () => {
     recordFailures(breaker, 5); // opens
     vi.advanceTimersByTime(OPEN_MS + 1_000); // past the 60s cooldown
 
-    expect(circuit.probe.startAttempt()).toBeTypeOf("function");
+    expect(circuit.runProbe).toHaveBeenCalledTimes(1);
     expect(breaker.getState()).toBe("HALF_OPEN");
     expect(
       breaker.tryAcquire(),
@@ -282,41 +313,39 @@ describe("circuit breaker — OPEN and HALF_OPEN transitions", () => {
     const breaker = circuit.breaker;
 
     recordFailures(breaker, 5); // opens
-    vi.advanceTimersByTime(OPEN_MS + 1_000);
+    vi.advanceTimersByTime(OPEN_MS * 3); // three cooldowns with no vote
 
-    expect(circuit.probe.startAttempt()).toBeTypeOf("function");
     expect(
-      circuit.probe.startAttempt(),
+      circuit.runProbe,
       "at most one probe per process: a second attempt would give one recovery two votes",
-    ).toBeNull();
+    ).toHaveBeenCalledTimes(1);
     expect(
       breaker.tryAcquire(),
       "no tenant request passes during HALF_OPEN: only the probe reaches the upstream",
     ).toEqual({ kind: "FAST_FAIL" });
   });
 
-  it("a tenant request after the 60s neither starts an attempt nor moves the breaker", () => {
-    const breaker = makeBreaker();
+  it("a tenant request during OPEN neither starts an attempt nor moves the breaker", () => {
+    const circuit = makeCircuit();
+    const breaker = circuit.breaker;
 
     recordFailures(breaker, 5); // opens
-    vi.advanceTimersByTime(OPEN_MS + 1_000);
+    vi.advanceTimersByTime(OPEN_MS - 1);
 
     const because =
-      "only the probe moves the breaker out of OPEN: no tenant request can start a recovery attempt";
+      "only the timer moves the breaker out of OPEN: no tenant request can start a recovery attempt";
     expect(breaker.tryAcquire(), because).toEqual({ kind: "FAST_FAIL" });
     expect(breaker.getState(), because).toBe("OPEN");
+    expect(circuit.runProbe, because).not.toHaveBeenCalled();
   });
 });
 
 // Drive the breaker to HALF_OPEN with its single probe admitted, so each test
 // below starts at the moment a probe outcome is about to be recorded.
-function admitProbe(circuit: ReturnType<typeof createCircuitBreaker>) {
+function admitProbe(circuit: ReturnType<typeof makeCircuit>): ProbeVote {
   recordFailures(circuit.breaker, 5); // open the breaker
-  vi.advanceTimersByTime(OPEN_MS + 1_000); // wait out the 60s cooldown
-  const vote = circuit.probe.startAttempt();
-  expect(vote).toBeTypeOf("function");
-  if (!vote) throw new Error("Expected the probe vote function");
-  return vote;
+  vi.advanceTimersByTime(OPEN_MS); // the timer starts the attempt
+  return latestVote(circuit);
 }
 
 describe("circuit breaker — HALF_OPEN probe outcomes", () => {
@@ -351,11 +380,11 @@ describe("circuit breaker — HALF_OPEN probe outcomes", () => {
       breaker.tryAcquire(),
       "no tenant request passes during OPEN: a failed probe starts a fresh 60s",
     ).toEqual({ kind: "FAST_FAIL" });
-    vi.advanceTimersByTime(OPEN_MS + 1_000);
+    vi.advanceTimersByTime(OPEN_MS);
     expect(
-      circuit.probe.startAttempt(),
-      "a failed probe must release the slot: the next attempt needs it",
-    ).toBeTypeOf("function");
+      circuit.runProbe,
+      "a failed probe must schedule the next attempt",
+    ).toHaveBeenCalledTimes(2);
   });
 
   it("a probe vote accepts only SUCCESS or FAILURE: every probe exit needs a next state", () => {
@@ -364,7 +393,7 @@ describe("circuit breaker — HALF_OPEN probe outcomes", () => {
     >();
   });
 
-  it("releases the probe slot when state-change logging throws", () => {
+  it("reaches the next attempt after logging the close throws", () => {
     let shouldThrow = false;
     const circuit = makeCircuit({
       info: () => {
@@ -381,12 +410,12 @@ describe("circuit breaker — HALF_OPEN probe outcomes", () => {
 
     shouldThrow = false;
     recordFailures(breaker, 5);
-    vi.advanceTimersByTime(OPEN_MS + 1_000);
+    vi.advanceTimersByTime(OPEN_MS);
 
     expect(
-      circuit.probe.startAttempt(),
+      circuit.runProbe,
       "a logging exception must not strand the next probe",
-    ).toBeTypeOf("function");
+    ).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -432,7 +461,8 @@ describe("circuit breaker — tenant outcomes while HALF_OPEN", () => {
 
       expect(breaker.getState(), because).toBe(expectedState);
       expect(breaker.tryAcquire(), because).toEqual({ kind: expectedAdmission });
-      expect(circuit.probe.startAttempt(), because).toBeNull();
+      vi.advanceTimersByTime(OPEN_MS);
+      expect(circuit.runProbe, because).toHaveBeenCalledTimes(1);
     },
   );
 });
@@ -473,8 +503,12 @@ describe("circuit breaker — tenant votes while OPEN", () => {
       breaker.recordResult(outcome);
 
       expect(breaker.getState(), because).toBe("OPEN");
-      vi.advanceTimersByTime(31_000);
-      expect(circuit.probe.startAttempt(), because).toBeTypeOf("function");
+      vi.advanceTimersByTime(30_000 - 1);
+      expect(circuit.runProbe, because).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(circuit.runProbe, because).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(OPEN_MS);
+      expect(circuit.runProbe, because).toHaveBeenCalledTimes(1);
     },
   );
 });
@@ -514,9 +548,8 @@ describe("circuit breaker — cb_state_change events", () => {
     const breaker = circuit.breaker;
     recordFailures(breaker, 5); // CLOSED -> OPEN
     info.mockClear(); // ignore the open event; assert only the next transition
-    vi.advanceTimersByTime(OPEN_MS + 1_000);
 
-    circuit.probe.startAttempt();
+    vi.advanceTimersByTime(OPEN_MS + 1_000);
 
     expect(info).toHaveBeenCalledTimes(1);
     expect(info).toHaveBeenCalledWith({
@@ -534,10 +567,9 @@ describe("circuit breaker — cb_state_change events", () => {
     const breaker = circuit.breaker;
     recordFailures(breaker, 5);
     vi.advanceTimersByTime(OPEN_MS + 1_000);
-    const vote = circuit.probe.startAttempt(); // OPEN -> HALF_OPEN
+    const vote = latestVote(circuit); // OPEN -> HALF_OPEN
     info.mockClear();
 
-    if (!vote) throw new Error("Expected the probe vote function");
     vote("SUCCESS");
 
     expect(info).toHaveBeenCalledTimes(1);
@@ -556,10 +588,9 @@ describe("circuit breaker — cb_state_change events", () => {
     const breaker = circuit.breaker;
     recordFailures(breaker, 5);
     vi.advanceTimersByTime(OPEN_MS + 1_000);
-    const vote = circuit.probe.startAttempt(); // OPEN -> HALF_OPEN
+    const vote = latestVote(circuit); // OPEN -> HALF_OPEN
     info.mockClear();
 
-    if (!vote) throw new Error("Expected the probe vote function");
     vote("FAILURE");
 
     expect(info).toHaveBeenCalledTimes(1);
@@ -666,17 +697,17 @@ describe("circuit breaker — stale probe votes", () => {
       const breaker = circuit.breaker;
       const voteN = admitProbe(circuit);
       voteN("FAILURE");
-      vi.advanceTimersByTime(OPEN_MS + 1_000);
-      const voteN1 = circuit.probe.startAttempt();
-      if (!voteN1) throw new Error("Expected the vote function of attempt N+1");
+      vi.advanceTimersByTime(OPEN_MS);
+      const voteN1 = latestVote(circuit);
 
       voteN(staleOutcome);
 
       expect(breaker.getState(), because).toBe("HALF_OPEN");
+      vi.advanceTimersByTime(OPEN_MS);
       expect(
-        circuit.probe.startAttempt(),
-        "attempt N cannot free the probe slot of attempt N+1",
-      ).toBeNull();
+        circuit.runProbe,
+        "attempt N cannot start a third attempt beside attempt N+1",
+      ).toHaveBeenCalledTimes(2);
 
       voteN1("SUCCESS");
 
@@ -696,9 +727,7 @@ describe("circuit breaker — stale probe votes", () => {
     shouldThrow = true;
     expect(() => voteN("FAILURE")).toThrow("probe event failed");
     shouldThrow = false;
-    vi.advanceTimersByTime(OPEN_MS + 1_000);
-    const voteN1 = circuit.probe.startAttempt();
-    if (!voteN1) throw new Error("Expected the vote function of attempt N+1");
+    vi.advanceTimersByTime(OPEN_MS);
 
     voteN("SUCCESS");
 
@@ -723,18 +752,24 @@ describe("circuit breaker — stale probe votes", () => {
     ).toBe("CLOSED");
   });
 
-  it("does not restart the 60s when a stale failure arrives during OPEN", () => {
+  it("keeps a single on-time attempt when a stale failure arrives during OPEN", () => {
     const circuit = makeCircuit();
     const voteN = admitProbe(circuit);
     voteN("FAILURE");
     vi.advanceTimersByTime(30_000);
 
     voteN("FAILURE");
-    vi.advanceTimersByTime(31_000);
+    vi.advanceTimersByTime(30_000);
 
     expect(
-      circuit.probe.startAttempt(),
+      circuit.runProbe,
       "a stale probe vote must not postpone the next attempt",
-    ).toBeTypeOf("function");
+    ).toHaveBeenCalledTimes(2);
+
+    vi.advanceTimersByTime(30_000);
+    expect(
+      circuit.runProbe,
+      "a stale probe vote must not add an attempt",
+    ).toHaveBeenCalledTimes(2);
   });
 });

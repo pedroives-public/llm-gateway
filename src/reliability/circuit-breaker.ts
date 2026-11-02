@@ -24,26 +24,15 @@ export interface CircuitBreaker {
   recordResult(outcome: RequestOutcome): void;
 }
 
-export interface CircuitBreakerProbe {
-  startAttempt(): ProbeVote | null;
-}
-
-export interface CircuitBreakerInstance {
-  breaker: CircuitBreaker;
-  probe: CircuitBreakerProbe;
-}
-
 export function createCircuitBreaker(
   log: CbLogger,
   runProbe?: (vote: ProbeVote) => void,
-): CircuitBreakerInstance {
+): CircuitBreaker {
   // Append-only failure instants (epoch ms). Read only via liveFailureStamps,
   // so the 30s window has one definition and the open-decision and event
   // snapshot can't drift.
   let failureTimeStamps: number[] = [];
   let state: CircuitState = "CLOSED";
-  let openedAt: number | null = null;
-  let probeInFlight = false;
 
   // The live 30s window, derived on read (expired excluded). Stamps arrive in
   // order and filter preserves it, so [0] is the oldest in-window failure.
@@ -73,7 +62,6 @@ export function createCircuitBreaker(
 
             if (failureTimeStamps.length >= FAILURE_LIMIT) {
               state = "OPEN";
-              openedAt = now;
               armProbeTimer();
               emitStateChange("CLOSED", "OPEN");
             }
@@ -101,60 +89,35 @@ export function createCircuitBreaker(
   };
 
   const recordProbeResult = (outcome: ProbeOutcome): void => {
-    try {
-      if (outcome === "SUCCESS") {
-        state = "CLOSED";
-        emitStateChange("HALF_OPEN", "CLOSED");
-      } else {
-        state = "OPEN";
-        openedAt = Date.now();
-        armProbeTimer();
-        emitStateChange("HALF_OPEN", "OPEN");
-      }
-    } finally {
-      // Every probe vote releases the slot, including when emitting the
-      // state transition throws.
-      probeInFlight = false;
+    if (outcome === "SUCCESS") {
+      state = "CLOSED";
+      emitStateChange("HALF_OPEN", "CLOSED");
+    } else {
+      state = "OPEN";
+      armProbeTimer();
+      emitStateChange("HALF_OPEN", "OPEN");
     }
   };
 
-  const probe: CircuitBreakerProbe = {
-    startAttempt() {
-      if (state === "CLOSED") return null;
-
-      if (state === "OPEN") {
-        const now = Date.now();
-        if (openedAt === null || now - openedAt < OPEN_COOLDOWN_MS) {
-          return null;
-        }
-
-        state = "HALF_OPEN";
-        emitStateChange("OPEN", "HALF_OPEN");
-      }
-
-      if (probeInFlight) return null;
-
-      probeInFlight = true;
-      let voted = false;
-      return (outcome) => {
-        if (voted) return;
-
-        voted = true;
-        recordProbeResult(outcome);
-      };
-    },
-  };
-
+  // Armed only on entry to OPEN, and OPEN has no other exit, so one attempt
+  // runs at a time. The timer alone decides the 60s: a wall-clock check could
+  // refuse the timer's own firing and leave OPEN with nothing armed.
   const armProbeTimer = (): void => {
     if (runProbe === undefined) return;
 
     setTimeout(() => {
-      const vote = probe.startAttempt();
-      if (vote !== null) {
-        runProbe(vote);
-      }
+      state = "HALF_OPEN";
+      emitStateChange("OPEN", "HALF_OPEN");
+
+      let voted = false;
+      runProbe((outcome) => {
+        if (voted) return;
+
+        voted = true;
+        recordProbeResult(outcome);
+      });
     }, OPEN_COOLDOWN_MS);
   };
 
-  return { breaker, probe };
+  return breaker;
 }
