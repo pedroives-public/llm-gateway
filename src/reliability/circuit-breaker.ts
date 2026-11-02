@@ -105,7 +105,7 @@ export function createCircuitBreaker(
   const armProbeTimer = (): void => {
     if (runProbe === undefined) return;
 
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       state = "HALF_OPEN";
       emitStateChange("OPEN", "HALF_OPEN");
 
@@ -117,6 +117,8 @@ export function createCircuitBreaker(
         recordProbeResult(outcome);
       });
     }, OPEN_COOLDOWN_MS);
+
+    timer.unref();
   };
 
   return breaker;
