@@ -1,9 +1,11 @@
 import type { StreamingUpstream } from "../upstream/openai.js";
-import { isAcceptedStream } from "../upstream/stream.js";
+import { cancelStream, isAcceptedStream } from "../upstream/stream.js";
 import { createSseFrameReader } from "../upstream/sse-frame-reader.js";
 import type { ProbeOutcome, ProbeVote } from "./circuit-breaker.js";
 import { extractCauseLog } from "../upstream/cause-log.js";
 import { extractErrName } from "../upstream/rejection.js";
+import { PROBE_CLOCK_MS } from "../config.js";
+import { armWallClockTimeout } from "./timeouts.js";
 
 type ProbeRunnerDependencies = {
   streaming: StreamingUpstream;
@@ -31,17 +33,17 @@ export function createProbeRunner({
   };
 
   return async (vote) => {
-    const controller = new AbortController();
-    const signal = controller.signal;
-
+    const timeout = armWallClockTimeout(PROBE_CLOCK_MS);
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let outcome: ProbeOutcome = "FAILURE";
     let caughtError: { value: unknown } | undefined;
 
     try {
-      const response = await streaming(requestBody, signal, log);
+      const response = await streaming(requestBody, timeout.signal, log);
 
       if (isAcceptedStream(response)) {
-        const nextFrame = createSseFrameReader(response.reader);
+        reader = response.reader;
+        const nextFrame = createSseFrameReader(reader);
 
         while (true) {
           const frame = await nextFrame();
@@ -56,9 +58,17 @@ export function createProbeRunner({
       }
     } catch (error) {
       caughtError = { value: error };
-    }
+    } finally {
+      timeout.clear();
 
-    vote(outcome);
+      try {
+        vote(outcome);
+      } finally {
+        if (reader !== undefined) {
+          await cancelStream(reader, log, "breaker_probe");
+        }
+      }
+    }
 
     if (caughtError !== undefined) {
       log.info({

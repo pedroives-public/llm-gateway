@@ -37,7 +37,7 @@ export function isAcceptedStream(
 export async function cancelStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   log: MinLogger,
-  site: "upstream_adapter" | "proxy_route",
+  site: "upstream_adapter" | "proxy_route" | "breaker_probe",
 ): Promise<void> {
   try {
     await reader.cancel();
