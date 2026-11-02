@@ -5,8 +5,9 @@ const FAILURE_LIMIT = 5;
 const OPEN_COOLDOWN_MS = 60_000;
 
 export type CircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
-export type RequestOutcome = "SUCCESS" | "FAILURE" | "INCONCLUSIVE";
-export type ProbeVote = (outcome: RequestOutcome) => void;
+export type ProbeOutcome = "SUCCESS" | "FAILURE";
+export type RequestOutcome = ProbeOutcome | "INCONCLUSIVE";
+export type ProbeVote = (outcome: ProbeOutcome) => void;
 
 export interface CircuitAdmission {
   kind: "NORMAL" | "FAST_FAIL";
@@ -95,19 +96,19 @@ export function createCircuitBreaker(log: CbLogger): CircuitBreakerInstance {
     },
   };
 
-  const recordProbeResult = (outcome: RequestOutcome): void => {
+  const recordProbeResult = (outcome: ProbeOutcome): void => {
     try {
       if (outcome === "SUCCESS") {
         state = "CLOSED";
         emitStateChange("HALF_OPEN", "CLOSED");
-      } else if (outcome === "FAILURE") {
+      } else {
         state = "OPEN";
         openedAt = Date.now();
         emitStateChange("HALF_OPEN", "OPEN");
       }
     } finally {
-      // Every probe terminal releases the slot, including inconclusive
-      // results and exceptions while emitting a state transition.
+      // Every probe vote releases the slot, including when emitting the
+      // state transition throws.
       probeInFlight = false;
     }
   };

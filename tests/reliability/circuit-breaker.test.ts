@@ -1,7 +1,16 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  expectTypeOf,
+  vi,
+  beforeEach,
+  afterEach,
+} from "vitest";
 import {
   createCircuitBreaker,
   type CircuitBreaker,
+  type ProbeVote,
 } from "../../src/reliability/circuit-breaker.js";
 
 // The factory takes a logger ({ info }) so the breaker can emit
@@ -222,22 +231,10 @@ describe("circuit breaker — HALF_OPEN probe outcomes", () => {
     ).toBeTypeOf("function");
   });
 
-  it("stays HALF_OPEN on an inconclusive probe and admits the next request as a fresh probe", () => {
-    const circuit = makeCircuit();
-    const breaker = circuit.breaker;
-    const vote = admitProbe(circuit);
-
-    vote("INCONCLUSIVE");
-
-    expect(breaker.getState()).toBe("HALF_OPEN");
-    expect(
-      circuit.probe.startAttempt(),
-      "an inconclusive probe must release the slot: a stuck slot holds HALF_OPEN until restart",
-    ).toBeTypeOf("function");
-    expect(
-      breaker.tryAcquire(),
-      "no tenant request passes during HALF_OPEN: an inconclusive probe leaves the next attempt to the probe",
-    ).toEqual({ kind: "FAST_FAIL" });
+  it("a probe vote accepts only SUCCESS or FAILURE: every probe exit needs a next state", () => {
+    expectTypeOf<Parameters<ProbeVote>[0]>().toEqualTypeOf<
+      "SUCCESS" | "FAILURE"
+    >();
   });
 
   it("releases the probe slot when state-change logging throws", () => {
@@ -502,13 +499,6 @@ describe("circuit breaker — stale probe votes", () => {
       expectedAdmission: "FAST_FAIL",
       because: "a completed probe cannot close the breaker after reopening it",
     },
-    {
-      completedOutcome: "INCONCLUSIVE",
-      staleOutcome: "SUCCESS",
-      expectedState: "HALF_OPEN",
-      expectedAdmission: "FAST_FAIL",
-      because: "a stale vote cannot act when no probe is in flight",
-    },
   ] as const)(
     "ignores stale $staleOutcome after $completedOutcome",
     ({
@@ -542,10 +532,6 @@ describe("circuit breaker — stale probe votes", () => {
       staleOutcome: "FAILURE",
       because: "attempt N cannot reopen the breaker during attempt N+1",
     },
-    {
-      staleOutcome: "INCONCLUSIVE",
-      because: "attempt N cannot free the probe slot of attempt N+1",
-    },
   ] as const)(
     "ignores a stale $staleOutcome from attempt N during attempt N+1",
     ({ staleOutcome, because }) => {
@@ -560,7 +546,10 @@ describe("circuit breaker — stale probe votes", () => {
       voteN(staleOutcome);
 
       expect(breaker.getState(), because).toBe("HALF_OPEN");
-      expect(circuit.probe.startAttempt(), because).toBeNull();
+      expect(
+        circuit.probe.startAttempt(),
+        "attempt N cannot free the probe slot of attempt N+1",
+      ).toBeNull();
 
       voteN1("SUCCESS");
 
