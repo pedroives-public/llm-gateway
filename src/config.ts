@@ -36,6 +36,14 @@ export const ADMISSION_CAPACITY_PRE_AUTH = 10;
 // Corridor pinned by tests/reliability/total-duration-derivation-pin.test.ts.
 export const STREAM_TOTAL_DURATION_MS = 280_000;
 
+// Bounds the breaker's whole recovery probe, up to `[DONE]`. Measured from the
+// production machine (2026-10-31, N=20, new connection, gpt-4o-mini,
+// max_tokens 1): median 917 ms, maximum 2157 ms. One off-peak window; a repeat
+// at peak with a maximum above about 2.5 s raises this to 5 s. The error is
+// asymmetric: too short costs 60 s more of OPEN with a healthy upstream, too
+// long costs a few seconds more per attempt with a dead one.
+export const PROBE_CLOCK_MS = 3_000;
+
 export function getOpenAIApiKey(): string {
   const key = process.env["OPENAI_API_KEY"];
   if (!key) {
@@ -55,6 +63,16 @@ export function getOpenAIBaseUrl(): string {
     );
   }
   return override;
+}
+
+export function getProbeModel(): string {
+  const value = process.env["BREAKER_PROBE_MODEL"];
+  if (value === undefined || value === "" || value !== value.trim()) {
+    // The received value is left out on purpose: a secret pasted into the
+    // wrong variable must not reach the boot log.
+    throw new Error("BREAKER_PROBE_MODEL must name a model");
+  }
+  return value;
 }
 
 export function getPepper(): string {

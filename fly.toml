@@ -14,6 +14,10 @@ primary_region = 'gru'
   # Kill switch for SSE streaming: 'false' rejects stream:true with 400 at the
   # schema, before the circuit breaker and the upstream see the request.
   STREAMING_ENABLED = 'true'
+  # Model of the circuit breaker's synthetic recovery probe. It must accept
+  # max_tokens: an upstream refusal of the probe's own request closes the
+  # breaker and raises upstream_probe_rejected.
+  BREAKER_PROBE_MODEL = 'gpt-4o-mini'
 
 [http_service]
   internal_port = 3000
