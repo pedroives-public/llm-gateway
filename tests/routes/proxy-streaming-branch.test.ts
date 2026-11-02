@@ -2,7 +2,7 @@ import http from "node:http";
 import { describe, it, expect, vi } from "vitest";
 import type {
   CircuitBreaker,
-  ProbeOutcome,
+  RequestOutcome,
 } from "../../src/reliability/circuit-breaker.js";
 import { createOpenAIClient } from "../../src/upstream/openai.js";
 import { bearer } from "../helpers/fake-auth-db.js";
@@ -39,9 +39,9 @@ const validBody = {
 
 function recordingBreaker(): {
   breaker: CircuitBreaker;
-  recorded: ProbeOutcome[];
+  recorded: RequestOutcome[];
 } {
-  const recorded: ProbeOutcome[] = [];
+  const recorded: RequestOutcome[] = [];
   return {
     recorded,
     breaker: {
@@ -698,7 +698,7 @@ describe.each([
         errorClass: string;
         body: string;
         retryAfter?: string;
-        votes: ProbeOutcome[];
+        votes: RequestOutcome[];
         events: string[];
       };
     }>([
@@ -965,7 +965,7 @@ describe.each([
     it("ends as FAST_FAIL when the breaker refuses the request, before any attempt", async () => {
       const capture = makeLogCapture();
       const violations: string[] = [];
-      const recorded: ProbeOutcome[] = [];
+      const recorded: RequestOutcome[] = [];
       const buffered = bufferedTripwire(violations);
       const streaming = streamingTripwire(violations);
       const app = await buildProxyApp({
@@ -1900,7 +1900,7 @@ describe("streaming flag ON: the first frame is checked before anything is writt
     status: number;
     errorClass: string;
     body: { error: { message: string; type: string; code: string } };
-    votes: ProbeOutcome[];
+    votes: RequestOutcome[];
     terminal: string;
   };
   const EOF_BEFORE_FIRST_FRAME: ExpectedTerminal = {

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type {
   CircuitBreaker,
-  ProbeOutcome,
+  RequestOutcome,
 } from "../../src/reliability/circuit-breaker.js";
 import type { AcceptedStream } from "../../src/upstream/stream.js";
 import { bearer } from "../helpers/fake-auth-db.js";
@@ -70,9 +70,9 @@ const ALLOWED_LINE_KEYS = new Set([
 
 function recordingBreaker(): {
   breaker: CircuitBreaker;
-  recorded: ProbeOutcome[];
+  recorded: RequestOutcome[];
 } {
-  const recorded: ProbeOutcome[] = [];
+  const recorded: RequestOutcome[] = [];
   return {
     recorded,
     breaker: {

@@ -8,7 +8,7 @@ import type { ReleaseSlot } from "../reliability/admission-gate.js";
 import { cancelStream } from "../upstream/stream.js";
 import type {
   CircuitBreaker,
-  ProbeOutcome,
+  RequestOutcome,
 } from "../reliability/circuit-breaker.js";
 
 // What every committed stream's ending shares, built once after the attempt.
@@ -28,7 +28,7 @@ export interface PostLoopContext {
 // What one terminal decides.
 export interface StreamTerminalOutcome {
   terminal: StreamDoneTerminal;
-  breakerOutcome: ProbeOutcome;
+  breakerOutcome: RequestOutcome;
   completed: boolean;
   errorClass: ErrorClass | null;
 }

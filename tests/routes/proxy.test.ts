@@ -11,7 +11,7 @@ import { deriveRetryDisposition } from "../../src/routes/proxy-error-outcome.js"
 import {
   createCircuitBreaker,
   type CircuitBreaker,
-  type ProbeOutcome,
+  type RequestOutcome,
 } from "../../src/reliability/circuit-breaker.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
 import { resolveRejection, type Logger } from "../../src/upstream/rejection.js";
@@ -159,7 +159,7 @@ describe("proxy route — buffered skeleton", () => {
         body_raw: upstreamErrorBody,
       });
     };
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const recordingBreaker: CircuitBreaker = {
       tryAcquire: () => ({ kind: "NORMAL" }),
       recordResult: (o) => {
@@ -224,7 +224,7 @@ describe("proxy route — buffered skeleton", () => {
         body_raw: body400,
       });
     };
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const breaker: CircuitBreaker = {
       tryAcquire: () => ({ kind: "NORMAL" }),
       recordResult: (o) => {
@@ -279,7 +279,7 @@ describe("proxy route — buffered skeleton", () => {
         body_raw: body429,
       });
     };
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const breaker: CircuitBreaker = {
       tryAcquire: () => ({ kind: "NORMAL" }),
       recordResult: (o) => {
@@ -333,7 +333,7 @@ describe("proxy route — buffered skeleton", () => {
         undecodable_kind: "unparsable_body",
       });
     };
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const breaker: CircuitBreaker = {
       tryAcquire: () => ({ kind: "NORMAL" }),
       recordResult: (o) => {
@@ -398,7 +398,7 @@ describe("proxy route — buffered skeleton", () => {
   ) {
     const tenantId = randomUUID();
     const apiKey = `lkey_${randomBytes(32).toString("base64url")}`;
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const breaker: CircuitBreaker = {
       tryAcquire: () => ({ kind: "NORMAL" }),
       recordResult: (o) => {
@@ -776,7 +776,7 @@ describe("deriveRetryDisposition — cause discriminant (unit)", () => {
 });
 
 describe("proxy route — reliability integration (8.1 harness)", () => {
-  function recordingBreaker(recorded: ProbeOutcome[]): CircuitBreaker {
+  function recordingBreaker(recorded: RequestOutcome[]): CircuitBreaker {
     return {
       tryAcquire: () => ({ kind: "NORMAL" }),
       recordResult: (o) => {
@@ -815,7 +815,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
   it("8.3 success: 200 verbatim + req_complete{attempts:1, error_class:null} (log-capture)", async () => {
     const capture = makeLogCapture();
     const okBody = { id: "chatcmpl-8-3", choices: [{ index: 0 }] };
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const upstream = (): Promise<Outcome> =>
       Promise.resolve({ kind: "ok", status: 200, body_parsed: okBody });
 
@@ -859,7 +859,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
     let calls = 0;
     const okBody = { id: "chatcmpl-retry", choices: [{ index: 0 }] };
     const transientBody = '{"error":{"message":"transient"}}';
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const capture = makeLogCapture();
     // Sequence fake: attempt 1 is a 503; a 200 sits behind it, so an
     // eligibility regression fails loudly here (this response would be 200).
@@ -975,7 +975,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
   );
 
   it("8.10 wall-clock: upstream hangs past 30s → 504 gateway-fault, breaker INCONCLUSIVE", async () => {
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     // Hangs until the gateway's own AbortSignal fires, then resolves to the
     // aborted Outcome the real client would synthesize (mirrors openai.ts).
     const upstream = (
@@ -1087,7 +1087,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
 
   it("8.15 at-most-once: post-send network failure → 504, single attempt (no retry)", async () => {
     let calls = 0;
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const capture = makeLogCapture();
     // pre_send_proven false: bytes may have reached upstream, so the final state is unknown → not retry-eligible (at-most-once).
     const upstream = (): Promise<Outcome> => {
@@ -1128,7 +1128,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
 
   it("8.14 Idempotency-Key is a no-op: post-send failure → 504, single attempt despite the header", async () => {
     let calls = 0;
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const capture = makeLogCapture();
     const upstream = (): Promise<Outcome> => {
       calls += 1;
@@ -1174,7 +1174,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
   it("8.17 pre-send failure retried: ECONNREFUSED then 200 → 200, two attempts", async () => {
     let calls = 0;
     const okBody = { id: "chatcmpl-8-17", choices: [{ index: 0 }] };
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const capture = makeLogCapture();
     // pre_send_proven true: no bytes reached upstream, so a retry is side-effect-free.
     const upstream = (): Promise<Outcome> => {
@@ -1218,7 +1218,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
 
   it("8.17 pre-send failure exhausted: ECONNREFUSED twice → 502 upstream-retry-exhausted", async () => {
     let calls = 0;
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const capture = makeLogCapture();
     const upstream = (): Promise<Outcome> => {
       calls += 1;
@@ -1261,7 +1261,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
     let calls = 0;
     const okBody = { id: "chatcmpl-8-18", choices: [{ index: 0 }] };
     const body429 = '{"error":{"message":"rate limited"}}';
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const capture = makeLogCapture();
     // A 200 sits behind the 429: an eligibility regression would wait the 2s
     // and serve it — this response turning 200 is the loud failure mode.
@@ -1309,7 +1309,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
   // structurally unreachable. These cells pin the terminal that replaced it;
   // re-derive them with any adapter reopening of 429/503.
   it("8.43 default-deny: 503 + Retry-After exceeding the wall-clock → terminal 502, single attempt, breaker FAILURE", async () => {
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const capture = makeLogCapture();
     const body503 = '{"error":{"message":"overloaded","type":"server_error"}}';
     let calls = 0;
@@ -1356,7 +1356,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
   });
 
   it("8.43 status-agnostic — 429 + oversized Retry-After: verbatim 429, single attempt, breaker INCONCLUSIVE", async () => {
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const capture = makeLogCapture();
     const body429 =
       '{"error":{"message":"rate limited","type":"rate_limit_error"}}';
@@ -1405,7 +1405,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
     let calls = 0;
     const okBody = { id: "chatcmpl-8-43-fits", choices: [{ index: 0 }] };
     const body503 = '{"error":{"message":"overloaded"}}';
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const capture = makeLogCapture();
     // Before default-deny, a 1s Retry-After inside the 30s budget fired the
     // retry and served this 200 — the loud failure mode of a regression here.
@@ -1490,7 +1490,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
   });
 
   it("8.40 unrecognized rejection (EHOSTUNREACH) -> 500 gateway-fault, breaker INCONCLUSIVE, boundary log abort_identity:false", async () => {
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const capture = makeLogCapture();
 
     // The fake stands in for the real client at the upstreamBuffered seam. To
@@ -1549,7 +1549,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
   });
 
   it("8.40 unrecognized rejection (out-of-contract abort) -> 500 gateway-fault, breaker INCONCLUSIVE, boundary log abort_identity:true", async () => {
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const capture = makeLogCapture();
 
     // Sibling of the EHOSTUNREACH case — the opposite arm of the discriminant.
@@ -1604,7 +1604,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
   });
 
   it("8.39 settle-once race: a recognized network rejection (ECONNRESET) lands as the wall-clock abort fires → the route honors the returned network_failed (504 upstream_connection_failed + boundary log), not a signal.aborted shortcut", async () => {
-    const recorded: ProbeOutcome[] = [];
+    const recorded: RequestOutcome[] = [];
     const capture = makeLogCapture();
 
     const upstreamRace = (

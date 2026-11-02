@@ -2,7 +2,7 @@ import http from "node:http";
 import { describe, it, expect, vi } from "vitest";
 import type {
   CircuitBreaker,
-  ProbeOutcome,
+  RequestOutcome,
 } from "../../src/reliability/circuit-breaker.js";
 import type { AcceptedStream } from "../../src/upstream/stream.js";
 import { PARSER_BUFFER_CAP } from "../../src/upstream/sse-frame-reader.js";
@@ -42,9 +42,9 @@ const ONE_CONTENT_FRAME =
 
 function recordingBreaker(): {
   breaker: CircuitBreaker;
-  recorded: ProbeOutcome[];
+  recorded: RequestOutcome[];
 } {
-  const recorded: ProbeOutcome[] = [];
+  const recorded: RequestOutcome[] = [];
   return {
     recorded,
     breaker: {

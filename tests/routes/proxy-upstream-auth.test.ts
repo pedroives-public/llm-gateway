@@ -6,7 +6,7 @@ import { proxyRoute } from "../../src/routes/proxy.js";
 import {
   createCircuitBreaker,
   type CircuitBreaker,
-  type ProbeOutcome,
+  type RequestOutcome,
 } from "../../src/reliability/circuit-breaker.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
 import { bearer, fakeAuthDb } from "../helpers/fake-auth-db.js";
@@ -29,7 +29,7 @@ const SANITIZED_AUTH_BODY = {
 
 type ProbeResult = {
   res: Awaited<ReturnType<FastifyInstance["inject"]>>;
-  recorded: ProbeOutcome[];
+  recorded: RequestOutcome[];
   upstreamCalls: number;
   capture: LogCapture;
 };
@@ -48,7 +48,7 @@ async function inject401(
       ...(retryAfter === undefined ? {} : { retry_after: retryAfter }),
     });
   };
-  const recorded: ProbeOutcome[] = [];
+  const recorded: RequestOutcome[] = [];
   const recordingBreaker: CircuitBreaker = {
     tryAcquire: () => ({ kind: "NORMAL" }),
     recordResult: (outcome) => {
@@ -250,7 +250,7 @@ describe("retry-then-401 — credential classification survives the retry path",
         }
         return Promise.resolve(next);
       };
-      const recorded: ProbeOutcome[] = [];
+      const recorded: RequestOutcome[] = [];
       const recordingBreaker: CircuitBreaker = {
         tryAcquire: () => ({ kind: "NORMAL" }),
         recordResult: (outcome) => {
