@@ -10,6 +10,7 @@ import {
 import {
   createCircuitBreaker,
   type CircuitBreaker,
+  type CircuitState,
   type ProbeVote,
 } from "../../src/reliability/circuit-breaker.js";
 
@@ -107,6 +108,73 @@ describe("circuit breaker — CLOSED to OPEN on sustained failure", () => {
 });
 
 const OPEN_MS = 60_000;
+
+describe("circuit breaker — scheduled recovery probe", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("starts the probe at the 60s boundary", () => {
+    let stateAtProbeCall: CircuitState | undefined;
+    const runProbe = vi.fn(() => {
+      stateAtProbeCall = circuit.breaker.getState();
+    });
+    const circuit = createCircuitBreaker(noopLog, runProbe);
+    const breaker = circuit.breaker;
+
+    recordFailures(breaker, 5);
+
+    vi.advanceTimersByTime(OPEN_MS - 1);
+    expect(
+      runProbe,
+      "the probe must wait the full 60s of OPEN",
+    ).not.toHaveBeenCalled();
+    expect(breaker.getState()).toBe("OPEN");
+
+    vi.advanceTimersByTime(1);
+    expect(
+      runProbe,
+      "the timer must start the probe at 60s, with no tenant request",
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      runProbe,
+      "the probe must receive the vote of its attempt",
+    ).toHaveBeenCalledWith(expect.any(Function));
+    expect(
+      stateAtProbeCall,
+      "the transition to HALF_OPEN must happen before the probe runs",
+    ).toBe("HALF_OPEN");
+    expect(breaker.getState()).toBe("HALF_OPEN");
+  });
+
+  it("arms the probe even when logging the opening throws", () => {
+    let shouldThrow = true;
+    const runProbe = vi.fn();
+    const circuit = createCircuitBreaker(
+      {
+        info: () => {
+          if (shouldThrow) throw new Error("open event failed");
+        },
+      },
+      runProbe,
+    );
+
+    expect(() => recordFailures(circuit.breaker, 5)).toThrow(
+      "open event failed",
+    );
+    shouldThrow = false;
+    vi.advanceTimersByTime(OPEN_MS);
+
+    expect(
+      runProbe,
+      "a logging exception must not leave OPEN without a timer: nothing else leaves OPEN",
+    ).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("circuit breaker — OPEN and HALF_OPEN transitions", () => {
   beforeEach(() => {
