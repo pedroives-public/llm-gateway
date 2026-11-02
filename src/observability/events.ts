@@ -115,7 +115,7 @@ export interface ReqRejectPayload {
 }
 
 export interface UpstreamCancelRejectedPayload {
-  site: "upstream_adapter" | "proxy_route";
+  site: "upstream_adapter" | "proxy_route" | "breaker_probe";
   err_name: string;
 }
 export interface StreamFirstTokenPayload {
