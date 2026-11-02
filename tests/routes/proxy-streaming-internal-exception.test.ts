@@ -2,7 +2,7 @@ import http from "node:http";
 import { describe, it, expect, vi } from "vitest";
 import type {
   CircuitBreaker,
-  ProbeOutcome,
+  RequestOutcome,
 } from "../../src/reliability/circuit-breaker.js";
 import type { AcceptedStream } from "../../src/upstream/stream.js";
 import { bearer } from "../helpers/fake-auth-db.js";
@@ -96,9 +96,9 @@ const CLIENT_STEP_RULE =
 // needs the post-loop to fail after its terminal is decided arms it here.
 function recordingBreaker(voteThrowsOnce: boolean): {
   breaker: CircuitBreaker;
-  recorded: ProbeOutcome[];
+  recorded: RequestOutcome[];
 } {
-  const recorded: ProbeOutcome[] = [];
+  const recorded: RequestOutcome[] = [];
   let voteFaultArmed = voteThrowsOnce;
   return {
     recorded,

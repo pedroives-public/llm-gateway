@@ -5,8 +5,8 @@ const FAILURE_LIMIT = 5;
 const OPEN_COOLDOWN_MS = 60_000;
 
 export type CircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
-export type ProbeOutcome = "SUCCESS" | "FAILURE" | "INCONCLUSIVE";
-export type ProbeVote = (outcome: ProbeOutcome) => void;
+export type RequestOutcome = "SUCCESS" | "FAILURE" | "INCONCLUSIVE";
+export type ProbeVote = (outcome: RequestOutcome) => void;
 
 export interface CircuitAdmission {
   kind: "NORMAL" | "FAST_FAIL";
@@ -20,7 +20,7 @@ export type CbLogger = {
 export interface CircuitBreaker {
   getState(): CircuitState;
   tryAcquire(): CircuitAdmission;
-  recordResult(outcome: ProbeOutcome): void;
+  recordResult(outcome: RequestOutcome): void;
 }
 
 export interface CircuitBreakerProbe {
@@ -95,7 +95,7 @@ export function createCircuitBreaker(log: CbLogger): CircuitBreakerInstance {
     },
   };
 
-  const recordProbeResult = (outcome: ProbeOutcome): void => {
+  const recordProbeResult = (outcome: RequestOutcome): void => {
     try {
       if (outcome === "SUCCESS") {
         state = "CLOSED";

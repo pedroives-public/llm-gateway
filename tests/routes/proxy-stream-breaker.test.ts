@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   createCircuitBreaker,
   type CircuitBreaker,
-  type ProbeOutcome,
+  type RequestOutcome,
 } from "../../src/reliability/circuit-breaker.js";
 import { createOpenAIClient } from "../../src/upstream/openai.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
@@ -100,7 +100,7 @@ describe("stream:true must not open the shared circuit breaker", () => {
       // OPENAI_BASE_URL. The buffered seam guards the forbidden pattern and
       // otherwise delegates to the real client, which serves the victim.
       const heldBreaker = createCircuitBreaker(noopLog).breaker;
-      const recorded: ProbeOutcome[] = [];
+      const recorded: RequestOutcome[] = [];
       const votingBreaker: CircuitBreaker = {
         tryAcquire: () => heldBreaker.tryAcquire(),
         recordResult: (outcome) => {

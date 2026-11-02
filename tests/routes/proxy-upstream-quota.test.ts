@@ -5,7 +5,7 @@ import { buildApp } from "../../src/app.js";
 import { proxyRoute } from "../../src/routes/proxy.js";
 import type {
   CircuitBreaker,
-  ProbeOutcome,
+  RequestOutcome,
 } from "../../src/reliability/circuit-breaker.js";
 import type { Outcome } from "../../src/upstream/outcome.js";
 import { bearer, fakeAuthDb } from "../helpers/fake-auth-db.js";
@@ -38,7 +38,7 @@ const QUOTA_BODY_RAW = JSON.stringify({
 
 type ProbeResult = {
   res: Awaited<ReturnType<FastifyInstance["inject"]>>;
-  recorded: ProbeOutcome[];
+  recorded: RequestOutcome[];
   upstreamCalls: number;
   capture: LogCapture;
 };
@@ -53,7 +53,7 @@ async function injectScripted(script: Outcome[]): Promise<ProbeResult> {
     }
     return Promise.resolve(next);
   };
-  const recorded: ProbeOutcome[] = [];
+  const recorded: RequestOutcome[] = [];
   const recordingBreaker: CircuitBreaker = {
     tryAcquire: () => ({ kind: "NORMAL" }),
     recordResult: (outcome) => {
