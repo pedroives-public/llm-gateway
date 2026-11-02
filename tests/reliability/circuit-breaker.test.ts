@@ -193,6 +193,20 @@ describe("circuit breaker — scheduled recovery probe", () => {
     ).toHaveBeenCalledTimes(1);
   });
 
+  it("does not keep the process alive while waiting for the probe", () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const { breaker } = makeCircuit();
+
+    recordFailures(breaker, 5);
+
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+    expect(
+      setTimeoutSpy.mock.results[0]?.value.hasRef(),
+      "the probe timer must not keep the process alive",
+    ).toBe(false);
+    setTimeoutSpy.mockRestore();
+  });
+
   it("starts the probe on time when the wall clock moves back", () => {
     const { breaker, runProbe } = makeCircuit();
 
