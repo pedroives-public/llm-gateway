@@ -253,11 +253,15 @@ describe("circuit breaker — scheduled recovery probe", () => {
 
   it("rearms the probe timer even when logging the reopening throws", () => {
     let shouldThrow = false;
+    let thrown = 0;
     const runProbe = vi.fn<(vote: ProbeVote) => void>();
     const breaker = createCircuitBreaker(
       {
         info: () => {
-          if (shouldThrow) throw new Error("reopen event failed");
+          if (shouldThrow) {
+            thrown += 1;
+            throw new Error("reopen event failed");
+          }
         },
       },
       runProbe,
@@ -269,7 +273,14 @@ describe("circuit breaker — scheduled recovery probe", () => {
     if (!firstVote) throw new Error("Expected the first probe vote");
 
     shouldThrow = true;
-    expect(() => firstVote("FAILURE")).toThrow("reopen event failed");
+    expect(
+      () => firstVote("FAILURE"),
+      "a probe vote never throws to its caller",
+    ).not.toThrow();
+    expect(
+      thrown,
+      "both breaker lines of the vote were attempted, and both threw",
+    ).toBe(2);
     shouldThrow = false;
     vi.advanceTimersByTime(OPEN_MS);
 
@@ -409,16 +420,27 @@ describe("circuit breaker — HALF_OPEN probe outcomes", () => {
 
   it("reaches the next attempt after logging the close throws", () => {
     let shouldThrow = false;
+    let thrown = 0;
     const circuit = makeCircuit({
       info: () => {
-        if (shouldThrow) throw new Error("probe event failed");
+        if (shouldThrow) {
+          thrown += 1;
+          throw new Error("probe event failed");
+        }
       },
     });
     const breaker = circuit.breaker;
     const vote = admitProbe(circuit);
 
     shouldThrow = true;
-    expect(() => vote("SUCCESS")).toThrow("probe event failed");
+    expect(
+      () => vote("SUCCESS"),
+      "a probe vote never throws to its caller",
+    ).not.toThrow();
+    expect(
+      thrown,
+      "both breaker lines of the vote were attempted, and both threw",
+    ).toBe(2);
     expect(breaker.getState()).toBe("CLOSED");
     expect(breaker.tryAcquire()).toEqual({ kind: "NORMAL" });
 
@@ -741,15 +763,26 @@ describe("circuit breaker — stale probe votes", () => {
 
   it("spends a vote even when its state-change logging throws", () => {
     let shouldThrow = false;
+    let thrown = 0;
     const circuit = makeCircuit({
       info: () => {
-        if (shouldThrow) throw new Error("probe event failed");
+        if (shouldThrow) {
+          thrown += 1;
+          throw new Error("probe event failed");
+        }
       },
     });
     const voteN = admitProbe(circuit);
 
     shouldThrow = true;
-    expect(() => voteN("FAILURE")).toThrow("probe event failed");
+    expect(
+      () => voteN("FAILURE"),
+      "a probe vote never throws to its caller",
+    ).not.toThrow();
+    expect(
+      thrown,
+      "both breaker lines of the vote were attempted, and both threw",
+    ).toBe(2);
     shouldThrow = false;
     vi.advanceTimersByTime(OPEN_MS);
 
