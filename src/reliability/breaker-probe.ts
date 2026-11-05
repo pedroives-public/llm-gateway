@@ -71,10 +71,15 @@ export function createProbeRunner({
     }
 
     if (caughtError !== undefined) {
-      log.info({
-        err_name: extractErrName(caughtError.value),
-        ...extractCauseLog(caughtError.value),
-      });
+      try {
+        log.info({
+          err_name: extractErrName(caughtError.value),
+          ...extractCauseLog(caughtError.value),
+        });
+      } catch {
+        // The probe has already voted. A diagnostic logger failure must not
+        // turn that completed attempt into an unhandled rejection.
+      }
     }
   };
 }
