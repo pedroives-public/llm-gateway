@@ -9,9 +9,21 @@ import {
 import type { StreamingAdapter } from "../../src/upstream/stream.js";
 
 const OPEN_MS = 60_000;
+const CANARY = "upstream-canary-9c1d";
 const realSetImmediate = setImmediate;
 
 type LogLine = Record<string, unknown>;
+
+function capturingLog() {
+  const lines: LogLine[] = [];
+  const push = (line: object): void => {
+    lines.push(line as LogLine);
+  };
+  return {
+    lines,
+    log: { info: push, error: push },
+  };
+}
 
 describe("breaker probe — every exit has a next step", () => {
   let unhandled: unknown[];
@@ -281,5 +293,86 @@ describe("breaker probe — every exit has a next step", () => {
       unhandled,
       "an unhandled rejection takes the process down, and every tenant with it",
     ).toEqual([]);
+  });
+});
+
+describe("breaker probe — one event per probe", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("names the attempt and the outcome once per probe", async () => {
+    const { createCircuitBreaker } = await import(
+      "../../src/reliability/circuit-breaker.js"
+    );
+    const { createProbeRunner } = await import(
+      "../../src/reliability/breaker-probe.js"
+    );
+    const captured = capturingLog();
+    const responses: StreamingAdapter[] = [
+      { kind: "upstream_error", status: 503, body_raw: CANARY },
+      {
+        kind: "accepted_stream",
+        status: 200,
+        reader: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        }).getReader(),
+      },
+    ];
+    let call = 0;
+    const breaker = createCircuitBreaker(
+      captured.log,
+      createProbeRunner({
+        streaming: async () => {
+          const response = responses[call];
+          call += 1;
+          if (response === undefined) throw new Error("no response scripted");
+          return response;
+        },
+        model: "probe-model",
+        log: captured.log,
+      }),
+    );
+    for (let i = 0; i < 5; i++) breaker.recordResult("FAILURE");
+
+    await vi.advanceTimersByTimeAsync(OPEN_MS);
+    await vi.advanceTimersByTimeAsync(OPEN_MS);
+
+    expect(
+      captured.lines.filter((line) => line.event === "breaker_probe_result"),
+      "each probe is one line: which attempt, how it ended, nothing from the upstream",
+    ).toEqual([
+      { event: "breaker_probe_result", attempt: 1, outcome: "FAILURE" },
+      { event: "breaker_probe_result", attempt: 2, outcome: "SUCCESS" },
+    ]);
+
+    const runnerFailureLog = capturingLog();
+    const runnerFailureBreaker = createCircuitBreaker(
+      runnerFailureLog.log,
+      () => {
+        throw new Error("runner failed");
+      },
+    );
+    for (let i = 0; i < 5; i++) {
+      runnerFailureBreaker.recordResult("FAILURE");
+    }
+    await vi.advanceTimersByTimeAsync(OPEN_MS);
+
+    expect(
+      runnerFailureLog.lines.filter(
+        (line) => line.event === "breaker_probe_result",
+      ),
+      "a breaker-generated FAILURE uses the same vote event",
+    ).toEqual([
+      { event: "breaker_probe_result", attempt: 1, outcome: "FAILURE" },
+    ]);
   });
 });

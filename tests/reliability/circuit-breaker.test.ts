@@ -586,14 +586,19 @@ describe("circuit breaker — cb_state_change events", () => {
 
     vote("SUCCESS");
 
-    expect(info).toHaveBeenCalledTimes(1);
-    expect(info).toHaveBeenCalledWith({
+    const stateChanges = info.mock.calls
+      .map(([line]) => line)
+      .filter(
+        (line) =>
+          (line as { event?: string }).event === "cb_state_change",
+      );
+    expect(stateChanges).toEqual([{
       event: "cb_state_change",
       from: "HALF_OPEN",
       to: "CLOSED",
       failure_count: 0,
       window_start_ms: 0,
-    });
+    }]);
   });
 
   it("emits HALF_OPEN -> OPEN with an empty-window snapshot when the probe fails", () => {
@@ -607,14 +612,19 @@ describe("circuit breaker — cb_state_change events", () => {
 
     vote("FAILURE");
 
-    expect(info).toHaveBeenCalledTimes(1);
-    expect(info).toHaveBeenCalledWith({
+    const stateChanges = info.mock.calls
+      .map(([line]) => line)
+      .filter(
+        (line) =>
+          (line as { event?: string }).event === "cb_state_change",
+      );
+    expect(stateChanges).toEqual([{
       event: "cb_state_change",
       from: "HALF_OPEN",
       to: "OPEN",
       failure_count: 0,
       window_start_ms: 0,
-    });
+    }]);
   });
 });
 
