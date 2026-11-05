@@ -613,6 +613,44 @@ describe("breaker probe — every exit has a next step", () => {
       "an unhandled rejection takes the process down, and every tenant with it",
     ).toEqual([]);
   });
+
+  it("leaves no unhandled rejection when logging the alert throws", async () => {
+    const { createProbeRunner } = await import(
+      "../../src/reliability/breaker-probe.js"
+    );
+    const vote = vi.fn();
+    let thrown = 0;
+    const runProbe = createProbeRunner({
+      streaming: async (): Promise<StreamingAdapter> => ({
+        kind: "upstream_error",
+        status: 401,
+        body_raw: "",
+      }),
+      model: "probe-model",
+      log: {
+        info: (): void => {},
+        error: (line: object): void => {
+          if ((line as LogLine).event === "operational_alert") {
+            thrown += 1;
+            throw new Error("logger failed");
+          }
+        },
+      },
+    });
+
+    void runProbe(vote);
+    await vi.advanceTimersByTimeAsync(0);
+    await flushRejections();
+
+    expect(thrown, "the scene must make the alert line throw").toBe(1);
+    expect(vote, "the vote comes before the alert line").toHaveBeenCalledWith(
+      "FAILURE",
+    );
+    expect(
+      unhandled,
+      "an unhandled rejection takes the process down, and every tenant with it",
+    ).toEqual([]);
+  });
 });
 
 describe("breaker probe — one event per probe", () => {
