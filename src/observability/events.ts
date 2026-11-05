@@ -41,6 +41,13 @@ export type RetryDisposition = "attempted" | "skipped_budget" | "ineligible";
 
 export type CbState = "CLOSED" | "OPEN" | "HALF_OPEN";
 
+export type ProbeOutcome = "SUCCESS" | "FAILURE";
+
+export interface BreakerProbeResultPayload {
+  attempt: number;
+  outcome: ProbeOutcome;
+}
+
 export type ReqRejectedReason = "schema_validation" | "cost_cap_exceeded";
 
 export type AlertName = (typeof ALERT_NAMES)[number];
@@ -242,6 +249,17 @@ export function emitCbStateChange(
   payload: CbStateChangePayload,
 ): void {
   log.info({ event: "cb_state_change", ...payload });
+}
+
+/**
+ * Outcome of one scheduled recovery probe. Emitted at the breaker vote
+ * boundary so breaker-generated FAILUREs share the same event as runner votes.
+ */
+export function emitBreakerProbeResult(
+  log: MinLogger,
+  payload: BreakerProbeResultPayload,
+): void {
+  log.info({ event: "breaker_probe_result", ...payload });
 }
 
 /**

@@ -1,11 +1,16 @@
-import { emitCbStateChange } from "../observability/events.js";
+import {
+  emitBreakerProbeResult,
+  emitCbStateChange,
+  type ProbeOutcome,
+} from "../observability/events.js";
+
+export type { ProbeOutcome } from "../observability/events.js";
 
 const FAILURE_WINDOW_MS = 30_000;
 const FAILURE_LIMIT = 5;
 const OPEN_COOLDOWN_MS = 60_000;
 
 export type CircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
-export type ProbeOutcome = "SUCCESS" | "FAILURE";
 export type RequestOutcome = ProbeOutcome | "INCONCLUSIVE";
 export type ProbeVote = (outcome: ProbeOutcome) => void;
 
@@ -33,6 +38,7 @@ export function createCircuitBreaker(
   // snapshot can't drift.
   let failureTimeStamps: number[] = [];
   let state: CircuitState = "CLOSED";
+  let probeAttempts = 0;
 
   // The live 30s window, derived on read (expired excluded). Stamps arrive in
   // order and filter preserves it, so [0] is the oldest in-window failure.
@@ -118,12 +124,34 @@ export function createCircuitBreaker(
         return;
       }
 
+      const attempt = ++probeAttempts;
       let voted = false;
       const voteOnce: ProbeVote = (outcome) => {
         if (voted) return;
 
         voted = true;
-        recordProbeResult(outcome);
+        let failed = false;
+        let failure: unknown;
+        try {
+          recordProbeResult(outcome);
+        } catch (error) {
+          // recordProbeResult commits state and, for FAILURE, arms the next
+          // timer before it emits the observational state-change line. Keep
+          // the error for direct callers after still recording the outcome.
+          failed = true;
+          failure = error;
+        }
+        try {
+          emitBreakerProbeResult(log, { attempt, outcome });
+        } catch (error) {
+          if (!failed) {
+            failed = true;
+            failure = error;
+          }
+        }
+        if (failed) {
+          throw failure;
+        }
       };
       const failProbe = (): void => {
         try {
