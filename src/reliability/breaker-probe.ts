@@ -128,7 +128,13 @@ export function createProbeRunner({
     }
 
     if (alert !== undefined) {
-      emitOperationalAlert(log, alert, { req_id: PROBE_REQUEST_ID });
+      try {
+        emitOperationalAlert(log, alert, { req_id: PROBE_REQUEST_ID });
+      } catch {
+        // The probe has already voted, so a failed alert line must not turn
+        // the attempt into an unhandled rejection. The alert's name is already
+        // marked as fired, so it stays silent until the process restarts.
+      }
     }
 
     if (caughtError !== undefined) {
