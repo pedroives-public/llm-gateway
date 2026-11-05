@@ -26,7 +26,7 @@ export interface CircuitBreaker {
 
 export function createCircuitBreaker(
   log: CbLogger,
-  runProbe?: (vote: ProbeVote) => void,
+  runProbe?: (vote: ProbeVote) => void | Promise<void>,
 ): CircuitBreaker {
   // Append-only failure instants (epoch ms). Read only via liveFailureStamps,
   // so the 30s window has one definition and the open-decision and event
@@ -107,15 +107,46 @@ export function createCircuitBreaker(
 
     const timer = setTimeout(() => {
       state = "HALF_OPEN";
-      emitStateChange("OPEN", "HALF_OPEN");
+      try {
+        emitStateChange("OPEN", "HALF_OPEN");
+      } catch {
+        // State-change logging is observational. If it fails before the probe
+        // starts, restore liveness by returning to OPEN and arming the next
+        // timer.
+        state = "OPEN";
+        armProbeTimer();
+        return;
+      }
 
       let voted = false;
-      runProbe((outcome) => {
+      const voteOnce: ProbeVote = (outcome) => {
         if (voted) return;
 
         voted = true;
         recordProbeResult(outcome);
-      });
+      };
+      const failProbe = (): void => {
+        try {
+          voteOnce("FAILURE");
+        } catch {
+          // The FAILURE transition and next timer are committed before their
+          // state-change log can throw; there is no unhandled runner error.
+        }
+      };
+
+      try {
+        const result = runProbe(voteOnce);
+        if (result !== undefined) {
+          void Promise.resolve(result).then(
+            () => {
+              if (!voted) failProbe();
+            },
+            failProbe,
+          );
+        }
+      } catch {
+        failProbe();
+      }
     }, OPEN_COOLDOWN_MS);
 
     timer.unref();
