@@ -494,6 +494,100 @@ describe("breaker probe — every exit has a next step", () => {
     ).toBe(state);
   });
 
+  type VoteLogFailureRow = {
+    scene: string;
+    response: () => StreamingAdapter;
+    when: (line: LogLine) => boolean;
+    alerts: string[];
+    because: string;
+  };
+
+  // Records every line, and throws once on the first line matching `when`
+  // written after OPEN -> HALF_OPEN: the entry to OPEN logs too, and only a
+  // line written during the probe's vote counts.
+  const recordingThrowingOnce = (when: (line: LogLine) => boolean) => {
+    let lines: LogLine[] = [];
+    let armed = false;
+    let thrown = false;
+    const write = (line: object): void => {
+      const entry = line as LogLine;
+      if (entry.to === "HALF_OPEN") armed = true;
+      if (armed && !thrown && when(entry)) {
+        thrown = true;
+        throw new Error("logger failed");
+      }
+      lines = [...lines, entry];
+    };
+    return {
+      log: { info: write, error: write },
+      thrown: () => thrown,
+      alerts: () =>
+        lines
+          .filter((line) => line.event === "operational_alert")
+          .map((line) => line.alert),
+    };
+  };
+
+  const voteLogFailureRows: VoteLogFailureRow[] = [
+    {
+      response: () => ({ kind: "upstream_error", status: 401, body_raw: "" }),
+      when: toState("OPEN"),
+      alerts: ["upstream_auth_failure"],
+      scene: "the HALF_OPEN to OPEN line throws during a 401 vote",
+      because: "a breaker line that fails during the vote must not cost the operator the alert",
+    },
+    {
+      response: () => ({ kind: "upstream_error", status: 403, body_raw: "" }),
+      when: (line) => line.event === "breaker_probe_result" && line.outcome === "FAILURE",
+      alerts: ["upstream_probe_rejected"],
+      scene: "the breaker_probe_result line throws during a 403 vote",
+      because: "a breaker line that fails during the vote must not cost the operator the alert",
+    },
+    {
+      response: () => ({ kind: "upstream_error", status: 400, body_raw: "" }),
+      when: toState("CLOSED"),
+      alerts: ["upstream_probe_rejected"],
+      scene: "the HALF_OPEN to CLOSED line throws during a 400 vote",
+      because: "a breaker line that fails during the vote must not cost the operator the alert",
+    },
+  ];
+
+  // The breaker and the runner share the app's logger, and the runner writes
+  // the alert after the vote returns: a breaker line that fails during the
+  // vote must not cost the operator the alert.
+  it.each(voteLogFailureRows)(
+    "still alerts $alerts when $scene",
+    async ({ response, when, alerts, because }) => {
+      const { createCircuitBreaker } = await import(
+        "../../src/reliability/circuit-breaker.js"
+      );
+      const { createProbeRunner } = await import(
+        "../../src/reliability/breaker-probe.js"
+      );
+      const shared = recordingThrowingOnce(when);
+      const breaker = createCircuitBreaker(
+        shared.log,
+        createProbeRunner({
+          streaming: async () => response(),
+          model: "probe-model",
+          log: shared.log,
+        }),
+      );
+      openBreaker(breaker);
+
+      await vi.advanceTimersByTimeAsync(OPEN_MS);
+      await flushRejections();
+
+      // Positive control: without the throw, a missing alert would say
+      // nothing about the rule.
+      expect(
+        shared.thrown(),
+        "the scene must make the chosen breaker line throw",
+      ).toBe(true);
+      expect(shared.alerts(), because).toEqual(alerts);
+    },
+  );
+
   it("leaves no unhandled rejection when logging a caught error throws", async () => {
     const { createProbeRunner } = await import(
       "../../src/reliability/breaker-probe.js"

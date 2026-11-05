@@ -130,27 +130,15 @@ export function createCircuitBreaker(
         if (voted) return;
 
         voted = true;
-        let failed = false;
-        let failure: unknown;
         try {
           recordProbeResult(outcome);
-        } catch (error) {
-          // recordProbeResult commits state and, for FAILURE, arms the next
-          // timer before it emits the observational state-change line. Keep
-          // the error for direct callers after still recording the outcome.
-          failed = true;
-          failure = error;
+        } catch {
+          // A state-change log failure must not skip the probe-result event.
         }
         try {
           emitBreakerProbeResult(log, { attempt, outcome });
-        } catch (error) {
-          if (!failed) {
-            failed = true;
-            failure = error;
-          }
-        }
-        if (failed) {
-          throw failure;
+        } catch {
+          // Probe votes do not propagate logging failures to their caller.
         }
       };
       const failProbe = (): void => {
