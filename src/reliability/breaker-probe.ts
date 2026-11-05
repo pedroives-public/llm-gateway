@@ -6,11 +6,63 @@ import { extractCauseLog } from "../upstream/cause-log.js";
 import { extractErrName } from "../upstream/rejection.js";
 import { PROBE_CLOCK_MS } from "../config.js";
 import { armWallClockTimeout } from "./timeouts.js";
+import {
+  emitOperationalAlert,
+  type AlertName,
+} from "../observability/events.js";
+import { isInsufficientQuota } from "../upstream/quota.js";
+import type { ErrorOutcome } from "../upstream/outcome.js";
+
+const PROBE_REQUEST_ID = "breaker_probe";
+
+type ProbeDecision = {
+  outcome: ProbeOutcome;
+  alert?: AlertName;
+};
+
+function decideProbeOutcome(response: ErrorOutcome): ProbeDecision {
+  if (response.kind === "redirect_blocked") {
+    return {
+      outcome: "FAILURE",
+      alert: "upstream_redirect_blocked",
+    };
+  }
+
+  if (response.kind !== "upstream_error") {
+    return { outcome: "FAILURE" };
+  }
+
+  if (response.status === 401) {
+    return { outcome: "FAILURE", alert: "upstream_auth_failure" };
+  }
+
+  if (isInsufficientQuota(response)) {
+    return { outcome: "FAILURE", alert: "upstream_quota_exhausted" };
+  }
+
+  if (
+    response.status === 400 ||
+    response.status === 404 ||
+    response.status === 413 ||
+    response.status === 422
+  ) {
+    return { outcome: "SUCCESS", alert: "upstream_probe_rejected" };
+  }
+
+  if (response.status === 403) {
+    return { outcome: "FAILURE", alert: "upstream_probe_rejected" };
+  }
+
+  return { outcome: "FAILURE" };
+}
 
 type ProbeRunnerDependencies = {
   streaming: StreamingUpstream;
   model: string;
-  log: Parameters<StreamingUpstream>[2];
+  // One logger, two callers: the adapter logs with error(payload, msg), the
+  // probe's alerts with error(line). The app's Pino logger serves both.
+  log: Parameters<StreamingUpstream>[2] &
+    Parameters<typeof emitOperationalAlert>[0];
 };
 
 type ProbeRequestBody = {
@@ -36,6 +88,7 @@ export function createProbeRunner({
     const timeout = armWallClockTimeout(PROBE_CLOCK_MS);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let outcome: ProbeOutcome = "FAILURE";
+    let alert: AlertName | undefined;
     let caughtError: { value: unknown } | undefined;
 
     try {
@@ -55,6 +108,10 @@ export function createProbeRunner({
             break;
           }
         }
+      } else {
+        const decision = decideProbeOutcome(response);
+        outcome = decision.outcome;
+        alert = decision.alert;
       }
     } catch (error) {
       caughtError = { value: error };
@@ -68,6 +125,10 @@ export function createProbeRunner({
           await cancelStream(reader, log, "breaker_probe");
         }
       }
+    }
+
+    if (alert !== undefined) {
+      emitOperationalAlert(log, alert, { req_id: PROBE_REQUEST_ID });
     }
 
     if (caughtError !== undefined) {
