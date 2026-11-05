@@ -11,6 +11,8 @@ export const ALERT_NAMES = [
   "upstream_quota_exhausted",
   // the configured endpoint answered 3xx and the gateway refuses to follow it
   "upstream_redirect_blocked",
+  // the recovery probe was refused by its deployment-owned request or account access
+  "upstream_probe_rejected",
   // the auth DB catch saw an error whose shape the cause vocabulary cannot
   // identify (cause_code or cause_name fell back to UNKNOWN)
   "auth_db_cause_unknown",

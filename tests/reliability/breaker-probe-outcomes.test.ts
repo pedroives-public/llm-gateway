@@ -1,3 +1,4 @@
+import http from "node:http";
 import {
   afterEach,
   beforeEach,
@@ -6,13 +7,28 @@ import {
   it,
   vi,
 } from "vitest";
+import type { StreamingUpstream } from "../../src/upstream/openai.js";
 import type { StreamingAdapter } from "../../src/upstream/stream.js";
+import { listenEphemeral } from "../helpers/ephemeral-server.js";
+
+// Every way a recovery probe can end, through the real adapter and a real
+// socket: the adapter decides which outcome each response becomes, so a fake
+// seam would pin the test's own mapping. The modules are reloaded for every
+// cell because an operational alert fires once per process.
 
 const OPEN_MS = 60_000;
 const CANARY = "upstream-canary-9c1d";
+const QUOTA_BODY = JSON.stringify({ error: { code: "insufficient_quota" } });
+const ERROR_BODY = JSON.stringify({ error: { message: "refused" } });
 const realSetImmediate = setImmediate;
 
 type LogLine = Record<string, unknown>;
+
+type UpstreamResponse = {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+};
 
 function capturingLog() {
   const lines: LogLine[] = [];
@@ -22,8 +38,217 @@ function capturingLog() {
   return {
     lines,
     log: { info: push, error: push },
+    alerts: () =>
+      lines
+        .filter((line) => line.event === "operational_alert")
+        .map((line) => line.alert),
   };
 }
+
+async function withUpstream(
+  response: UpstreamResponse,
+  scene: (client: {
+    streaming: StreamingUpstream;
+  }) => Promise<void>,
+): Promise<void> {
+  const { createOpenAIClient } = await import("../../src/upstream/openai.js");
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(response.status, response.headers);
+      res.end(response.body);
+    });
+  });
+  const { port, close } = await listenEphemeral(server);
+  try {
+    await scene(
+      createOpenAIClient({
+        apiKey: "deployment-key",
+        baseURL: `http://127.0.0.1:${port}`,
+      }),
+    );
+  } finally {
+    await close();
+  }
+}
+
+const json = (status: number, body = ERROR_BODY): UpstreamResponse => ({
+  status,
+  headers: { "content-type": "application/json" },
+  body,
+});
+const sse = (body: string): UpstreamResponse => ({
+  status: 200,
+  headers: { "content-type": "text/event-stream" },
+  body,
+});
+
+describe("breaker probe — outcome table", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it.each([
+    { scene: "[DONE] inside the clock", response: sse("data: [DONE]\n\n"), outcome: "SUCCESS", alerts: [], because: "[DONE] is the evidence of recovery and raises nothing" },
+    { scene: "500", response: json(500), outcome: "FAILURE", alerts: [], because: "a 5xx is the upstream failing, which the breaker already reports" },
+    { scene: "503", response: json(503), outcome: "FAILURE", alerts: [], because: "a 5xx is the upstream failing, which the breaker already reports" },
+    { scene: "429 rate limit", response: json(429), outcome: "FAILURE", alerts: [], because: "a plain 429 says not now, and summons nobody" },
+    { scene: "429 insufficient_quota", response: json(429, QUOTA_BODY), outcome: "FAILURE", alerts: ["upstream_quota_exhausted"], because: "no quota needs the operator, and retrying in 60 s will not fix it" },
+    { scene: "401", response: json(401), outcome: "FAILURE", alerts: ["upstream_auth_failure"], because: "a rejected deployment credential needs the operator" },
+    { scene: "403", response: json(403), outcome: "FAILURE", alerts: ["upstream_probe_rejected"], because: "a denied account keeps the breaker open and needs the operator" },
+    { scene: "400", response: json(400), outcome: "SUCCESS", alerts: ["upstream_probe_rejected"], because: "a refused probe config must not hold every tenant in 503" },
+    { scene: "404", response: json(404), outcome: "SUCCESS", alerts: ["upstream_probe_rejected"], because: "a refused probe config must not hold every tenant in 503" },
+    { scene: "413", response: json(413), outcome: "SUCCESS", alerts: ["upstream_probe_rejected"], because: "a refused probe config must not hold every tenant in 503" },
+    { scene: "422", response: json(422), outcome: "SUCCESS", alerts: ["upstream_probe_rejected"], because: "a refused probe config must not hold every tenant in 503" },
+    { scene: "408", response: json(408), outcome: "FAILURE", alerts: [], because: "a 4xx that says not now proves nothing about recovery" },
+    { scene: "409", response: json(409), outcome: "FAILURE", alerts: [], because: "a 4xx that says not now proves nothing about recovery" },
+    { scene: "418, a status nobody named", response: json(418), outcome: "FAILURE", alerts: [], because: "a status not named proves nothing about recovery" },
+    { scene: "300, a 3xx fetch does not follow", response: json(300), outcome: "FAILURE", alerts: [], because: "a status not named proves nothing about recovery" },
+    { scene: "SSE 200 without [DONE]", response: sse("data: {}\n\n"), outcome: "FAILURE", alerts: [], because: "a stream that ends without [DONE] proves no recovery" },
+    { scene: "200 that is not SSE", response: json(200, "{}"), outcome: "FAILURE", alerts: [], because: "a 2xx without [DONE] proves no recovery" },
+    { scene: "302 redirect", response: { status: 302, headers: { location: "http://127.0.0.1:1/" }, body: "" }, outcome: "FAILURE", alerts: ["upstream_redirect_blocked"], because: "an endpoint that redirects is a deployment fault the operator must fix" },
+  ])(
+    "$scene votes $outcome and alerts $alerts",
+    async ({ response, outcome, alerts, because }) => {
+      const { createProbeRunner } = await import(
+        "../../src/reliability/breaker-probe.js"
+      );
+      const captured = capturingLog();
+      const vote = vi.fn();
+
+      await withUpstream(response, async ({ streaming }) => {
+        await createProbeRunner({
+          streaming,
+          model: "probe-model",
+          log: captured.log,
+        })(vote);
+      });
+
+      expect(vote, "a probe votes exactly once").toHaveBeenCalledTimes(1);
+      expect(vote, because).toHaveBeenCalledWith(outcome);
+      expect(captured.alerts(), because).toEqual(alerts);
+    },
+  );
+
+  it("votes FAILURE with no alert on a network failure", async () => {
+    const { createOpenAIClient } = await import(
+      "../../src/upstream/openai.js"
+    );
+    const { createProbeRunner } = await import(
+      "../../src/reliability/breaker-probe.js"
+    );
+    // Listening and closing leaves a port that refuses the connection.
+    const { port, close } = await listenEphemeral(http.createServer());
+    await close();
+    const captured = capturingLog();
+    const vote = vi.fn();
+
+    await createProbeRunner({
+      streaming: createOpenAIClient({
+        apiKey: "deployment-key",
+        baseURL: `http://127.0.0.1:${port}`,
+      }).streaming,
+      model: "probe-model",
+      log: captured.log,
+    })(vote);
+
+    expect(vote, "a refused connection proves no recovery").toHaveBeenCalledWith(
+      "FAILURE",
+    );
+    expect(captured.alerts(), "a network failure summons nobody").toEqual([]);
+  });
+
+  it("raises a probe alert once per process, across attempts", async () => {
+    const { createProbeRunner } = await import(
+      "../../src/reliability/breaker-probe.js"
+    );
+    const captured = capturingLog();
+
+    await withUpstream(json(403), async ({ streaming }) => {
+      const runProbe = createProbeRunner({
+        streaming,
+        model: "probe-model",
+        log: captured.log,
+      });
+      await runProbe(vi.fn());
+      await runProbe(vi.fn());
+    });
+
+    expect(
+      captured.alerts(),
+      "a probe repeats every 60 s and must summon the operator only once",
+    ).toEqual(["upstream_probe_rejected"]);
+  });
+});
+
+describe("breaker probe — nothing from the upstream reaches the logs", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it.each([
+    { scene: "400", status: 400 },
+    { scene: "401", status: 401 },
+    { scene: "403", status: 403 },
+    { scene: "404", status: 404 },
+    { scene: "413", status: 413 },
+    { scene: "422", status: 422 },
+    { scene: "429", status: 429 },
+    { scene: "500", status: 500 },
+    { scene: "418", status: 418 },
+  ])("keeps the body of a $scene out of every line", async ({ status }) => {
+    const { createProbeRunner } = await import(
+      "../../src/reliability/breaker-probe.js"
+    );
+    const captured = capturingLog();
+    let bodySeen = "";
+
+    await withUpstream(
+      json(status, JSON.stringify({ error: { message: CANARY } })),
+      async ({ streaming }) => {
+        await createProbeRunner({
+          streaming: async (...args) => {
+            const result = await streaming(...args);
+            if (result.kind === "upstream_error") bodySeen = result.body_raw;
+            return result;
+          },
+          model: "probe-model",
+          log: captured.log,
+        })(vi.fn());
+      },
+    );
+
+    // Positive control: the canary did reach the adapter's result, so its
+    // absence from the lines below is a reading and not a blind ruler.
+    expect(bodySeen, "the upstream's body must carry the canary").toContain(
+      CANARY,
+    );
+    expect(
+      JSON.stringify(captured.lines),
+      "an upstream body may echo anything, and must never reach a log line",
+    ).not.toContain(CANARY);
+  });
+
+  it("keeps a rejection's message out of every line", async () => {
+    const { createProbeRunner } = await import(
+      "../../src/reliability/breaker-probe.js"
+    );
+    const captured = capturingLog();
+
+    await createProbeRunner({
+      streaming: async () => {
+        throw new Error(CANARY, { cause: new Error(CANARY) });
+      },
+      model: "probe-model",
+      log: captured.log,
+    })(vi.fn());
+
+    expect(
+      JSON.stringify(captured.lines),
+      "an error's message never reaches a log line",
+    ).not.toContain(CANARY);
+  });
+});
 
 describe("breaker probe — every exit has a next step", () => {
   let unhandled: unknown[];
