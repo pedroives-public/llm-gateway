@@ -142,12 +142,7 @@ export function createCircuitBreaker(
         }
       };
       const failProbe = (): void => {
-        try {
-          voteOnce("FAILURE");
-        } catch {
-          // The FAILURE transition and next timer are committed before their
-          // state-change log can throw; there is no unhandled runner error.
-        }
+        voteOnce("FAILURE");
       };
 
       try {
