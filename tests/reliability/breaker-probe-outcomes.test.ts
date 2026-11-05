@@ -179,6 +179,32 @@ describe("breaker probe — outcome table", () => {
       "a probe repeats every 60 s and must summon the operator only once",
     ).toEqual(["upstream_probe_rejected"]);
   });
+
+  it("names the probe in the alert line, and nothing else", async () => {
+    const { createProbeRunner } = await import(
+      "../../src/reliability/breaker-probe.js"
+    );
+    const captured = capturingLog();
+
+    await withUpstream(json(401), async ({ streaming }) => {
+      await createProbeRunner({
+        streaming,
+        model: "probe-model",
+        log: captured.log,
+      })(vi.fn());
+    });
+
+    expect(
+      captured.lines.filter((line) => line.event === "operational_alert"),
+      "no tenant request stands behind a probe alert, so its req_id names the probe",
+    ).toEqual([
+      {
+        event: "operational_alert",
+        alert: "upstream_auth_failure",
+        req_id: "breaker_probe",
+      },
+    ]);
+  });
 });
 
 describe("breaker probe — nothing from the upstream reaches the logs", () => {
