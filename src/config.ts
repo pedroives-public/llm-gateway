@@ -37,12 +37,14 @@ export const ADMISSION_CAPACITY_PRE_AUTH = 10;
 export const STREAM_TOTAL_DURATION_MS = 280_000;
 
 // Bounds the breaker's whole recovery probe, up to `[DONE]`. Measured from the
-// production machine (2026-10-31, N=20, new connection, gpt-4o-mini,
-// max_tokens 1): median 917 ms, maximum 2157 ms. One off-peak window; a repeat
-// at peak with a maximum above about 2.5 s raises this to 5 s. The error is
-// asymmetric: too short costs 60 s more of OPEN with a healthy upstream, too
-// long costs a few seconds more per attempt with a dead one.
-export const PROBE_CLOCK_MS = 3_000;
+// production machine (new connection, gpt-4o-mini, max_tokens 1, N=20 each):
+// 2026-10-31, off-peak, maximum 2157 ms; 2026-11-04, US business hours, median
+// 917 ms and maximum 4576 ms, the wait falling before the response head. 10 s
+// keeps more than twice the worst of the 40 attempts. The error is asymmetric:
+// too short costs 60 s more of OPEN with a healthy upstream; too long costs
+// tenants nothing, since HALF_OPEN fast-fails them like OPEN, only a few
+// seconds more before the next attempt when the upstream is dead.
+export const PROBE_CLOCK_MS = 10_000;
 
 export function getOpenAIApiKey(): string {
   const key = process.env["OPENAI_API_KEY"];
