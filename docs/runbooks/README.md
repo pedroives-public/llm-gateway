@@ -52,8 +52,10 @@ phases. Attempts that reach the upstream fail with `502
 {"code":"upstream_auth_failure"}`, each recording a circuit breaker
 FAILURE; once the breaker opens, requests fast-fail with `503
 {"code":"circuit_breaker_open"}` (`error_class:
-"upstream-retry-exhausted"`) without touching the upstream, and only the
-periodic HALF_OPEN probe re-records the 502. The 502 code going quiet in
+"upstream-retry-exhausted"`) without touching the upstream. The breaker's
+own recovery probe, a synthetic request sent every 60 seconds with no tenant
+involved, keeps meeting the same rejection (`breaker_probe_result` with
+outcome `FAILURE`), so tenant `502` lines stop. The 502 code going quiet in
 the logs is the breaker working, not the condition ending. It never
 self-heals — only operator action ends it.
 
@@ -98,11 +100,14 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 **Verify**
 
-Re-run the diagnosis curl — expect `200`. Then one real request through the
-gateway must answer `200`, and the post-redeploy log must stay quiet: a new
-`upstream_auth_failure` alert after the redeploy means still broken. Do not
-outsource verification to the breaker's HALF_OPEN probe — that gambles a
-real tenant request on your fix.
+Re-run the diagnosis curl — expect `200`. Then wait for the breaker's next
+recovery probe, at most about 70 seconds: a `breaker_probe_result` with
+outcome `SUCCESS` followed by `cb_state_change` to `CLOSED` shows the gateway
+reached the upstream with the fixed credential. The probe is a synthetic
+request, so no tenant request is spent on the check. Then one real request
+through the gateway must answer `200`, and the post-redeploy log must stay
+quiet: a new `upstream_auth_failure` alert after the redeploy means still
+broken.
 
 ---
 
@@ -197,8 +202,10 @@ phases: attempts that reach the upstream fail with `502
 {"code":"upstream_redirect_blocked"}` and record circuit breaker FAILUREs;
 once the breaker opens, requests fast-fail with `503
 {"code":"circuit_breaker_open"}` (`error_class:
-"upstream-retry-exhausted"`), and only the periodic HALF_OPEN probe
-re-records the 502. This condition never self-heals.
+"upstream-retry-exhausted"`). The breaker's own recovery probe, a synthetic
+request every 60 seconds, meets the same redirect and keeps the breaker
+OPEN (`breaker_probe_result` with outcome `FAILURE`), so tenant `502` lines
+stop. This condition never self-heals.
 
 **Meaning**
 
