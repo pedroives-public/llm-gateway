@@ -3,6 +3,7 @@ import http from "node:http";
 import { createProbeRunner } from "../../src/reliability/breaker-probe.js";
 import { createOpenAIClient } from "../../src/upstream/openai.js";
 import { listenEphemeral } from "../helpers/ephemeral-server.js";
+import { PROBE_ALLOWED_HEADER_NAMES } from "../helpers/probe-header-names.js";
 
 // The recovery probe decides for every tenant, so its request must be built
 // from deployment config alone. This pin runs the real adapter against a real
@@ -12,21 +13,6 @@ import { listenEphemeral } from "../helpers/ephemeral-server.js";
 // calls as the only way tenant input could reach a probe at this boundary.
 
 const CANARY = "tenant-canary-6f2b";
-
-// Names added by the deployment-owned adapter and by the runtime's fetch. A
-// new name means someone added a header to the request the upstream receives.
-const ALLOWED_HEADER_NAMES = new Set([
-  "accept",
-  "accept-encoding",
-  "accept-language",
-  "authorization",
-  "connection",
-  "content-length",
-  "content-type",
-  "host",
-  "sec-fetch-mode",
-  "user-agent",
-]);
 
 type CapturedRequest = {
   method: string;
@@ -134,7 +120,7 @@ describe("breaker probe isolation (deployment-owned request)", () => {
       });
       expect(
         Object.keys(probe.headers).filter(
-          (name) => !ALLOWED_HEADER_NAMES.has(name),
+          (name) => !PROBE_ALLOWED_HEADER_NAMES.has(name),
         ),
         "the probe carries only the headers the adapter and the runtime add",
       ).toEqual([]);
