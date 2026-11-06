@@ -68,8 +68,14 @@ describe("circuit breaker — initial state", () => {
       circuit.runProbe,
       "no recovery attempt may start while CLOSED: there is nothing to recover from",
     ).not.toHaveBeenCalled();
-    expect(breaker.getState()).toBe("CLOSED");
-    expect(breaker.tryAcquire()).toEqual({ kind: "NORMAL" });
+    expect(
+      breaker.getState(),
+      "a new breaker starts CLOSED",
+    ).toBe("CLOSED");
+    expect(
+      breaker.tryAcquire(),
+      "a CLOSED breaker admits every tenant request",
+    ).toEqual({ kind: "NORMAL" });
   });
 });
 
@@ -97,7 +103,10 @@ describe("circuit breaker — CLOSED to OPEN on sustained failure", () => {
 
     recordFailures(breaker, 4);
 
-    expect(breaker.getState()).toBe("CLOSED");
+    expect(
+      breaker.getState(),
+      "four failures inside the window stay below the limit of five",
+    ).toBe("CLOSED");
   });
 
   it("opens after the 5th failure within the window", () => {
@@ -105,7 +114,10 @@ describe("circuit breaker — CLOSED to OPEN on sustained failure", () => {
 
     recordFailures(breaker, 5);
 
-    expect(breaker.getState()).toBe("OPEN");
+    expect(
+      breaker.getState(),
+      "the fifth failure inside the 30 s window opens the breaker",
+    ).toBe("OPEN");
   });
 
   it("stays CLOSED when the 5th failure falls outside the 30s window", () => {
@@ -115,7 +127,10 @@ describe("circuit breaker — CLOSED to OPEN on sustained failure", () => {
     vi.advanceTimersByTime(WINDOW_MS + 1_000); // the four age past 30s
     recordFailures(breaker, 1); // lone failure inside the live window
 
-    expect(breaker.getState()).toBe("CLOSED");
+    expect(
+      breaker.getState(),
+      "a failure outside the 30 s window no longer counts toward opening",
+    ).toBe("CLOSED");
   });
 
   it("does not count SUCCESS or INCONCLUSIVE toward opening", () => {
@@ -130,7 +145,10 @@ describe("circuit breaker — CLOSED to OPEN on sustained failure", () => {
     breaker.recordResult("INCONCLUSIVE");
     breaker.recordResult("SUCCESS");
 
-    expect(breaker.getState()).toBe("CLOSED");
+    expect(
+      breaker.getState(),
+      "only FAILURE counts toward opening; SUCCESS and INCONCLUSIVE do not",
+    ).toBe("CLOSED");
   });
 });
 
@@ -159,7 +177,10 @@ describe("circuit breaker — scheduled recovery probe", () => {
       runProbe,
       "the probe must wait the full 60s of OPEN",
     ).not.toHaveBeenCalled();
-    expect(breaker.getState()).toBe("OPEN");
+    expect(
+      breaker.getState(),
+      "the probe never starts before the 60 s cooldown ends",
+    ).toBe("OPEN");
 
     vi.advanceTimersByTime(1);
     expect(
@@ -174,7 +195,10 @@ describe("circuit breaker — scheduled recovery probe", () => {
       stateAtProbeCall,
       "the transition to HALF_OPEN must happen before the probe runs",
     ).toBe("HALF_OPEN");
-    expect(breaker.getState()).toBe("HALF_OPEN");
+    expect(
+      breaker.getState(),
+      "at 60 s the timer starts the probe and the breaker moves to HALF_OPEN",
+    ).toBe("HALF_OPEN");
   });
 
   it("arms the probe even when logging the opening throws", () => {
@@ -208,7 +232,10 @@ describe("circuit breaker — scheduled recovery probe", () => {
 
     recordFailures(breaker, 5);
 
-    expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+    expect(
+      setTimeoutSpy,
+      "opening the breaker arms exactly one timer, the cooldown",
+    ).toHaveBeenCalledTimes(1);
     expect(
       setTimeoutSpy.mock.results[0]?.value.hasRef(),
       "the probe timer must not keep the process alive",
@@ -227,7 +254,10 @@ describe("circuit breaker — scheduled recovery probe", () => {
       runProbe,
       "the timer alone decides the 60s: a wall-clock check must not refuse its firing",
     ).toHaveBeenCalledTimes(1);
-    expect(breaker.getState()).toBe("HALF_OPEN");
+    expect(
+      breaker.getState(),
+      "the timer's firing moves the breaker to HALF_OPEN even with the wall clock behind",
+    ).toBe("HALF_OPEN");
   });
 
   it("rearms the probe timer after a failed probe vote", () => {
@@ -237,9 +267,15 @@ describe("circuit breaker — scheduled recovery probe", () => {
     recordFailures(breaker, 5);
     vi.advanceTimersByTime(OPEN_MS);
 
-    expect(runProbe).toHaveBeenCalledTimes(1);
+    expect(
+      runProbe,
+      "the first attempt starts exactly once",
+    ).toHaveBeenCalledTimes(1);
     const firstVote = runProbe.mock.calls[0]?.[0];
-    expect(firstVote).toBeTypeOf("function");
+    expect(
+      firstVote,
+      "the attempt receives its vote",
+    ).toBeTypeOf("function");
     if (!firstVote) throw new Error("Expected the first probe vote");
 
     firstVote("FAILURE");
@@ -249,19 +285,28 @@ describe("circuit breaker — scheduled recovery probe", () => {
       runProbe,
       "a failed probe must wait a fresh 60s before the next attempt",
     ).toHaveBeenCalledTimes(1);
-    expect(breaker.getState()).toBe("OPEN");
+    expect(
+      breaker.getState(),
+      "a FAILURE probe vote reopens the breaker",
+    ).toBe("OPEN");
 
     vi.advanceTimersByTime(1);
     expect(
       runProbe,
       "a failed probe must schedule the next attempt, with no tenant request",
     ).toHaveBeenCalledTimes(2);
-    expect(runProbe).toHaveBeenNthCalledWith(
+    expect(
+      runProbe,
+      "the reopening rearms the timer: the next attempt starts one cooldown later",
+    ).toHaveBeenNthCalledWith(
       2,
       expect.any(Function),
       expect.any(AbortSignal),
     );
-    expect(breaker.getState()).toBe("HALF_OPEN");
+    expect(
+      breaker.getState(),
+      "the second attempt puts the breaker back in HALF_OPEN",
+    ).toBe("HALF_OPEN");
   });
 
   it("rearms the probe timer even when logging the reopening throws", () => {
@@ -325,7 +370,10 @@ describe("circuit breaker — OPEN and HALF_OPEN transitions", () => {
       circuit.runProbe,
       "a recovery attempt must wait the full 60s of OPEN: the failure window emptying at 30s does not shorten it",
     ).not.toHaveBeenCalled();
-    expect(breaker.getState()).toBe("OPEN");
+    expect(
+      breaker.getState(),
+      "the breaker stays OPEN until its 60 s end, even after the failure window emptied",
+    ).toBe("OPEN");
     expect(
       breaker.tryAcquire(),
       "no tenant request passes during OPEN: the upstream is resting for the 60s",
@@ -339,8 +387,14 @@ describe("circuit breaker — OPEN and HALF_OPEN transitions", () => {
     recordFailures(breaker, 5); // opens
     vi.advanceTimersByTime(OPEN_MS + 1_000); // past the 60s cooldown
 
-    expect(circuit.runProbe).toHaveBeenCalledTimes(1);
-    expect(breaker.getState()).toBe("HALF_OPEN");
+    expect(
+      circuit.runProbe,
+      "after 60 s exactly one probe is in flight",
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      breaker.getState(),
+      "the breaker is HALF_OPEN while its probe is in flight",
+    ).toBe("HALF_OPEN");
     expect(
       breaker.tryAcquire(),
       "no tenant request passes during HALF_OPEN: only the probe reaches the upstream",
@@ -404,8 +458,14 @@ describe("circuit breaker — HALF_OPEN probe outcomes", () => {
 
     vote("SUCCESS");
 
-    expect(breaker.getState()).toBe("CLOSED");
-    expect(breaker.tryAcquire()).toEqual({ kind: "NORMAL" });
+    expect(
+      breaker.getState(),
+      "a SUCCESS probe vote closes the breaker",
+    ).toBe("CLOSED");
+    expect(
+      breaker.tryAcquire(),
+      "a closed breaker admits tenants normally again",
+    ).toEqual({ kind: "NORMAL" });
   });
 
   it("re-opens for another cooldown when the probe fails", () => {
@@ -415,7 +475,10 @@ describe("circuit breaker — HALF_OPEN probe outcomes", () => {
 
     vote("FAILURE");
 
-    expect(breaker.getState()).toBe("OPEN");
+    expect(
+      breaker.getState(),
+      "a FAILURE probe vote reopens the breaker for another cooldown",
+    ).toBe("OPEN");
     expect(
       breaker.tryAcquire(),
       "no tenant request passes during OPEN: a failed probe starts a fresh 60s",
@@ -456,8 +519,14 @@ describe("circuit breaker — HALF_OPEN probe outcomes", () => {
       thrown,
       "both breaker lines of the vote were attempted, and both threw",
     ).toBe(2);
-    expect(breaker.getState()).toBe("CLOSED");
-    expect(breaker.tryAcquire()).toEqual({ kind: "NORMAL" });
+    expect(
+      breaker.getState(),
+      "the close stands even when both of its log lines throw",
+    ).toBe("CLOSED");
+    expect(
+      breaker.tryAcquire(),
+      "tenants are admitted after a close whose logging threw",
+    ).toEqual({ kind: "NORMAL" });
 
     shouldThrow = false;
     recordFailures(breaker, 5);
@@ -583,8 +652,14 @@ describe("circuit breaker — cb_state_change events", () => {
 
     recordFailures(breaker, 5);
 
-    expect(info).toHaveBeenCalledTimes(1);
-    expect(info).toHaveBeenCalledWith({
+    expect(
+      info,
+      "opening writes one state change",
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      info,
+      "the opening's state change carries the live-window snapshot",
+    ).toHaveBeenCalledWith({
       event: "cb_state_change",
       from: "CLOSED",
       to: "OPEN",
@@ -602,8 +677,14 @@ describe("circuit breaker — cb_state_change events", () => {
 
     vi.advanceTimersByTime(OPEN_MS + 1_000);
 
-    expect(info).toHaveBeenCalledTimes(1);
-    expect(info).toHaveBeenCalledWith({
+    expect(
+      info,
+      "entering HALF_OPEN writes one state change",
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      info,
+      "entering HALF_OPEN carries an empty-window snapshot",
+    ).toHaveBeenCalledWith({
       event: "cb_state_change",
       from: "OPEN",
       to: "HALF_OPEN",
@@ -629,7 +710,10 @@ describe("circuit breaker — cb_state_change events", () => {
         (line) =>
           (line as { event?: string }).event === "cb_state_change",
       );
-    expect(stateChanges).toEqual([{
+    expect(
+      stateChanges,
+      "a SUCCESS probe writes HALF_OPEN -> CLOSED with an empty window",
+    ).toEqual([{
       event: "cb_state_change",
       from: "HALF_OPEN",
       to: "CLOSED",
@@ -655,7 +739,10 @@ describe("circuit breaker — cb_state_change events", () => {
         (line) =>
           (line as { event?: string }).event === "cb_state_change",
       );
-    expect(stateChanges).toEqual([{
+    expect(
+      stateChanges,
+      "a FAILURE probe writes HALF_OPEN -> OPEN with an empty window",
+    ).toEqual([{
       event: "cb_state_change",
       from: "HALF_OPEN",
       to: "OPEN",
@@ -686,11 +773,17 @@ describe("circuit breaker — failure-window isolation across recovery", () => {
 
     recordFailures(breaker, 4);
 
-    expect(breaker.getState()).toBe("CLOSED");
+    expect(
+      breaker.getState(),
+      "four fresh failures after a close stay below the limit",
+    ).toBe("CLOSED");
 
     recordFailures(breaker, 1);
 
-    expect(breaker.getState()).toBe("OPEN");
+    expect(
+      breaker.getState(),
+      "a fifth fresh failure reopens: failures from before the close do not count",
+    ).toBe("OPEN");
   });
 });
 
