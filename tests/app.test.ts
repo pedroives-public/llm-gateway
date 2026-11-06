@@ -71,6 +71,31 @@ describe("buildApp — OPENAI_API_KEY boot validation", () => {
   });
 });
 
+describe("buildApp — BREAKER_PROBE_MODEL boot validation", () => {
+  let saved: string | undefined;
+
+  beforeEach(() => {
+    saved = process.env["BREAKER_PROBE_MODEL"];
+  });
+
+  afterEach(() => {
+    if (saved !== undefined) {
+      process.env["BREAKER_PROBE_MODEL"] = saved;
+    } else {
+      delete process.env["BREAKER_PROBE_MODEL"];
+    }
+  });
+
+  // The breaker's recovery probe names its model from deployment config: an
+  // app that boots without one could never leave OPEN.
+  it("throws when BREAKER_PROBE_MODEL is absent", async () => {
+    delete process.env["BREAKER_PROBE_MODEL"];
+    await expect(buildApp({ logger: false })).rejects.toThrow(
+      "BREAKER_PROBE_MODEL",
+    );
+  });
+});
+
 describe("buildApp — OPENAI_BASE_URL boot validation", () => {
   let savedKey: string | undefined;
   let savedUrl: string | undefined;
