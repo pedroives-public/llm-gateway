@@ -151,10 +151,12 @@ export function createProbeRunner({
         while (true) {
           const frame = await nextFrame();
 
-          // Does not fire today: a timer never runs between a read resolving
-          // and this continuation, and a read pending when the clock fires
-          // ends with `done` once the clock cancels the body. It keeps a frame
-          // from outvoting a clock that already decided.
+          // While the cancel works this does not fire: a timer never runs
+          // between a read resolving and this continuation, and a read pending
+          // when the clock fires ends with `done` once the clock cancels the
+          // body. If the cancel ever fails, a later chunk (a keepalive) still
+          // ends the loop here, so a frame never outvotes a clock that already
+          // decided.
           if (clockExpired || probeSignal.aborted) break;
           if (frame.kind !== "frame") break;
 
