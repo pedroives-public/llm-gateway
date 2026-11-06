@@ -160,8 +160,8 @@ describe("circuit breaker — scheduled recovery probe", () => {
     ).toHaveBeenCalledTimes(1);
     expect(
       runProbe,
-      "the probe must receive the vote of its attempt",
-    ).toHaveBeenCalledWith(expect.any(Function));
+      "the probe must receive the vote of its attempt and the signal that aborts it",
+    ).toHaveBeenCalledWith(expect.any(Function), expect.any(AbortSignal));
     expect(
       stateAtProbeCall,
       "the transition to HALF_OPEN must happen before the probe runs",
@@ -247,7 +247,11 @@ describe("circuit breaker — scheduled recovery probe", () => {
       runProbe,
       "a failed probe must schedule the next attempt, with no tenant request",
     ).toHaveBeenCalledTimes(2);
-    expect(runProbe).toHaveBeenNthCalledWith(2, expect.any(Function));
+    expect(runProbe).toHaveBeenNthCalledWith(
+      2,
+      expect.any(Function),
+      expect.any(AbortSignal),
+    );
     expect(breaker.getState()).toBe("HALF_OPEN");
   });
 
@@ -829,4 +833,89 @@ describe("circuit breaker — stale probe votes", () => {
       "a stale probe vote must not add an attempt",
     ).toHaveBeenCalledTimes(2);
   });
+});
+
+// Closing the app stops the breaker permanently: a close is not evidence
+// about the upstream, so the aborted attempt leaves no vote, no timer and no
+// event.
+describe("circuit breaker — after close", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("starts no probe after a close while the timer waits", () => {
+    const runProbe = vi.fn<(vote: ProbeVote, signal: AbortSignal) => void>();
+    const breaker = createCircuitBreaker(noopLog, runProbe);
+    recordFailures(breaker, 5);
+
+    breaker.close();
+    expect(
+      vi.getTimerCount(),
+      "the close clears the pending timer",
+    ).toBe(0);
+    vi.advanceTimersByTime(OPEN_MS);
+
+    expect(
+      runProbe.mock.calls.length,
+      "a closed app must not start a probe",
+    ).toBe(0);
+  });
+
+  // A close lets the requests in flight finish, and they still vote.
+  it("starts no probe from tenant failures that arrive after a close", () => {
+    const runProbe = vi.fn<(vote: ProbeVote, signal: AbortSignal) => void>();
+    const breaker = createCircuitBreaker(noopLog, runProbe);
+
+    breaker.close();
+    recordFailures(breaker, 5);
+    expect(vi.getTimerCount(), "a closed app arms no timer").toBe(0);
+    vi.advanceTimersByTime(OPEN_MS);
+
+    expect(
+      runProbe.mock.calls.length,
+      "a closed app must not start a probe",
+    ).toBe(0);
+  });
+
+  it.each(["SUCCESS", "FAILURE"] as const)(
+    "aborts the probe in flight and ignores its late %s vote",
+    (late) => {
+      const info = vi.fn<(obj: object) => void>();
+      const runProbe = vi.fn<(vote: ProbeVote, signal: AbortSignal) => void>();
+      const breaker = createCircuitBreaker({ info }, runProbe);
+      recordFailures(breaker, 5);
+      vi.advanceTimersByTime(OPEN_MS);
+      const [vote, signal] = runProbe.mock.calls[0] ?? [];
+      if (!vote || !signal) throw new Error("Expected a probe in flight");
+      info.mockClear();
+
+      breaker.close();
+      expect(
+        () => vote(late),
+        "a late vote never throws to its caller",
+      ).not.toThrow();
+      vi.advanceTimersByTime(OPEN_MS);
+
+      expect(
+        signal.aborted,
+        "closing the app aborts the probe in flight",
+      ).toBe(true);
+      expect(
+        breaker.getState(),
+        "a vote that arrives after the close moves nothing",
+      ).toBe("HALF_OPEN");
+      expect(
+        info.mock.calls,
+        "a vote that arrives after the close writes no state change and no probe event",
+      ).toEqual([]);
+      expect(
+        runProbe.mock.calls.length,
+        "a closed app must not start a probe",
+      ).toBe(1);
+    },
+  );
 });

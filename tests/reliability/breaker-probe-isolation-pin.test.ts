@@ -37,6 +37,9 @@ type CapturedRequest = {
 
 const silentLog = { info: () => {}, error: () => {} };
 
+// The app is not closing in these scenes: a signal that never aborts.
+const NOT_CLOSING = new AbortController().signal;
+
 describe("breaker probe isolation (deployment-owned request)", () => {
   it("sends only deployment config after a hostile tenant request", async () => {
     let captured: CapturedRequest[] = [];
@@ -90,7 +93,7 @@ describe("breaker probe isolation (deployment-owned request)", () => {
         model: "deployment-probe-model",
         log: silentLog,
       });
-      await runProbe(vote);
+      await runProbe(vote, NOT_CLOSING);
 
       expect(
         captured.length,

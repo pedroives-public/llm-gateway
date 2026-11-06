@@ -6,4 +6,5 @@ export const stubBreaker: CircuitBreaker = {
   tryAcquire: () => ({ kind: "NORMAL" }),
   recordResult: () => {},
   getState: () => "CLOSED",
+  close: () => {},
 };

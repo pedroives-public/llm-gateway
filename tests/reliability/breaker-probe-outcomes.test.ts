@@ -22,6 +22,9 @@ const QUOTA_BODY = JSON.stringify({ error: { code: "insufficient_quota" } });
 const ERROR_BODY = JSON.stringify({ error: { message: "refused" } });
 const realSetImmediate = setImmediate;
 
+// The app is not closing in these scenes: a signal that never aborts.
+const NOT_CLOSING = new AbortController().signal;
+
 type LogLine = Record<string, unknown>;
 
 type UpstreamResponse = {
@@ -121,7 +124,7 @@ describe("breaker probe — outcome table", () => {
           streaming,
           model: "probe-model",
           log: captured.log,
-        })(vote);
+        })(vote, NOT_CLOSING);
       });
 
       expect(vote, "a probe votes exactly once").toHaveBeenCalledTimes(1);
@@ -150,7 +153,7 @@ describe("breaker probe — outcome table", () => {
       }).streaming,
       model: "probe-model",
       log: captured.log,
-    })(vote);
+    })(vote, NOT_CLOSING);
 
     expect(vote, "a refused connection proves no recovery").toHaveBeenCalledWith(
       "FAILURE",
@@ -170,8 +173,8 @@ describe("breaker probe — outcome table", () => {
         model: "probe-model",
         log: captured.log,
       });
-      await runProbe(vi.fn());
-      await runProbe(vi.fn());
+      await runProbe(vi.fn(), NOT_CLOSING);
+      await runProbe(vi.fn(), NOT_CLOSING);
     });
 
     expect(
@@ -191,7 +194,7 @@ describe("breaker probe — outcome table", () => {
         streaming,
         model: "probe-model",
         log: captured.log,
-      })(vi.fn());
+      })(vi.fn(), NOT_CLOSING);
     });
 
     expect(
@@ -240,7 +243,7 @@ describe("breaker probe — nothing from the upstream reaches the logs", () => {
           },
           model: "probe-model",
           log: captured.log,
-        })(vi.fn());
+        })(vi.fn(), NOT_CLOSING);
       },
     );
 
@@ -267,7 +270,7 @@ describe("breaker probe — nothing from the upstream reaches the logs", () => {
       },
       model: "probe-model",
       log: captured.log,
-    })(vi.fn());
+    })(vi.fn(), NOT_CLOSING);
 
     expect(
       JSON.stringify(captured.lines),
@@ -627,7 +630,7 @@ describe("breaker probe — every exit has a next step", () => {
       log: { ...throwingOnce(() => true) },
     });
 
-    void runProbe(vote);
+    void runProbe(vote, NOT_CLOSING);
     await vi.advanceTimersByTimeAsync(0);
     await flushRejections();
 
@@ -664,7 +667,7 @@ describe("breaker probe — every exit has a next step", () => {
       },
     });
 
-    void runProbe(vote);
+    void runProbe(vote, NOT_CLOSING);
     await vi.advanceTimersByTimeAsync(0);
     await flushRejections();
 
@@ -676,6 +679,62 @@ describe("breaker probe — every exit has a next step", () => {
       unhandled,
       "an unhandled rejection takes the process down, and every tenant with it",
     ).toEqual([]);
+  });
+});
+
+describe("breaker probe — closing the app", () => {
+  // Well under Vitest's 5 s test timeout, and far above the few microtask
+  // turns an abort takes to settle the runner.
+  const CLOSE_DEADLINE_MS = 1_000;
+
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it("hands the close's abort to the upstream call in flight", async () => {
+    const { createProbeRunner } = await import(
+      "../../src/reliability/breaker-probe.js"
+    );
+    const closing = new AbortController();
+    let upstreamSignal: AbortSignal | undefined;
+    const vote = vi.fn();
+
+    const run = createProbeRunner({
+      // An upstream that never answers: only an abort ends the call.
+      streaming: (_body, signal) => {
+        upstreamSignal = signal;
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            reject(signal.reason);
+          });
+        });
+      },
+      model: "probe-model",
+      log: { info: () => {}, error: () => {} },
+    })(vote, closing.signal);
+    closing.abort();
+
+    // Raced against a deadline of its own: a probe that ignores the close
+    // would otherwise run to its clock and fail as a bare runner timeout.
+    const settled = await Promise.race([
+      run.then(
+        () => "resolved",
+        () => "rejected",
+      ),
+      new Promise<string>((resolve) => {
+        setTimeout(() => {
+          resolve("still running after the close");
+        }, CLOSE_DEADLINE_MS);
+      }),
+    ]);
+    expect(
+      settled,
+      "an aborted probe ends at once, without a rejection",
+    ).toBe("resolved");
+    expect(
+      upstreamSignal?.aborted,
+      "closing the app aborts the upstream call of the probe in flight",
+    ).toBe(true);
   });
 });
 

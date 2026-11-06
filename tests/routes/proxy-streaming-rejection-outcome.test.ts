@@ -81,6 +81,7 @@ function recordingBreaker(): {
         recorded.push(outcome);
       },
       getState: () => "CLOSED",
+      close: () => {},
     },
   };
 }

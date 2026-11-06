@@ -50,6 +50,7 @@ function recordingBreaker(): {
         recorded.push(outcome);
       },
       getState: () => "CLOSED",
+      close: () => {},
     },
   };
 }
@@ -246,6 +247,7 @@ describe("streaming flag ON: the response head decides a stream: true attempt", 
         }
       },
       getState: () => "CLOSED",
+      close: () => {},
     };
     const violations: string[] = [];
     const app = await buildProxyApp({
@@ -975,6 +977,7 @@ describe.each([
             recorded.push(outcome);
           },
           getState: () => "OPEN",
+          close: () => {},
         },
         logger: capture.logger,
         streamingEnabled: true,

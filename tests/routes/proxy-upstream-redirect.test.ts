@@ -49,6 +49,7 @@ async function injectScripted(script: Outcome[]): Promise<ProbeResult> {
       recorded.push(outcome);
     },
     getState: () => "CLOSED",
+    close: () => {},
   };
   const capture = makeLogCapture();
 

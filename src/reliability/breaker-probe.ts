@@ -76,7 +76,7 @@ export function createProbeRunner({
   streaming,
   model,
   log,
-}: ProbeRunnerDependencies): (vote: ProbeVote) => Promise<void> {
+}: ProbeRunnerDependencies): (vote: ProbeVote, signal: AbortSignal) => Promise<void> {
   const requestBody: ProbeRequestBody = {
     model,
     messages: [{ role: "user", content: "ping" }],
@@ -84,7 +84,7 @@ export function createProbeRunner({
     max_tokens: 1,
   };
 
-  return async (vote) => {
+  return async (vote, signal) => {
     const timeout = armWallClockTimeout(PROBE_CLOCK_MS);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let outcome: ProbeOutcome = "FAILURE";
@@ -92,7 +92,7 @@ export function createProbeRunner({
     let caughtError: { value: unknown } | undefined;
 
     try {
-      const response = await streaming(requestBody, timeout.signal, log);
+      const response = await streaming(requestBody, AbortSignal.any([timeout.signal, signal]), log);
 
       if (isAcceptedStream(response)) {
         reader = response.reader;

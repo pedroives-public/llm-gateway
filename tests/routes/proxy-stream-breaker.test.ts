@@ -108,6 +108,7 @@ describe("stream:true must not open the shared circuit breaker", () => {
           heldBreaker.recordResult(outcome);
         },
         getState: () => heldBreaker.getState(),
+        close: () => {},
       };
       const client = createOpenAIClient({
         apiKey: "gateway-key",
@@ -227,6 +228,7 @@ describe("stream:true must not open the shared circuit breaker", () => {
         );
       },
       getState: () => "CLOSED",
+      close: () => {},
     };
     const app = await buildProxyApp({
       breaker: tripwireBreaker,
