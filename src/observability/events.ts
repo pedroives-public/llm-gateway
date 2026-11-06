@@ -55,6 +55,10 @@ export interface BreakerProbeResultPayload {
 // finished it.
 export type ProbeUpstreamReply = "not_started" | "not_finished";
 
+export interface BreakerProbeBackstopPayload {
+  attempt: number;
+}
+
 export interface BreakerProbeClockExpiredPayload {
   req_id: string;
   upstream_reply: ProbeUpstreamReply;
@@ -272,6 +276,18 @@ export function emitBreakerProbeResult(
   payload: BreakerProbeResultPayload,
 ): void {
   log.info({ event: "breaker_probe_result", ...payload });
+}
+
+/**
+ * The breaker's backstop expired before a recovery probe attempt voted: the
+ * probe code itself hung, which only a gateway defect produces. The breaker
+ * votes FAILURE for the attempt and writes this line at error level.
+ */
+export function emitBreakerProbeBackstop(
+  log: { error: (obj: object) => void },
+  payload: BreakerProbeBackstopPayload,
+): void {
+  log.error({ event: "breaker_probe_backstop", ...payload });
 }
 
 /**

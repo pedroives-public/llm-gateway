@@ -33,6 +33,7 @@ Request endings that raise no alert have their own files too:
 Recovery-probe lines that raise no alert:
 
 - [`breaker_probe_clock_expired`: the recovery probe outlived its clock](breaker-probe-clock-expired.md) — only while the breaker is HALF_OPEN.
+- [`breaker_probe_backstop`: a recovery probe never finished](breaker-probe-backstop.md) — error level; only a gateway defect produces it.
 
 ---
 

@@ -13,6 +13,7 @@ import {
   type CircuitState,
   type ProbeVote,
 } from "../../src/reliability/circuit-breaker.js";
+import { PROBE_BACKSTOP_MS } from "../../src/config.js";
 
 // The factory takes a logger ({ info, error }) so the breaker can emit
 // cb_state_change on transitions — the same logger shape classify.ts uses.
@@ -351,7 +352,8 @@ describe("circuit breaker — OPEN and HALF_OPEN transitions", () => {
     const breaker = circuit.breaker;
 
     recordFailures(breaker, 5); // opens
-    vi.advanceTimersByTime(OPEN_MS * 3); // three cooldowns with no vote
+    // The attempt stays in flight until just before its backstop.
+    vi.advanceTimersByTime(OPEN_MS + PROBE_BACKSTOP_MS - 1);
 
     expect(
       circuit.runProbe,
@@ -762,7 +764,8 @@ describe("circuit breaker — stale probe votes", () => {
       voteN(staleOutcome);
 
       expect(breaker.getState(), because).toBe("HALF_OPEN");
-      vi.advanceTimersByTime(OPEN_MS);
+      // Attempt N+1 stays in flight until just before its backstop.
+      vi.advanceTimersByTime(PROBE_BACKSTOP_MS - 1);
       expect(
         circuit.runProbe,
         "attempt N cannot start a third attempt beside attempt N+1",
@@ -894,8 +897,9 @@ describe("circuit breaker — after close", () => {
     "aborts the probe in flight and ignores its late %s vote",
     (late) => {
       const info = vi.fn<(obj: object) => void>();
+      const error = vi.fn<(obj: object) => void>();
       const runProbe = vi.fn<(vote: ProbeVote, signal: AbortSignal) => void>();
-      const breaker = createCircuitBreaker({ info, error: () => {} }, runProbe);
+      const breaker = createCircuitBreaker({ info, error }, runProbe);
       recordFailures(breaker, 5);
       vi.advanceTimersByTime(OPEN_MS);
       const [vote, signal] = runProbe.mock.calls[0] ?? [];
@@ -903,6 +907,10 @@ describe("circuit breaker — after close", () => {
       info.mockClear();
 
       breaker.close();
+      expect(
+        vi.getTimerCount(),
+        "closing the app cancels the backstop of the probe in flight: no breaker timer stays pending",
+      ).toBe(0);
       expect(
         () => vote(late),
         "a late vote never throws to its caller",
@@ -925,6 +933,297 @@ describe("circuit breaker — after close", () => {
         runProbe.mock.calls.length,
         "a closed app must not start a probe",
       ).toBe(1);
+      expect(
+        error.mock.calls,
+        "a closed breaker writes no defect line for the attempt it aborted",
+      ).toEqual([]);
+    },
+  );
+});
+
+describe("circuit breaker — the backstop bounds every probe attempt", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not keep the process alive while a probe attempt runs", async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const runProbe = vi.fn(() => new Promise<void>(() => {}));
+    const breaker = createCircuitBreaker(
+      { info: () => {}, error: () => {} },
+      runProbe,
+    );
+
+    recordFailures(breaker, 5);
+    await vi.advanceTimersByTimeAsync(OPEN_MS);
+
+    const backstopCall = setTimeoutSpy.mock.calls.findIndex(
+      ([, delay]) => delay === PROBE_BACKSTOP_MS,
+    );
+    expect(backstopCall, "the attempt arms its backstop").toBeGreaterThanOrEqual(0);
+    expect(
+      setTimeoutSpy.mock.results[backstopCall]?.value.hasRef(),
+      "the backstop timer must not keep the process alive",
+    ).toBe(false);
+    setTimeoutSpy.mockRestore();
+  });
+
+  it("votes FAILURE for an attempt that never votes", async () => {
+    const infoLines: object[] = [];
+    const errorLines: object[] = [];
+    const log = {
+      info: (line: object): void => {
+        infoLines.push(line);
+      },
+      error: (line: object): void => {
+        errorLines.push(line);
+      },
+    };
+    const votes: ProbeVote[] = [];
+    const signals: AbortSignal[] = [];
+    // A runner that hangs: it never votes and its promise never settles.
+    const runProbe = vi.fn((vote: ProbeVote, signal: AbortSignal) => {
+      votes.push(vote);
+      signals.push(signal);
+      return new Promise<void>(() => {});
+    });
+    const breaker = createCircuitBreaker(log, runProbe);
+
+    const openedAt = Date.now();
+    recordFailures(breaker, 5);
+    await vi.advanceTimersByTimeAsync(OPEN_MS);
+
+    expect(
+      runProbe,
+      "the scene starts exactly one attempt",
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      votes,
+      "the attempt received its vote",
+    ).toHaveLength(1);
+    expect(
+      signals,
+      "the attempt received its signal",
+    ).toHaveLength(1);
+    expect(
+      breaker.getState(),
+      "the attempt is in flight",
+    ).toBe("HALF_OPEN");
+
+    const beforeBackstopInfo = [
+      {
+        event: "cb_state_change",
+        from: "CLOSED",
+        to: "OPEN",
+        failure_count: 5,
+        window_start_ms: openedAt,
+      },
+      {
+        event: "cb_state_change",
+        from: "OPEN",
+        to: "HALF_OPEN",
+        failure_count: 0,
+        window_start_ms: 0,
+      }
+    ];
+
+    await vi.advanceTimersByTimeAsync(PROBE_BACKSTOP_MS - 1);
+
+    expect(
+      breaker.getState(),
+      "before its backstop, an attempt that has not voted stays in flight",
+    ).toBe("HALF_OPEN");
+    expect(
+      infoLines,
+      "before its backstop, nothing is decided for the attempt",
+    ).toEqual(beforeBackstopInfo);
+    expect(
+      errorLines,
+      "the defect line appears only when the backstop fires",
+    ).toEqual([]);
+    expect(
+      signals[0]?.aborted,
+      "the attempt is not aborted before its backstop",
+    ).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(
+      breaker.getState(),
+      "at its backstop, an attempt that never voted counts as FAILURE and the breaker reopens",
+    ).toBe("OPEN");
+    expect(
+      infoLines,
+      "the backstop's FAILURE goes through the same vote: one state change, one probe result, nothing else",
+    ).toEqual([
+      ...beforeBackstopInfo,
+      {
+        event: "cb_state_change",
+        from: "HALF_OPEN",
+        to: "OPEN",
+        failure_count: 0,
+        window_start_ms: 0,
+      },
+      {
+        event: "breaker_probe_result",
+        attempt: 1,
+        outcome: "FAILURE",
+      },
+    ]);
+
+    expect(
+      errorLines,
+      "the backstop writes one defect line, at error level, naming the attempt",
+    ).toEqual([
+      {
+        event: "breaker_probe_backstop",
+        attempt: 1,
+      },
+    ]);
+    expect(
+      signals[0]?.aborted,
+      "the backstop aborts the attempt it ended",
+    ).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(OPEN_MS);
+
+    expect(
+      breaker.getState(),
+      "the next attempt starts one cooldown after the backstop reopened the breaker",
+    ).toBe("HALF_OPEN");
+    expect(
+      runProbe,
+      "exactly one new attempt after the cooldown",
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      votes,
+      "the new attempt received its vote",
+    ).toHaveLength(2);
+
+    const infoBeforeLateVote = [...infoLines];
+    const errorsBeforeLateVote = [...errorLines];
+
+    votes[0]?.("SUCCESS");
+
+    expect(
+      breaker.getState(),
+      "a late vote from the attempt the backstop ended changes nothing",
+    ).toBe("HALF_OPEN");
+    expect(
+      runProbe,
+      "a late vote from the attempt the backstop ended changes nothing",
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      infoLines,
+      "a late vote from the attempt the backstop ended changes nothing",
+    ).toEqual(infoBeforeLateVote);
+    expect(
+      errorLines,
+      "a late vote from the attempt the backstop ended changes nothing",
+    ).toEqual(errorsBeforeLateVote);
+  });
+
+  it.each([["SUCCESS", "CLOSED"], ["FAILURE", "OPEN"]] as const)(
+    "does not fire the backstop after an on-time %s vote",
+    async (outcome, expectedState) => {
+      const infoLines: object[] = [];
+      const errorLines: object[] = [];
+
+      const log = {
+        info: (line: object): void => {
+          infoLines.push(line);
+        },
+        error: (line: object): void => {
+          errorLines.push(line);
+        },
+      };
+
+      const votes: ProbeVote[] = [];
+      const signals: AbortSignal[] = [];
+      const runProbe = vi.fn((vote: ProbeVote, signal: AbortSignal) => {
+        votes.push(vote);
+        signals.push(signal);
+        return new Promise<void>(() => {});
+      });
+      const breaker = createCircuitBreaker(log, runProbe);
+
+      recordFailures(breaker, 5);
+      await vi.advanceTimersByTimeAsync(OPEN_MS);
+
+      expect(
+        runProbe,
+        "the scene starts exactly one attempt",
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        votes,
+        "the attempt received its vote",
+      ).toHaveLength(1);
+      expect(
+        signals,
+        "the attempt received its signal",
+      ).toHaveLength(1);
+      expect(
+        breaker.getState(),
+        "the attempt is in flight",
+      ).toBe("HALF_OPEN");
+
+      const earlyVoteMs = 5_000;
+      await vi.advanceTimersByTimeAsync(earlyVoteMs);
+      votes[0]?.(outcome);
+
+      expect(
+        breaker.getState(),
+        "an on-time vote decides the attempt",
+      ).toBe(expectedState);
+
+      await vi.advanceTimersByTimeAsync(
+        PROBE_BACKSTOP_MS - earlyVoteMs + 1,
+      );
+
+      expect(
+        breaker.getState(),
+        "the backstop of an attempt that already voted does nothing",
+      ).toBe(expectedState);
+      expect(
+        runProbe,
+        "the backstop of a voted attempt starts no attempt",
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        signals[0]?.aborted,
+        "the backstop of a voted attempt does not abort it",
+      ).toBe(false);
+      expect(
+        errorLines,
+        "an attempt that voted on time never produces the defect line",
+      ).toEqual([]);
+
+      const probeResults = infoLines.filter(
+        (line) =>
+          (line as { event?: string }).event === "breaker_probe_result",
+      );
+      expect(
+        probeResults,
+        "the on-time vote is the only probe result",
+      ).toEqual([
+        {
+          event: "breaker_probe_result",
+          attempt: 1,
+          outcome,
+        },
+      ]);
+
+      const backstopInfoLines = infoLines.filter(
+        (line) =>
+          (line as { event?: string }).event === "breaker_probe_backstop",
+      );
+      expect(
+        backstopInfoLines,
+        "no backstop line at any level after an on-time vote",
+      ).toEqual([]);
     },
   );
 });
