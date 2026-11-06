@@ -105,6 +105,7 @@ describe("proxy route — buffered skeleton", () => {
         throw new Error("recordResult must not be called on FAST_FAIL");
       },
       getState: () => "OPEN",
+      close: () => {},
     };
 
     const app = await buildApp({
@@ -166,6 +167,7 @@ describe("proxy route — buffered skeleton", () => {
         recorded.push(o);
       },
       getState: () => "CLOSED",
+      close: () => {},
     };
     const capture = makeLogCapture();
 
@@ -231,6 +233,7 @@ describe("proxy route — buffered skeleton", () => {
         recorded.push(o);
       },
       getState: () => "CLOSED",
+      close: () => {},
     };
 
     const app = await buildApp({
@@ -286,6 +289,7 @@ describe("proxy route — buffered skeleton", () => {
         recorded.push(o);
       },
       getState: () => "CLOSED",
+      close: () => {},
     };
 
     const app = await buildApp({
@@ -340,6 +344,7 @@ describe("proxy route — buffered skeleton", () => {
         recorded.push(o);
       },
       getState: () => "CLOSED",
+      close: () => {},
     };
 
     const capture = makeLogCapture();
@@ -405,6 +410,7 @@ describe("proxy route — buffered skeleton", () => {
         recorded.push(o);
       },
       getState: () => "CLOSED",
+      close: () => {},
     };
     const app = await buildApp({
       logger: false,
@@ -783,6 +789,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
         recorded.push(o);
       },
       getState: () => "CLOSED",
+      close: () => {},
     };
   }
 

@@ -112,6 +112,7 @@ function recordingBreaker(voteThrowsOnce: boolean): {
         }
       },
       getState: () => "CLOSED",
+      close: () => {},
     },
   };
 }

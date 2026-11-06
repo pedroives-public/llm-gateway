@@ -12,6 +12,9 @@ import { PARSER_BUFFER_CAP } from "../../src/upstream/sse-frame-reader.js";
 import type { StreamingUpstream } from "../../src/upstream/openai.js";
 import type { StreamingAdapter } from "../../src/upstream/stream.js";
 
+// The app is not closing in these scenes: a signal that never aborts.
+const NOT_CLOSING = new AbortController().signal;
+
 function readerOf(...chunks: string[]) {
   return new ReadableStream<Uint8Array>({
     start(controller) {
@@ -37,7 +40,7 @@ describe("breaker probe", () => {
       log: { info: () => {}, error: () => {} },
     });
 
-    await runProbe(vote);
+    await runProbe(vote, NOT_CLOSING);
 
     expect(vote, "a probe votes exactly once").toHaveBeenCalledTimes(1);
     expect(
@@ -56,7 +59,7 @@ describe("breaker probe", () => {
     const log = { info: () => {}, error: () => {} };
     const runProbe = createProbeRunner({ streaming, model, log });
 
-    await runProbe(vi.fn());
+    await runProbe(vi.fn(), NOT_CLOSING);
 
     expect(streaming, "a probe has no retry").toHaveBeenCalledTimes(1);
     expect(
@@ -98,7 +101,7 @@ describe("breaker probe", () => {
       log: { info: () => {}, error: () => {} },
     });
 
-    await runProbe(vote);
+    await runProbe(vote, NOT_CLOSING);
 
     expect(vote, "a probe votes exactly once").toHaveBeenCalledTimes(1);
     expect(vote, because).toHaveBeenCalledWith("FAILURE");
@@ -117,7 +120,7 @@ describe("breaker probe", () => {
       log: { info: () => {}, error: () => {} },
     });
 
-    await runProbe(vote);
+    await runProbe(vote, NOT_CLOSING);
 
     expect(vote, "a probe votes exactly once").toHaveBeenCalledTimes(1);
     expect(
@@ -137,7 +140,7 @@ describe("breaker probe", () => {
       log: { info: () => {}, error: () => {} },
     });
 
-    await runProbe(vote);
+    await runProbe(vote, NOT_CLOSING);
 
     expect(
       vote,
@@ -169,7 +172,7 @@ describe("breaker probe", () => {
       log: { info: () => {}, error: () => {} },
     });
 
-    await runProbe(vote);
+    await runProbe(vote, NOT_CLOSING);
 
     expect(vote, "a capped stream proves no recovery").toHaveBeenCalledWith(
       "FAILURE",
@@ -212,7 +215,7 @@ describe("breaker probe — wall clock", () => {
       log: { info: () => {}, error: () => {} },
     });
 
-    const pendingProbe = runProbe(vote);
+    const pendingProbe = runProbe(vote, NOT_CLOSING);
 
     await vi.advanceTimersByTimeAsync(PROBE_CLOCK_MS - 1);
     expect(vote, "the clock has not expired yet").not.toHaveBeenCalled();
@@ -247,7 +250,7 @@ describe("breaker probe — wall clock", () => {
       log: { info: () => {}, error: () => {} },
     });
 
-    const pendingProbe = runProbe(vote);
+    const pendingProbe = runProbe(vote, NOT_CLOSING);
 
     await vi.advanceTimersByTimeAsync(PROBE_CLOCK_MS);
     expect(vote, "a stalled body must not hold HALF_OPEN").toHaveBeenCalledTimes(
@@ -287,7 +290,7 @@ describe("breaker probe — wall clock", () => {
       log: { info: () => {}, error: () => {} },
     });
 
-    const pendingProbe = runProbe(vote);
+    const pendingProbe = runProbe(vote, NOT_CLOSING);
     try {
       await vi.advanceTimersByTimeAsync(0);
 

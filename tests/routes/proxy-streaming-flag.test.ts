@@ -30,6 +30,7 @@ const refusingBreaker: CircuitBreaker = {
     );
   },
   getState: () => "OPEN",
+  close: () => {},
 };
 
 function countingUpstream(): {

@@ -55,6 +55,7 @@ async function inject401(
       recorded.push(outcome);
     },
     getState: () => "CLOSED",
+    close: () => {},
   };
   const capture = makeLogCapture();
 
@@ -257,6 +258,7 @@ describe("retry-then-401 — credential classification survives the retry path",
           recorded.push(outcome);
         },
         getState: () => "CLOSED",
+        close: () => {},
       };
       const capture = makeLogCapture();
 

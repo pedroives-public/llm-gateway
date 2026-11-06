@@ -27,11 +27,12 @@ export interface CircuitBreaker {
   getState(): CircuitState;
   tryAcquire(): CircuitAdmission;
   recordResult(outcome: RequestOutcome): void;
+  close(): void;
 }
 
 export function createCircuitBreaker(
   log: CbLogger,
-  runProbe?: (vote: ProbeVote) => void | Promise<void>,
+  runProbe?: (vote: ProbeVote, signal: AbortSignal) => void | Promise<void>,
 ): CircuitBreaker {
   // Append-only failure instants (epoch ms). Read only via liveFailureStamps,
   // so the 30s window has one definition and the open-decision and event
@@ -39,6 +40,10 @@ export function createCircuitBreaker(
   let failureTimeStamps: number[] = [];
   let state: CircuitState = "CLOSED";
   let probeAttempts = 0;
+
+  let isClosed = false;
+  let probeTimer: ReturnType<typeof setTimeout> | undefined;
+  let probeController: AbortController | undefined;
 
   // The live 30s window, derived on read (expired excluded). Stamps arrive in
   // order and filter preserves it, so [0] is the oldest in-window failure.
@@ -92,6 +97,20 @@ export function createCircuitBreaker(
       if (state === "CLOSED") return { kind: "NORMAL" };
       return { kind: "FAST_FAIL" };
     },
+
+    close() {
+      isClosed = true;
+
+      if (probeTimer !== undefined) {
+        clearTimeout(probeTimer);
+        probeTimer = undefined;
+      }
+
+      if (probeController !== undefined) {
+        probeController.abort();
+        probeController = undefined;
+      }
+    },
   };
 
   const recordProbeResult = (outcome: ProbeOutcome): void => {
@@ -109,7 +128,7 @@ export function createCircuitBreaker(
   // runs at a time. The timer alone decides the 60s: a wall-clock check could
   // refuse the timer's own firing and leave OPEN with nothing armed.
   const armProbeTimer = (): void => {
-    if (runProbe === undefined) return;
+    if (isClosed || runProbe === undefined) return;
 
     const timer = setTimeout(() => {
       state = "HALF_OPEN";
@@ -124,12 +143,15 @@ export function createCircuitBreaker(
         return;
       }
 
+      const controller = new AbortController();
+      probeController = controller;
+
       const attempt = ++probeAttempts;
       let voted = false;
       const voteOnce: ProbeVote = (outcome) => {
-        if (voted) return;
-
+        if (isClosed || voted) return;
         voted = true;
+
         try {
           recordProbeResult(outcome);
         } catch {
@@ -146,7 +168,7 @@ export function createCircuitBreaker(
       };
 
       try {
-        const result = runProbe(voteOnce);
+        const result = runProbe(voteOnce, controller.signal);
         if (result !== undefined) {
           void Promise.resolve(result).then(
             () => {
@@ -160,6 +182,7 @@ export function createCircuitBreaker(
       }
     }, OPEN_COOLDOWN_MS);
 
+    probeTimer = timer;
     timer.unref();
   };
 
