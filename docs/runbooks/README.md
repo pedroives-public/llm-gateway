@@ -30,6 +30,10 @@ Request endings that raise no alert have their own files too:
 
 - [`TOTAL_TIMEOUT`: a streaming request outlived its deadline](streaming-total-timeout.md) — reachable only where the streaming flag is on.
 
+Recovery-probe lines that raise no alert:
+
+- [`breaker_probe_clock_expired`: the recovery probe outlived its clock](breaker-probe-clock-expired.md) — only while the breaker is HALF_OPEN.
+
 ---
 
 ## upstream_auth_failure

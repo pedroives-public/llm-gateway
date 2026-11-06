@@ -193,7 +193,7 @@ describe("breaker probe — wall clock", () => {
     vi.useRealTimers();
   });
 
-  it("votes FAILURE at 3s when the adapter waits for abort", async () => {
+  it("votes FAILURE at 10s when the adapter waits for abort", async () => {
     const vote = vi.fn();
     const silent = vi.fn(
       (...args: Parameters<StreamingUpstream>) =>
@@ -209,10 +209,13 @@ describe("breaker probe — wall clock", () => {
           );
         }),
     );
+
+    const log = { info: vi.fn(), error: vi.fn() };
+
     const runProbe = createProbeRunner({
       streaming: silent,
       model: "probe-model",
-      log: { info: () => {}, error: () => {} },
+      log,
     });
 
     const pendingProbe = runProbe(vote, NOT_CLOSING);
@@ -227,9 +230,20 @@ describe("breaker probe — wall clock", () => {
     );
 
     await pendingProbe;
+
+    expect(
+      log.info,
+      "the clock that decided writes one line, and no other line follows",
+    ).toHaveBeenCalledTimes(1);
+    expect(log.info, "before the response head the line says the upstream had not started its reply").toHaveBeenCalledWith({
+      event: "breaker_probe_clock_expired",
+      req_id: "breaker_probe",
+      upstream_reply: "not_started",
+    });
+    expect(log.error, "a clock expiry is not an error line").not.toHaveBeenCalled();
   });
 
-  it("votes FAILURE at 3s when the response body stalls", async () => {
+  it("votes FAILURE at 10s when the response body stalls", async () => {
     const vote = vi.fn();
     const stalled = vi.fn(async (...args: Parameters<StreamingUpstream>) => ({
       kind: "accepted_stream" as const,
@@ -244,10 +258,12 @@ describe("breaker probe — wall clock", () => {
         },
       }).getReader(),
     }));
+
+    const log = { info: vi.fn(), error: vi.fn() };
     const runProbe = createProbeRunner({
       streaming: stalled,
       model: "probe-model",
-      log: { info: () => {}, error: () => {} },
+      log,
     });
 
     const pendingProbe = runProbe(vote, NOT_CLOSING);
@@ -261,6 +277,17 @@ describe("breaker probe — wall clock", () => {
     );
 
     await pendingProbe;
+
+    expect(
+      log.info,
+      "the clock that decided writes one line, and no other line follows",
+    ).toHaveBeenCalledTimes(1);
+    expect(log.info, "after the response head the line says the upstream had not finished its reply").toHaveBeenCalledWith({
+      event: "breaker_probe_clock_expired",
+      req_id: "breaker_probe",
+      upstream_reply: "not_finished",
+    });
+    expect(log.error, "a clock expiry is not an error line").not.toHaveBeenCalled();
   });
 
   it("clears the clock, votes, then cancels the reader after [DONE]", async () => {
@@ -316,5 +343,179 @@ describe("breaker probe — wall clock", () => {
     }
 
     await pendingProbe;
+  });
+});
+
+// Captured before any cell installs fake timers, so a deadline in real time
+// can bound a promise that must settle.
+const realSetTimeout = globalThis.setTimeout;
+
+// Rejects with `sentence` when `promise` has not settled within `ms` of real
+// time; used where the defect is an absence (a probe that never ends).
+function settlesWithin<T>(promise: Promise<T>, ms: number, sentence: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      realSetTimeout(() => reject(new Error(sentence)), ms);
+    }),
+  ]);
+}
+
+// Real-time bound for a probe that must have ended once its clock fired;
+// under Vitest's 5 s test timeout so the failure carries its own sentence.
+const PROBE_END_DEADLINE_MS = 2_000;
+// Keepalive cadence of the body below: one SSE comment per second, the
+// cadence of the upstream that held the probe in the review of 2026-11-06.
+const KEEPALIVE_EVERY_MS = 1_000;
+
+// After a garbage collection, with redirect "error", the runtime's fetch no
+// longer delivers the abort to a body read in progress (measured 2026-11-06):
+// the read neither ends nor errors. This body stands for that runtime: it
+// never reacts to the abort; only a cancel of its reader ends it.
+function bodyIgnoringAbort(mode: "stalled" | "keepalive") {
+  let cancels = 0;
+  let enqueue: ((text: string) => void) | undefined;
+  let keepalive: ReturnType<typeof setInterval> | undefined;
+  const reader = new ReadableStream<Uint8Array>({
+    start(controller) {
+      enqueue = (text) => controller.enqueue(new TextEncoder().encode(text));
+      enqueue(": open\n\n");
+      if (mode === "keepalive") {
+        keepalive = setInterval(() => enqueue?.(": keepalive\n\n"), KEEPALIVE_EVERY_MS);
+      }
+    },
+    cancel() {
+      cancels += 1;
+      clearInterval(keepalive);
+      enqueue = undefined;
+    },
+  }).getReader();
+  return {
+    reader,
+    cancels: () => cancels,
+    // A [DONE] the upstream sends late; it reaches the probe only if the
+    // reader was never cancelled.
+    sendLateDone: () => enqueue?.("data: [DONE]\n\n"),
+  };
+}
+
+describe("breaker probe — the clock decides when the abort never reaches the read", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each(["stalled", "keepalive"] as const)(
+    "votes FAILURE at the clock and cancels the body (%s)",
+    async (mode) => {
+      const vote = vi.fn();
+      const log = { info: vi.fn(), error: vi.fn() };
+      const body = bodyIgnoringAbort(mode);
+      const runProbe = createProbeRunner({
+        streaming: vi.fn(async () => ({
+          kind: "accepted_stream" as const,
+          status: 200,
+          reader: body.reader,
+        })),
+        model: "probe-model",
+        log,
+      });
+
+      const pendingProbe = runProbe(vote, NOT_CLOSING);
+
+      await vi.advanceTimersByTimeAsync(PROBE_CLOCK_MS - 1);
+
+      expect(vote, "the probe clock has not expired").not.toHaveBeenCalled();
+      expect(body.cancels(), "the body stays open before the deadline").toBe(0);
+
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(vote, "the clock decides the probe once").toHaveBeenCalledTimes(1);
+      expect(vote, "an expired probe proves no recovery").toHaveBeenCalledWith(
+        "FAILURE",
+      );
+      expect(body.cancels(), "the clock cancels the body").toBe(1);
+
+      body.sendLateDone();
+
+      await settlesWithin(
+        pendingProbe,
+        PROBE_END_DEADLINE_MS,
+        "the probe did not settle after its clock expired",
+      );
+
+      expect(vote, "a late [DONE] cannot change the vote").toHaveBeenCalledTimes(1);
+
+      expect(
+        log.info,
+        "the clock that decided writes one line, and no other line follows",
+      ).toHaveBeenCalledTimes(1);
+      expect(log.info, "after the response head the line says the upstream had not finished its reply").toHaveBeenCalledWith({
+        event: "breaker_probe_clock_expired",
+        req_id: "breaker_probe",
+        upstream_reply: "not_finished",
+      });
+      expect(log.error, "a clock expiry is not an error line").not.toHaveBeenCalled();
+    },
+  );
+
+  it("cancels a body whose head arrives as the clock expires", async () => {
+    const vote = vi.fn();
+    const log = { info: vi.fn(), error: vi.fn() };
+    const body = bodyIgnoringAbort("stalled");
+    // The adapter may hand back an accepted stream after the abort: its head
+    // was processed in the same turn the clock fired.
+    const headAtTheClock = vi.fn(
+      (...args: Parameters<StreamingUpstream>) =>
+        new Promise<StreamingAdapter>((resolve) => {
+          args[1].addEventListener(
+            "abort",
+            () =>
+              resolve({
+                kind: "accepted_stream",
+                status: 200,
+                reader: body.reader,
+              }),
+            { once: true },
+          );
+        }),
+    );
+    const runProbe = createProbeRunner({
+      streaming: headAtTheClock,
+      model: "probe-model",
+      log,
+    });
+
+    const pendingProbe = runProbe(vote, NOT_CLOSING);
+    await vi.advanceTimersByTimeAsync(PROBE_CLOCK_MS);
+
+    expect(vote, "the clock decides the probe once").toHaveBeenCalledTimes(1);
+    expect(vote, "an expired probe proves no recovery").toHaveBeenCalledWith(
+      "FAILURE",
+    );
+    expect(body.cancels(), "the clock cancels the body").toBe(1);
+
+    await settlesWithin(
+      pendingProbe,
+      PROBE_END_DEADLINE_MS,
+      "the probe did not settle after its clock expired",
+    );
+
+    expect(
+      log.info,
+      "the clock that decided writes one line, and no other line follows",
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      log.info,
+      "the line reports what the probe knew when the clock decided: no head yet",
+    ).toHaveBeenCalledWith({
+      event: "breaker_probe_clock_expired",
+      req_id: "breaker_probe",
+      upstream_reply: "not_started",
+    });
+    expect(log.error, "a clock expiry is not an error line").not.toHaveBeenCalled();
   });
 });
