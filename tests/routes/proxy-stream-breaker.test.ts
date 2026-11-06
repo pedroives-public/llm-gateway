@@ -43,7 +43,7 @@ const VICTIM_BODY = {
 };
 
 // The breaker emits cb_state_change through a logger it never reads back here.
-const noopLog = { info: () => {} };
+const noopLog = { info: () => {}, error: () => {} };
 
 describe("stream:true must not open the shared circuit breaker", () => {
   it(

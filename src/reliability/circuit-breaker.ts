@@ -19,8 +19,10 @@ export interface CircuitAdmission {
 }
 
 // Minimal logger the breaker needs; structurally compatible with events.ts.
+// `error` carries the lines that only a gateway defect produces.
 export type CbLogger = {
   info: (obj: object) => void;
+  error: (obj: object) => void;
 };
 
 export interface CircuitBreaker {

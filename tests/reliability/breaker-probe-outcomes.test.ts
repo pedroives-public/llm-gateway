@@ -363,7 +363,7 @@ describe("breaker probe — every exit has a next step", () => {
     const runProbe = vi.fn((): void => {
       throw new Error("runner failed");
     });
-    const breaker = createCircuitBreaker({ info: () => {} }, runProbe);
+    const breaker = createCircuitBreaker({ info: () => {}, error: () => {} }, runProbe);
     openBreaker(breaker);
 
     expect(
@@ -420,7 +420,7 @@ describe("breaker probe — every exit has a next step", () => {
       attempts += 1;
       throw new Error("runner failed");
     };
-    const breaker = createCircuitBreaker({ info: () => {} }, runProbe);
+    const breaker = createCircuitBreaker({ info: () => {}, error: () => {} }, runProbe);
     openBreaker(breaker);
 
     await vi.advanceTimersByTimeAsync(OPEN_MS);
@@ -449,7 +449,7 @@ describe("breaker probe — every exit has a next step", () => {
     const runProbe = async (): Promise<void> => {
       attempts += 1;
     };
-    const breaker = createCircuitBreaker({ info: () => {} }, runProbe);
+    const breaker = createCircuitBreaker({ info: () => {}, error: () => {} }, runProbe);
     openBreaker(breaker);
 
     await vi.advanceTimersByTimeAsync(OPEN_MS);
@@ -500,6 +500,7 @@ describe("breaker probe — every exit has a next step", () => {
             if ((line as LogLine).to === "HALF_OPEN") armed = true;
             if (armed) failing.info(line);
           },
+          error: failing.error,
         };
       })(),
       createProbeRunner({
