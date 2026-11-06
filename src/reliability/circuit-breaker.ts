@@ -1,4 +1,6 @@
+import { PROBE_BACKSTOP_MS } from "../config.js";
 import {
+  emitBreakerProbeBackstop,
   emitBreakerProbeResult,
   emitCbStateChange,
   type ProbeOutcome,
@@ -45,6 +47,7 @@ export function createCircuitBreaker(
 
   let isClosed = false;
   let probeTimer: ReturnType<typeof setTimeout> | undefined;
+  let probeBackstopTimer: ReturnType<typeof setTimeout> | undefined;
   let probeController: AbortController | undefined;
 
   // The live 30s window, derived on read (expired excluded). Stamps arrive in
@@ -112,6 +115,11 @@ export function createCircuitBreaker(
         probeController.abort();
         probeController = undefined;
       }
+
+      if (probeBackstopTimer !== undefined) {
+        clearTimeout(probeBackstopTimer);
+        probeBackstopTimer = undefined;
+      }
     },
   };
 
@@ -150,9 +158,24 @@ export function createCircuitBreaker(
 
       const attempt = ++probeAttempts;
       let voted = false;
+      let attemptBackstopTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const clearAttemptBackstop = (): void => {
+        if (attemptBackstopTimer === undefined) return;
+
+        clearTimeout(attemptBackstopTimer);
+
+        if (probeBackstopTimer === attemptBackstopTimer) {
+          probeBackstopTimer = undefined;
+        }
+
+        attemptBackstopTimer = undefined;
+      };
+
       const voteOnce: ProbeVote = (outcome) => {
         if (isClosed || voted) return;
         voted = true;
+        clearAttemptBackstop();
 
         try {
           recordProbeResult(outcome);
@@ -165,9 +188,32 @@ export function createCircuitBreaker(
           // Probe votes do not propagate logging failures to their caller.
         }
       };
+
       const failProbe = (): void => {
         voteOnce("FAILURE");
       };
+
+      const backstopTimer = setTimeout(() => {
+        if (isClosed || voted) return;
+
+        if (probeBackstopTimer === backstopTimer) {
+          probeBackstopTimer = undefined;
+        }
+        attemptBackstopTimer = undefined;
+
+        failProbe();
+        controller.abort();
+
+        try {
+          emitBreakerProbeBackstop(log, { attempt });
+        } catch {
+          // A logging failure must not undo a backstop vote.
+        }
+      }, PROBE_BACKSTOP_MS);
+
+      attemptBackstopTimer = backstopTimer;
+      probeBackstopTimer = backstopTimer;
+      backstopTimer.unref();
 
       try {
         const result = runProbe(voteOnce, controller.signal);

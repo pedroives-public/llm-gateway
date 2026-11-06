@@ -46,6 +46,14 @@ export const STREAM_TOTAL_DURATION_MS = 280_000;
 // seconds more before the next attempt when the upstream is dead.
 export const PROBE_CLOCK_MS = 10_000;
 
+// The breaker's own bound on a recovery probe attempt that has not voted.
+// Twice PROBE_CLOCK_MS: the probe's clock must fire first (its cleanup was
+// measured at about 30 ms on 2026-11-06), so this fires only when the probe
+// code itself hangs, a gateway defect. A long bound costs tenants nothing,
+// since HALF_OPEN fast-fails them like OPEN; it only delays the next attempt
+// in that defect case.
+export const PROBE_BACKSTOP_MS = 2 * PROBE_CLOCK_MS;
+
 export function getOpenAIApiKey(): string {
   const key = process.env["OPENAI_API_KEY"];
   if (!key) {
