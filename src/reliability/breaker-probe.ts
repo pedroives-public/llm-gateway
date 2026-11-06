@@ -8,7 +8,9 @@ import { PROBE_CLOCK_MS } from "../config.js";
 import { armWallClockTimeout } from "./timeouts.js";
 import {
   emitOperationalAlert,
+  emitBreakerProbeClockExpired,
   type AlertName,
+  type ProbeUpstreamReply,
 } from "../observability/events.js";
 import { isInsufficientQuota } from "../upstream/quota.js";
 import type { ErrorOutcome } from "../upstream/outcome.js";
@@ -86,21 +88,74 @@ export function createProbeRunner({
 
   return async (vote, signal) => {
     const timeout = armWallClockTimeout(PROBE_CLOCK_MS);
+    const probeSignal = AbortSignal.any([timeout.signal, signal]);
+
+    let upstreamReply: ProbeUpstreamReply = "not_started";
+    let clockExpired = false;
+    let readerCancelledByAbort = false;
+
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let outcome: ProbeOutcome = "FAILURE";
     let alert: AlertName | undefined;
     let caughtError: { value: unknown } | undefined;
 
-    try {
-      const response = await streaming(requestBody, AbortSignal.any([timeout.signal, signal]), log);
+    // After a garbage collection, with redirect "error", the abort no longer
+    // reaches a body read in progress (the runtime drops its abort listener).
+    // Cancelling the reader still ends the read and closes the connection.
+    const cancelReaderAfterAbort = (): void => {
+      if (reader === undefined || readerCancelledByAbort) return;
 
-      if (isAcceptedStream(response)) {
+      readerCancelledByAbort = true;
+      void cancelStream(reader, log, "breaker_probe").catch(() => {
+        // Only the cancel-rejected log line can reject here; the vote does
+        // not depend on it.
+      });
+    };
+
+    const reportClockExpired = (): void => {
+      clockExpired = true;
+
+      try {
+        emitBreakerProbeClockExpired(log, {
+          req_id: PROBE_REQUEST_ID,
+          upstream_reply: upstreamReply,
+        });
+      } catch {
+        // A logging failure must not prevent the abort cleanup or vote.
+      }
+    };
+
+    timeout.signal.addEventListener("abort", reportClockExpired, {
+      once: true,
+    });
+    // Registered before the request starts, so it runs before the runtime's
+    // own abort listener: the cancel finds the body still open instead of
+    // already errored.
+    probeSignal.addEventListener("abort", cancelReaderAfterAbort, {
+      once: true,
+    });
+
+    try {
+      const response = await streaming(requestBody, probeSignal, log);
+
+      if (probeSignal.aborted) {
+        if (isAcceptedStream(response)) {
+          reader = response.reader;
+        }
+      } else if (isAcceptedStream(response)) {
         reader = response.reader;
+        upstreamReply = "not_finished";
+
         const nextFrame = createSseFrameReader(reader);
 
         while (true) {
           const frame = await nextFrame();
 
+          // Does not fire today: a timer never runs between a read resolving
+          // and this continuation, and a read pending when the clock fires
+          // ends with `done` once the clock cancels the body. It keeps a frame
+          // from outvoting a clock that already decided.
+          if (clockExpired || probeSignal.aborted) break;
           if (frame.kind !== "frame") break;
 
           if (frame.data === "[DONE]") {
@@ -114,14 +169,25 @@ export function createProbeRunner({
         alert = decision.alert;
       }
     } catch (error) {
-      caughtError = { value: error };
+      const isAbortRejection = probeSignal.aborted && error === probeSignal.reason;
+
+      // After the clock cancels the body, a pending read ends with `done`, not
+      // with an error, so no failure reaches here once the clock decided.
+      // The guard keeps the loser silent if an ordering ever delivers one.
+      if (!clockExpired && !isAbortRejection) {
+        caughtError = { value: error };
+      }
     } finally {
       timeout.clear();
+      timeout.signal.removeEventListener("abort", reportClockExpired);
+      probeSignal.removeEventListener("abort", cancelReaderAfterAbort);
 
       try {
         vote(outcome);
       } finally {
-        if (reader !== undefined) {
+        // Cancelling a reader the clock already cancelled changes nothing; the
+        // guard states that the body was already released.
+        if (reader !== undefined && !readerCancelledByAbort) {
           await cancelStream(reader, log, "breaker_probe");
         }
       }

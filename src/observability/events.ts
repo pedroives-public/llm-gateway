@@ -50,6 +50,16 @@ export interface BreakerProbeResultPayload {
   outcome: ProbeOutcome;
 }
 
+// How far the upstream got when the recovery probe's clock expired: it had
+// not sent the head of its reply, or it had started the reply and not
+// finished it.
+export type ProbeUpstreamReply = "not_started" | "not_finished";
+
+export interface BreakerProbeClockExpiredPayload {
+  req_id: string;
+  upstream_reply: ProbeUpstreamReply;
+}
+
 export type ReqRejectedReason = "schema_validation" | "cost_cap_exceeded";
 
 export type AlertName = (typeof ALERT_NAMES)[number];
@@ -262,6 +272,18 @@ export function emitBreakerProbeResult(
   payload: BreakerProbeResultPayload,
 ): void {
   log.info({ event: "breaker_probe_result", ...payload });
+}
+
+/**
+ * The recovery probe's clock expired before the probe ended on evidence.
+ * Written once per attempt, by the clock that decided the FAILURE vote; a
+ * read that ends or fails after that writes nothing.
+ */
+export function emitBreakerProbeClockExpired(
+  log: MinLogger,
+  payload: BreakerProbeClockExpiredPayload,
+): void {
+  log.info({ event: "breaker_probe_clock_expired", ...payload });
 }
 
 /**
