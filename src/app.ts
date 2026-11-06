@@ -4,6 +4,7 @@ import { v7 as uuidv7 } from "uuid";
 import { healthRoute } from "./routes/health.js";
 import { proxyRoute } from "./routes/proxy.js";
 import { createCircuitBreaker } from "./reliability/circuit-breaker.js";
+import { createProbeRunner } from "./reliability/breaker-probe.js";
 import { createOpenAIClient } from "./upstream/openai.js";
 import { authPreHandler } from "./middleware/auth.js";
 import { registerAdmission } from "./middleware/admission.js";
@@ -13,6 +14,7 @@ import {
   getStreamingEnabled,
   getOpenAIApiKey,
   getOpenAIBaseUrl,
+  getProbeModel,
   REQUEST_TIMEOUT_MS,
   HTTP_SERVER_OPTIONS,
   ADMISSION_CAPACITY_POST_AUTH,
@@ -38,6 +40,7 @@ export async function buildApp(
   const streamingEnabled = getStreamingEnabled();
   const openaiApiKey = getOpenAIApiKey();
   const openaiBaseUrl = getOpenAIBaseUrl();
+  const probeModel = getProbeModel();
 
   const nodeEnv = process.env["NODE_ENV"];
 
@@ -115,10 +118,21 @@ export async function buildApp(
     if (options.registerProtected) {
       await options.registerProtected(scope);
     } else {
-      const breaker = createCircuitBreaker(app.log);
       const upstream = createOpenAIClient({
         apiKey: openaiApiKey,
         baseURL: openaiBaseUrl,
+      });
+      const breaker = createCircuitBreaker(
+        app.log,
+        createProbeRunner({
+          streaming: upstream.streaming,
+          model: probeModel,
+          log: app.log,
+        }),
+      );
+      // No recovery probe may outlive the app.
+      scope.addHook("onClose", async () => {
+        breaker.close();
       });
       await scope.register(proxyRoute, {
         breaker,
