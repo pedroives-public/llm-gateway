@@ -14,21 +14,28 @@ import {
   type ProbeVote,
 } from "../../src/reliability/circuit-breaker.js";
 
-// The factory takes a logger ({ info }) so the breaker can emit
+// The factory takes a logger ({ info, error }) so the breaker can emit
 // cb_state_change on transitions — the same logger shape classify.ts uses.
 // Most tests don't care about logging, so makeBreaker defaults to a no-op;
 // the event tests pass a vi.fn() spy to inspect the emitted payload.
-type TestLog = { info: (obj: object) => void };
-const noopLog: TestLog = { info: () => {} };
+type TestLog = { info: (obj: object) => void; error: (obj: object) => void };
+const noopLog: TestLog = { info: () => {}, error: () => {} };
 
 // Every recovery attempt reaches this runner, so a test drives the probe by
 // advancing the clock and reads each attempt's vote from the recorded calls.
-function makeCircuit(log: TestLog = noopLog) {
+// Tests that inspect logging pass only the side they read; the other side
+// defaults to a no-op.
+type PartialTestLog = Pick<TestLog, "info"> & Partial<TestLog>;
+
+function makeCircuit(log: PartialTestLog = noopLog) {
   const runProbe = vi.fn<(vote: ProbeVote) => void>();
-  return { breaker: createCircuitBreaker(log, runProbe), runProbe };
+  return {
+    breaker: createCircuitBreaker({ error: () => {}, ...log }, runProbe),
+    runProbe,
+  };
 }
 
-function makeBreaker(log: TestLog = noopLog): CircuitBreaker {
+function makeBreaker(log: PartialTestLog = noopLog): CircuitBreaker {
   return makeCircuit(log).breaker;
 }
 
@@ -177,6 +184,7 @@ describe("circuit breaker — scheduled recovery probe", () => {
         info: () => {
           if (shouldThrow) throw new Error("open event failed");
         },
+        error: () => {},
       },
       runProbe,
     );
@@ -267,6 +275,7 @@ describe("circuit breaker — scheduled recovery probe", () => {
             throw new Error("reopen event failed");
           }
         },
+        error: () => {},
       },
       runProbe,
     );
@@ -886,7 +895,7 @@ describe("circuit breaker — after close", () => {
     (late) => {
       const info = vi.fn<(obj: object) => void>();
       const runProbe = vi.fn<(vote: ProbeVote, signal: AbortSignal) => void>();
-      const breaker = createCircuitBreaker({ info }, runProbe);
+      const breaker = createCircuitBreaker({ info, error: () => {} }, runProbe);
       recordFailures(breaker, 5);
       vi.advanceTimersByTime(OPEN_MS);
       const [vote, signal] = runProbe.mock.calls[0] ?? [];
