@@ -34,8 +34,12 @@ The probe has its own clock, which ends it after 10 seconds and writes
 backstop is a second, longer bound for the case where the probe code itself
 stops making progress, so the breaker cannot stay HALF_OPEN forever. This line
 means that bound was needed: the probe's own clock did not end the attempt.
-The upstream connection of that attempt may stay open until the runtime's
-300-second body timeout.
+The upstream connection of that attempt may stay open. The runtime's
+300-second body timeout closes it only if the upstream stops sending; an
+upstream that keeps sending bytes holds it open longer. If the attempt was
+still waiting for the response head, an error-level
+[`Unrecognized upstream rejection`](breaker-probe-cancel-abort.md) line
+follows; it is a known false error.
 
 **Diagnosis**
 

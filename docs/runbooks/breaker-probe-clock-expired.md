@@ -32,13 +32,17 @@ request of its own: one output token, fixed message, the model from the
 deployment setting `BREAKER_PROBE_MODEL`. The reply must reach its end
 (`[DONE]`) within `PROBE_CLOCK_MS`, 10 seconds; in production the probe's
 reply took at most 4.6 seconds across two measurements of 20 requests each.
-This line means the clock decided first: the probe voted `FAILURE`, cancelled
-its request and closed the connection to the upstream.
+This line means the clock decided first: the probe voted `FAILURE` and
+cancelled its request, which normally also closes the connection to the
+upstream. If a [`breaker_probe_backstop`](breaker-probe-backstop.md) line
+follows for the same attempt, the cancel did not end the request, and the
+connection may still be open.
 
 `upstream_reply` says how far the upstream got:
 
-- `not_started`: the upstream did not send even the beginning of its reply
-  (the response head) within 10 seconds.
+- `not_started`: no stream started within 10 seconds. Either no response
+  head arrived, or the head carried an error status and its body was still
+  arriving.
 - `not_finished`: the upstream started replying but did not finish a
   one-token reply within 10 seconds.
 
@@ -46,10 +50,12 @@ its request and closed the connection to the upstream.
 
 Read the value over the last few probes (one every 70 seconds or so):
 
-- `not_started`, repeated: the provider is down or unreachable from the
-  deployment. Check the provider's status page, then send the probe's own
-  request from inside the deployment (the diagnosis request in
-  [`upstream_probe_rejected`](README.md#upstream_probe_rejected)).
+- `not_started`, repeated: the provider is down, unreachable from the
+  deployment, or answering an error whose body arrives slowly. Send the
+  probe's own request from inside the deployment (the diagnosis request in
+  [`upstream_probe_rejected`](README.md#upstream_probe_rejected)): no answer
+  means down or unreachable, and an error status names the cause. Check the
+  provider's status page too.
 - `not_finished`, repeated: the provider answers but is degraded, or something
   between the gateway and the provider holds the connection open (for example
   a proxy that keeps sending keep-alive comments). The same direct request
