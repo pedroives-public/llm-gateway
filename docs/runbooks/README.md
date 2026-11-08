@@ -19,6 +19,7 @@ Alerts covered:
 - [`upstream_quota_exhausted`](#upstream_quota_exhausted)
 - [`upstream_redirect_blocked`](#upstream_redirect_blocked)
 - [`upstream_probe_rejected`](#upstream_probe_rejected)
+- [`upstream_probe_access_denied`](#upstream_probe_access_denied)
 - [`auth_db_cause_unknown`](#auth_db_cause_unknown)
 - [`auth_db_unavailable`](#auth_db_unavailable)
 
@@ -280,28 +281,23 @@ content never reaches the logs.
 
 **Impact**
 
-It depends on the status the upstream answered, in two opposite ways:
-
-- `400`, `404`, `413` or `422`: the breaker **closes**. Tenants are served again,
-  but this probe proved nothing about recovery, because the upstream only refused
-  the probe's own request. If the upstream is still sick, the breaker reopens on
-  tenant failures and the cycle repeats.
-- `403`: the breaker **stays OPEN**. Every tenant receives `503
-  {"code":"circuit_breaker_open"}` and a new probe runs every 60 seconds. It
-  ends only when the account regains access or the setting changes.
+The upstream answered `400`, `404`, `413` or `422`, and the breaker **closes**.
+Tenants are served again, but this probe proved nothing about recovery, because
+the upstream only refused the probe's own request. If the upstream is still
+sick, the breaker reopens on tenant failures and the cycle repeats. A `403`
+raises [`upstream_probe_access_denied`](#upstream_probe_access_denied) instead.
 
 **Meaning**
 
 The gateway recovers the breaker with a small synthetic request of its own, and
 the upstream refused that request. No tenant input reaches it: the model comes
 from the deployment setting `BREAKER_PROBE_MODEL`, and the rest of the request is
-fixed. So the fault is in the deployment's configuration or in the account, never
-in a tenant. The usual causes are a model name that does not exist, a model that
-rejects `stream` or `max_tokens`, and an account without access to that model.
+fixed. So the fault is in the deployment's configuration, never in a tenant.
+The usual causes are a model name that does not exist and a model
+that rejects `stream` or `max_tokens`.
 
 The four statuses close the breaker on purpose: holding every tenant in `503`
-because of a wrong setting would be an outage with a healthy upstream. A `403` does
-not, because a denied account can be denying tenant requests too.
+because of a wrong setting would be an outage with a healthy upstream.
 
 **Diagnosis**
 
@@ -318,9 +314,8 @@ The gateway never logs the upstream's body, so this is where you read the reason
 
 - `404`, or a body that says the model does not exist: **fix A**.
 - `400` or `422` naming a parameter: the model rejects the probe's shape, **fix A**.
-- `403`: the account has no access. Compare with the same request using a model
-  the tenants use. If that one answers `200`, **fix A**. If it also answers `403`,
-  **fix B**.
+- `403`: this is the other alert,
+  [`upstream_probe_access_denied`](#upstream_probe_access_denied).
 - `413`: the upstream or something on the path refuses even this small body.
   Re-run with another model and with a direct request from your machine, and
   suspect the path before the setting.
@@ -329,11 +324,8 @@ The gateway never logs the upstream's body, so this is where you read the reason
 
 **Fix**
 
-- **A, wrong or unsuitable model:** change `BREAKER_PROBE_MODEL` in the `[env]` of
-  `fly.toml` to a small model that accepts the request above, and deploy.
-- **B, account without access:** restore the access on the provider's dashboard.
-  Nothing in the deployment changes. If tenants are failing too, this is the same
-  incident as their `403`s.
+Change `BREAKER_PROBE_MODEL` in the `[env]` of `fly.toml` to a small model that
+accepts the request above, and deploy.
 
 **Verify**
 
@@ -341,9 +333,73 @@ Re-run the diagnosis request: it must answer `200` and end in `data: [DONE]`. Th
 is the proof, because the probe runs only while the breaker is OPEN: with the
 breaker CLOSED, a quiet log says nothing about the setting. The boot check only
 confirms the setting is present and well formed, not that the upstream accepts it.
-After fix A the deploy restarts the process and re-arms the alert. After fix B the
-alert stays consumed, so during an open breaker read the probe's next event, which
-must report `SUCCESS` within 60 seconds.
+The deploy restarts the process and re-arms the alert.
+
+---
+
+## upstream_probe_access_denied
+
+**Alert line**
+
+```json
+{"level":50,"event":"operational_alert","alert":"upstream_probe_access_denied","req_id":"breaker_probe"}
+```
+
+No tenant request carries this alert, so `req_id` is the fixed value
+`breaker_probe` and joins to nothing. The adjacent `breaker_probe_result` event
+records the attempt and its `FAILURE`, but deliberately omits the upstream status
+and body.
+
+**Impact**
+
+The breaker **stays OPEN**. Every tenant receives `503
+{"code":"circuit_breaker_open"}` and a new probe runs every 60 seconds. It ends
+only when the account regains access or the setting changes.
+
+**Meaning**
+
+The upstream answered `403` to the breaker's synthetic probe. No tenant input
+reaches that request: the model comes from the deployment setting
+`BREAKER_PROBE_MODEL`, and the rest of the request is fixed. So the denial
+concerns the deployment's account, or its access to that model. The breaker stays
+open because a denied account can be denying tenant requests too.
+
+This alert has its own name on purpose. Probe alerts fire once per process, so if
+a `403` shared the name of
+[`upstream_probe_rejected`](#upstream_probe_rejected), an earlier refused setting
+in the same process would silence this outage.
+
+**Diagnosis**
+
+Send the probe's exact request from inside the deployment (`fly ssh console`), so
+it uses the same secret and the same setting:
+
+```sh
+curl -sS -w "\n%{http_code}\n" -X POST "$OPENAI_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" -H "Content-Type: application/json" \
+  -d "{\"model\":\"$BREAKER_PROBE_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"stream\":true,\"max_tokens\":1}"
+```
+
+- `403` again: compare with the same request using a model the tenants use. If
+  that one answers `200`, the account lacks access only to the probe's model:
+  **fix A**. If it also answers `403`, the account itself is denied: **fix B**.
+- `200` ending in `data: [DONE]`: the condition is gone from here. Read the probe's
+  next `breaker_probe_result` event.
+
+**Fix**
+
+- **A, probe model without access:** change `BREAKER_PROBE_MODEL` in the `[env]` of
+  `fly.toml` to a small model the account can use, and deploy.
+- **B, account without access:** restore the access on the provider's dashboard.
+  Nothing in the deployment changes. If tenants are failing too, this is the same
+  incident as their `403`s.
+
+**Verify**
+
+Re-run the diagnosis request: it must answer `200` and end in `data: [DONE]`. After
+fix A the deploy restarts the process and re-arms the alert. After fix B the alert
+stays consumed, so during an open breaker read the probe's next event, which must
+report `SUCCESS` within 60 seconds.
 
 ---
 
