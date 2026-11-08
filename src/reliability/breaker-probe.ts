@@ -190,7 +190,10 @@ export function createProbeRunner({
         // Cancelling a reader the clock already cancelled changes nothing; the
         // guard states that the body was already released.
         if (reader !== undefined && !readerCancelledByAbort) {
-          await cancelStream(reader, log, "breaker_probe");
+          await cancelStream(reader, log, "breaker_probe").catch(() => {
+            // Only the cancel-rejected log line can reject here; neither the
+            // vote nor the diagnostic line depends on it.
+          });
         }
       }
     }

@@ -681,6 +681,72 @@ describe("breaker probe — every exit has a next step", () => {
       "an unhandled rejection takes the process down, and every tenant with it",
     ).toEqual([]);
   });
+
+  // A body that fails mid-read leaves the stream errored, so the cleanup's
+  // cancel rejects too, and its observation line is the one that throws.
+  it("keeps the caught error's line, and settles, when logging a rejected cancel throws", async () => {
+    const { createProbeRunner } = await import(
+      "../../src/reliability/breaker-probe.js"
+    );
+    const vote = vi.fn();
+    let lines: LogLine[] = [];
+    let thrown = 0;
+    const write = (line: object): void => {
+      const entry = line as LogLine;
+      if (entry.event === "upstream_cancel_rejected") {
+        thrown += 1;
+        throw new Error("logger failed");
+      }
+      lines = [...lines, entry];
+    };
+    const socketReset = new TypeError("terminated", {
+      cause: Object.assign(new Error("other side closed"), {
+        code: "UND_ERR_SOCKET",
+      }),
+    });
+    const runProbe = createProbeRunner({
+      streaming: async (): Promise<StreamingAdapter> => ({
+        kind: "accepted_stream",
+        status: 200,
+        reader: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(socketReset);
+          },
+        }).getReader(),
+      }),
+      model: "probe-model",
+      log: { info: write, error: write },
+    });
+
+    let settled = "pending";
+    void runProbe(vote, NOT_CLOSING).then(
+      () => {
+        settled = "resolved";
+      },
+      () => {
+        settled = "rejected";
+      },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    await flushRejections();
+
+    // Positive control: without the throw, a present line would say nothing
+    // about the rule.
+    expect(thrown, "the scene must make the cancel-rejected line throw").toBe(1);
+    expect(vote, "the vote comes before the cleanup").toHaveBeenCalledWith(
+      "FAILURE",
+    );
+    expect(
+      lines.filter((line) => line.event === undefined),
+      "a failed cleanup line must not cost the operator the caught error's line",
+    ).toEqual([
+      { err_name: "TypeError", cause_code: "UND_ERR_SOCKET", cause_name: "Error" },
+    ]);
+    expect(
+      settled,
+      "a probe that has voted settles its attempt even when a cleanup line fails",
+    ).toBe("resolved");
+  });
 });
 
 describe("breaker probe — closing the app", () => {
