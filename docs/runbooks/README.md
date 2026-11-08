@@ -34,7 +34,7 @@ Recovery-probe lines that raise no alert:
 
 - [`breaker_probe_clock_expired`: the recovery probe outlived its clock](breaker-probe-clock-expired.md) — only while the breaker is HALF_OPEN.
 - [`breaker_probe_backstop`: a recovery probe never finished](breaker-probe-backstop.md) — error level; only a gateway defect produces it.
-- [Unrecognized upstream rejection at shutdown: the app cancelled its recovery probe](breaker-probe-shutdown-abort.md) — error level; a known false error, no action.
+- [Unrecognized upstream rejection with AbortError: the gateway cancelled its recovery probe](breaker-probe-cancel-abort.md) — error level; a known false error that follows a backstop line.
 
 ---
 
