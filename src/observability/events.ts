@@ -11,7 +11,11 @@ export const ALERT_NAMES = [
   "upstream_quota_exhausted",
   // the configured endpoint answered 3xx and the gateway refuses to follow it
   "upstream_redirect_blocked",
-  // the recovery probe was refused by its deployment-owned request or account access
+  // the recovery probe's account access was denied (403); the breaker stays
+  // OPEN, so every tenant keeps receiving 503
+  "upstream_probe_access_denied",
+  // the recovery probe's deployment-owned request was refused (400, 404, 413,
+  // 422); the breaker closes, so a bad probe config cannot hold tenants at 503
   "upstream_probe_rejected",
   // the auth DB catch saw an error whose shape the cause vocabulary cannot
   // identify (cause_code or cause_name fell back to UNKNOWN)

@@ -98,7 +98,7 @@ describe("breaker probe — outcome table", () => {
     { scene: "429 rate limit", response: json(429), outcome: "FAILURE", alerts: [], because: "a plain 429 says not now, and summons nobody" },
     { scene: "429 insufficient_quota", response: json(429, QUOTA_BODY), outcome: "FAILURE", alerts: ["upstream_quota_exhausted"], because: "no quota needs the operator, and retrying in 60 s will not fix it" },
     { scene: "401", response: json(401), outcome: "FAILURE", alerts: ["upstream_auth_failure"], because: "a rejected deployment credential needs the operator" },
-    { scene: "403", response: json(403), outcome: "FAILURE", alerts: ["upstream_probe_rejected"], because: "a denied account keeps the breaker open and needs the operator" },
+    { scene: "403", response: json(403), outcome: "FAILURE", alerts: ["upstream_probe_access_denied"], because: "a denied account keeps every tenant at 503 and needs an alert of its own" },
     { scene: "400", response: json(400), outcome: "SUCCESS", alerts: ["upstream_probe_rejected"], because: "a refused probe config must not hold every tenant in 503" },
     { scene: "404", response: json(404), outcome: "SUCCESS", alerts: ["upstream_probe_rejected"], because: "a refused probe config must not hold every tenant in 503" },
     { scene: "413", response: json(413), outcome: "SUCCESS", alerts: ["upstream_probe_rejected"], because: "a refused probe config must not hold every tenant in 503" },
@@ -180,7 +180,40 @@ describe("breaker probe — outcome table", () => {
     expect(
       captured.alerts(),
       "a probe repeats every 60 s and must summon the operator only once",
-    ).toEqual(["upstream_probe_rejected"]);
+    ).toEqual(["upstream_probe_access_denied"]);
+  });
+
+  // Alerts fire once per process by name: if a refused config and a denied
+  // account shared a name, the earlier one would silence the outage.
+  it("still alerts a denied account after a refused probe config alerted", async () => {
+    const { createProbeRunner } = await import(
+      "../../src/reliability/breaker-probe.js"
+    );
+    const captured = capturingLog();
+    const votes: string[] = [];
+
+    for (const response of [json(400), json(403)]) {
+      await withUpstream(response, async ({ streaming }) => {
+        await createProbeRunner({
+          streaming,
+          model: "probe-model",
+          log: captured.log,
+        })((outcome) => {
+          votes.push(outcome);
+        }, NOT_CLOSING);
+      });
+    }
+
+    // Positive control: the 400 closed and the 403 kept OPEN, so the scene
+    // reached both decisions.
+    expect(votes, "the scene must reach a refused config and a denied account").toEqual([
+      "SUCCESS",
+      "FAILURE",
+    ]);
+    expect(
+      captured.alerts(),
+      "a 403 keeps every tenant at 503, so an earlier refused-config alert must not silence it",
+    ).toEqual(["upstream_probe_rejected", "upstream_probe_access_denied"]);
   });
 
   it("names the probe in the alert line, and nothing else", async () => {
@@ -569,7 +602,7 @@ describe("breaker probe — every exit has a next step", () => {
     {
       response: () => ({ kind: "upstream_error", status: 403, body_raw: "" }),
       when: (line) => line.event === "breaker_probe_result" && line.outcome === "FAILURE",
-      alerts: ["upstream_probe_rejected"],
+      alerts: ["upstream_probe_access_denied"],
       scene: "the breaker_probe_result line throws during a 403 vote",
       because: "a breaker line that fails during the vote must not cost the operator the alert",
     },

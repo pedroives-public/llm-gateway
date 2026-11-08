@@ -52,7 +52,7 @@ function decideProbeOutcome(response: ErrorOutcome): ProbeDecision {
   }
 
   if (response.status === 403) {
-    return { outcome: "FAILURE", alert: "upstream_probe_rejected" };
+    return { outcome: "FAILURE", alert: "upstream_probe_access_denied" };
   }
 
   return { outcome: "FAILURE" };
