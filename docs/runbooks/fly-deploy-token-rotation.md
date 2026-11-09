@@ -28,10 +28,16 @@ Two identities, as everywhere in this repository:
 
 | Token | Created | Expires (UTC) | Rotate by |
 |---|---|---|---|
-| `ywyeyxmb…` (current) | 2026-10-18 | 2026-11-17 20:44 | **2026-11-15** |
+| `1wDMDnOq…` (current) | 2026-11-09 | 2026-12-09 19:59 | **2026-12-07** |
+| `ywyeyxmb…` | 2026-10-18 | 2026-11-17 20:44 | rotated 2026-11-09 (revoked 20:13 UTC) |
 | `1wDMDnOq…` | 2026-09-24 | 2026-10-24 17:49 | rotated 2026-10-18 (revoked 20:56 UTC) |
 | `BgRyRGOe…` | 2026-08-27 | 2026-09-26 17:02 | rotated 2026-09-24 (revoked 17:59 UTC) |
 | next | day of rotation | +720 h | expiry − 2 days |
+
+The ID column is not unique across rotations: the token created on
+2026-11-09 lists an ID with the same leading characters as the one created
+on 2026-09-24. Tell rows apart by the creation date, and revoke by the full
+ID that `fly tokens list` shows at step 1.
 
 Rotate two days before expiry so a failed attempt still has a working token
 behind it. This table is the record: step 6 updates it in the same act as
