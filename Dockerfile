@@ -1,4 +1,9 @@
-FROM node:22-alpine AS base
+# Pinned to the patch, not to the major: the outbound fetch relies on runtime
+# behavior (abort delivery after a garbage collection) that the suite pins on
+# this exact version (tests/reliability/breaker-probe-gc.test.ts). CI fails
+# when its Node differs from this line, so a runtime upgrade moves this line
+# and `node-version` in .github/workflows/ci.yml together, deliberately.
+FROM node:22.23.4-alpine AS base
 RUN npm install -g pnpm@11.1.1
 
 FROM base AS builder
