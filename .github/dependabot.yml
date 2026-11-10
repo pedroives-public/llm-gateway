@@ -24,6 +24,9 @@ updates:
     schedule:
       interval: "weekly"
 
+  # The base image is pinned to the Node patch. A minor or patch bump from
+  # here fails CI's runtime check until node-version in ci.yml moves with it:
+  # the PR stays red until someone takes the upgrade on deliberately.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
