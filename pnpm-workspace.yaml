@@ -1,3 +1,12 @@
+overrides:
+  # Vitest accepts vite ^6 || ^7 || ^8 but leaves the lockfile on the vite it
+  # first resolved, and pnpm does not move an indirect dependency that still
+  # satisfies its range. vite <= 7.3.6 carries advisories fixed in 7.3.7 (dev
+  # server and editor-launch paths, dev toolchain only). Pinned exactly to
+  # 7.3.7, the oldest fixed release, rather than the newest. Remove this entry
+  # at the next Vitest upgrade, once it resolves a fixed vite on its own.
+  "vite@<7.3.7": 7.3.7
+
 allowBuilds:
   cpu-features: true
   esbuild: true
