@@ -107,6 +107,11 @@ describe("isRetryEligible", () => {
       outcome: { kind: "redirect_blocked" },
       eligible: false,
     },
+    {
+      name: "upstream 3xx — structurally not retryable (3xx repeats until config changes)",
+      outcome: { kind: "upstream_3xx", status: 300 },
+      eligible: false,
+    },
   ];
 
   it.each(cases)("$name", ({ outcome, eligible }) => {

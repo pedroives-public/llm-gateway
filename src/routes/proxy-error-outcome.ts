@@ -145,6 +145,7 @@ function statusForErrorOutcome(
     // Proxy-boundary failure on the operator's side (stale endpoint config or
     // an upstream that started redirecting): 502, never a passthrough.
     case "redirect_blocked":
+    case "upstream_3xx":
       return 502;
     case "network_failed":
       return errorClass === "gateway-fault" ? 504 : 502;
@@ -208,6 +209,7 @@ export function terminalForErrorOutcome(
           return assertNever(outcome.undecodable_kind);
       }
     case "redirect_blocked":
+    case "upstream_3xx":
       return "REDIRECT_BLOCKED";
     case "aborted":
       switch (outcome.abort_kind) {
@@ -268,6 +270,7 @@ export function bodyForErrorOutcome(
       return UPSTREAM_DECODE_ERROR_BODY;
 
     case "redirect_blocked":
+    case "upstream_3xx":
       return {
         error: {
           message: "upstream redirect blocked",

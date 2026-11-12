@@ -10,6 +10,10 @@ export type Outcome =
       undecodable_kind: "non_sse_head" | "head_without_body" | "unparsable_body";
     }
   | {
+      kind: "upstream_3xx";
+      status: number;
+    }
+  | {
       kind: "network_failed";
       pre_send_proven: boolean;
       cause_code?: string;
