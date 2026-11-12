@@ -47,6 +47,9 @@ export type ResponseRecognition = Extract<
   Outcome,
   { kind: "ok" | "upstream_error" | "undecodable" | "upstream_3xx" }
 >;
+export type ResponseHeadRecognition = 
+  | { kind: "upstream_3xx"; status: number } 
+  | { kind: "not_3xx" };
 
 const PRE_SEND_PROVEN_CODES: readonly string[] = [
   "ENOTFOUND",
@@ -73,6 +76,14 @@ function isSuccessStatus(status: number): boolean {
 
 export function is3xxStatus(status: number): boolean {
   return status >= 300 && status < 400;
+}
+
+export function recognizeResponseHead(status: number): ResponseHeadRecognition {
+  if (!is3xxStatus(status)) {
+    return { kind: "not_3xx" };
+  }
+
+  return { kind: "upstream_3xx", status };
 }
 
 function isRecognizedAbortKind(
