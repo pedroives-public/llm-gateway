@@ -45,7 +45,7 @@ export type RejectionRecognition =
   | UnrecognizedRejection;
 export type ResponseRecognition = Extract<
   Outcome,
-  { kind: "ok" | "upstream_error" | "undecodable" }
+  { kind: "ok" | "upstream_error" | "undecodable" | "upstream_3xx" }
 >;
 
 const PRE_SEND_PROVEN_CODES: readonly string[] = [
@@ -69,6 +69,10 @@ export const REDIRECT_BLOCKED_MESSAGE = "unexpected redirect";
 
 function isSuccessStatus(status: number): boolean {
   return status >= 200 && status < 300;
+}
+
+function is3xxStatus(status: number): boolean {
+  return status >= 300 && status < 400;
 }
 
 function isRecognizedAbortKind(
@@ -107,6 +111,10 @@ export function recognizeRejection(raw: RejectionFacts): RejectionRecognition {
 }
 
 export function recognizeResponse(raw: ResponseFacts): ResponseRecognition {
+  if (is3xxStatus(raw.status)) {
+    return { kind: "upstream_3xx", status: raw.status };
+  }
+
   if (raw.parsed) {
     return { kind: "ok", status: raw.status, body_parsed: raw.body_parsed };
   }

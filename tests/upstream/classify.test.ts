@@ -111,6 +111,25 @@ describe("classify", () => {
     });
   });
 
+  it("classifies an upstream 3xx as upstream-redirect-blocked, breaker delta 1 (certain failure until config changes)", () => {
+    const log = makeLog();
+
+    const result = classify({ kind: "upstream_3xx", status: 304 }, log, "req-1");
+
+    expect(
+      result,
+      "every 3xx fails with certainty until the endpoint config changes, so it counts toward the breaker",
+    ).toEqual({
+      error_class: "upstream-redirect-blocked",
+      breaker_delta: 1,
+    });
+    expect(log.error, "every upstream failure writes one cause line; an answer with no transport cause carries nulls").toHaveBeenCalledWith({
+      req_id: "req-1",
+      cause_code: null,
+      cause_name: null,
+    });
+  });
+
   it("classifies an upstream 5xx as retryable, terminal-class upstream-retry-exhausted, breaker delta 1", () => {
     const expected = {
       error_class: "upstream-retry-exhausted",

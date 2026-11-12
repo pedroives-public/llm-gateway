@@ -106,4 +106,32 @@ describe("upstream redirect blocked — sanitized terminal, breaker failure", ()
       retry_disposition: "ineligible",
     });
   });
+
+  it("answers an upstream 3xx like a blocked redirect: sanitized 502, single attempt, breaker FAILURE, terminal REDIRECT_BLOCKED", async () => {
+    const { res, recorded, upstreamCalls, capture } = await injectScripted([
+      { kind: "upstream_3xx", status: 304 },
+    ]);
+
+    expect(res.statusCode, "a 3xx is never passed through to the consumer").toBe(502);
+    expect(res.headers["x-gateway-error-class"]).toBe(
+      "upstream-redirect-blocked",
+    );
+    expect(
+      JSON.parse(res.payload),
+      "the consumer sees the gateway's own body, nothing of the upstream's answer",
+    ).toEqual(SANITIZED_REDIRECT_BODY);
+
+    expect(upstreamCalls, "a 3xx is retry-ineligible").toBe(1);
+    expect(recorded, "a 3xx counts toward the breaker").toEqual(["FAILURE"]);
+
+    const complete = capture.byEvent("req_complete");
+    expect(complete).toHaveLength(1);
+    expect(complete[0]).toMatchObject({
+      status: 502,
+      error_class: "upstream-redirect-blocked",
+      attempts: 1,
+      retry_disposition: "ineligible",
+    });
+    expect(complete[0]?.terminal, "a 3xx ends as the REDIRECT_BLOCKED terminal, like a blocked redirect").toBe("REDIRECT_BLOCKED");
+  });
 });

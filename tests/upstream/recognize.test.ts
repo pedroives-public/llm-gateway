@@ -38,6 +38,44 @@ describe("recognize", () => {
     });
   });
 
+  // The gateway recognizes a 3xx by its status alone, whatever its body says.
+  const EVERY_3XX_STATUS = Array.from({ length: 100 }, (_, index) => 300 + index);
+
+  it("lists every status from 300 to 399 exactly once (control of the table below)", () => {
+    expect(EVERY_3XX_STATUS).toHaveLength(100);
+    expect(EVERY_3XX_STATUS[0]).toBe(300);
+    expect(EVERY_3XX_STATUS[99]).toBe(399);
+  });
+
+  it.each(EVERY_3XX_STATUS)(
+    "recognizes status %i by the status alone, as the 3xx outcome carrying it",
+    (status) => {
+      const result = recognize({
+        resolved: true,
+        parsed: false,
+        status,
+        body_raw: "a body the recognition must not depend on",
+      });
+
+      expect(
+        result,
+        "a 3xx is the upstream's own answer and is recognized by its status: never an upstream_error",
+      ).toEqual({ kind: "upstream_3xx", status });
+    },
+  );
+
+  it("keeps 299 a success and 400 an upstream_error: the 3xx range ends at its own edges", () => {
+    expect(
+      recognize({ resolved: true, parsed: true, status: 299, body_parsed: { id: "chatcmpl-1" } }),
+      "299 is the last 2xx: a body that parses is ok, never the 3xx outcome",
+    ).toEqual({ kind: "ok", status: 299, body_parsed: { id: "chatcmpl-1" } });
+
+    expect(
+      recognize({ resolved: true, parsed: false, status: 400, body_raw: '{"error":"bad request"}' }),
+      "400 is the first 4xx: an upstream_error, never the 3xx outcome",
+    ).toEqual({ kind: "upstream_error", status: 400, body_raw: '{"error":"bad request"}' });
+  });
+
   it("maps a resolved 2xx response with a parsed body to ok", () => {
     const result = recognize({
       resolved: true,
@@ -176,7 +214,7 @@ describe("recognize", () => {
       | UnrecognizedRejection
     >();
     expectTypeOf<ReturnType<typeof recognizeResponse>>().toEqualTypeOf<
-      Extract<Outcome, { kind: "ok" | "upstream_error" | "undecodable" }>
+      Extract<Outcome, { kind: "ok" | "upstream_error" | "undecodable" | "upstream_3xx" }>
     >();
   });
 
