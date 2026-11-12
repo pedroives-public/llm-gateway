@@ -1,5 +1,6 @@
 import type { Outcome } from "./outcome.js";
 import {
+  is3xxStatus,
   recognizeResponse,
   type ResponseFacts,
 } from "./recognize.js";
@@ -24,7 +25,7 @@ export interface OpenAIClientConfig {
 export type BufferedUpstream = (
   body: unknown,
   signal: AbortSignal,
-  log: Logger,
+  log: Logger & MinLogger,
 ) => Promise<Outcome>;
 
 export type StreamingUpstream = (
@@ -67,6 +68,17 @@ export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
       return resolveRejection(err, signal, log);
     }
 
+    if (is3xxStatus(response.status)) {
+      if (response.body !== null) {
+        const reader = response.body.getReader();
+        await cancelStream(reader, log, "upstream_adapter");
+      }
+      return {
+        kind: "upstream_3xx",
+        status: response.status,
+      };
+    }
+
     return readAndRecognize(response, signal, log);
   };
 
@@ -77,6 +89,17 @@ export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
     } catch (err) {
       // resolveRejection owns rejections: network/abort → Outcome, else re-throw.
       return resolveRejection(err, signal, log);
+    }
+
+    if (is3xxStatus(response.status)) {
+      if (response.body !== null) {
+        const reader = response.body.getReader();
+        await cancelStream(reader, log, "upstream_adapter");
+      }
+      return {
+        kind: "upstream_3xx",
+        status: response.status,
+      };
     }
 
     if (response.status < 200 || response.status >= 300) {

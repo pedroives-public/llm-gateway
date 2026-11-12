@@ -82,7 +82,7 @@ export interface ProxyRouteOptions {
   upstreamBuffered: (
     body: ChatCompletionsBody,
     signal: AbortSignal,
-    log: Logger,
+    log: Logger & MinLogger,
   ) => Promise<Outcome>;
   upstreamStreaming?: (
     body: ChatCompletionsBody,
