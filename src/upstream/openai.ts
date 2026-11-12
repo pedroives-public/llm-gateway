@@ -1,8 +1,9 @@
 import type { Outcome } from "./outcome.js";
 import {
-  is3xxStatus,
   recognizeResponse,
+  recognizeResponseHead,
   type ResponseFacts,
+  type ResponseHeadRecognition,
 } from "./recognize.js";
 import {
   resolveRejection,
@@ -41,6 +42,22 @@ export interface OpenAIClient {
 
 type CappedRead = { capped: true } | { capped: false; bodyText: string };
 
+async function recognizeAndRelease3xx(
+  response: Response,
+  log: Logger & MinLogger,
+): Promise<ResponseHeadRecognition> {
+  const recognizedHead = recognizeResponseHead(response.status);
+  
+  if (recognizedHead.kind === "upstream_3xx") {
+    if (response.body !== null) {
+      const reader = response.body.getReader();
+      await cancelStream(reader, log, "upstream_adapter");
+    }
+  }
+
+  return recognizedHead;
+}
+
 export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
   const endpoint = `${config.baseURL}/chat/completions`;
 
@@ -68,15 +85,9 @@ export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
       return resolveRejection(err, signal, log);
     }
 
-    if (is3xxStatus(response.status)) {
-      if (response.body !== null) {
-        const reader = response.body.getReader();
-        await cancelStream(reader, log, "upstream_adapter");
-      }
-      return {
-        kind: "upstream_3xx",
-        status: response.status,
-      };
+    const recognizedHead = await recognizeAndRelease3xx(response, log);
+    if (recognizedHead.kind === "upstream_3xx") {
+      return recognizedHead;
     }
 
     return readAndRecognize(response, signal, log);
@@ -91,15 +102,9 @@ export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
       return resolveRejection(err, signal, log);
     }
 
-    if (is3xxStatus(response.status)) {
-      if (response.body !== null) {
-        const reader = response.body.getReader();
-        await cancelStream(reader, log, "upstream_adapter");
-      }
-      return {
-        kind: "upstream_3xx",
-        status: response.status,
-      };
+    const recognizedHead = await recognizeAndRelease3xx(response, log);
+    if (recognizedHead.kind === "upstream_3xx") {
+      return recognizedHead;
     }
 
     if (response.status < 200 || response.status >= 300) {
