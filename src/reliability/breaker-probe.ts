@@ -14,6 +14,7 @@ import {
 } from "../observability/events.js";
 import { isInsufficientQuota } from "../upstream/quota.js";
 import type { ErrorOutcome } from "../upstream/outcome.js";
+import { assertNever } from "../upstream/assert-never.js";
 
 const PROBE_REQUEST_ID = "breaker_probe";
 
@@ -23,39 +24,46 @@ type ProbeDecision = {
 };
 
 function decideProbeOutcome(response: ErrorOutcome): ProbeDecision {
-  if (response.kind === "redirect_blocked") {
-    return {
-      outcome: "FAILURE",
-      alert: "upstream_redirect_blocked",
-    };
-  }
+  switch (response.kind) {
+    case "upstream_3xx":
+    case "redirect_blocked":
+      return {
+        outcome: "FAILURE",
+        alert: "upstream_redirect_blocked",
+      };
 
-  if (response.kind !== "upstream_error") {
-    return { outcome: "FAILURE" };
-  }
+    case "upstream_error":
+      if (response.status === 401) {
+        return { outcome: "FAILURE", alert: "upstream_auth_failure" };
+      }
 
-  if (response.status === 401) {
-    return { outcome: "FAILURE", alert: "upstream_auth_failure" };
-  }
+      if (isInsufficientQuota(response)) {
+        return { outcome: "FAILURE", alert: "upstream_quota_exhausted" };
+      }
 
-  if (isInsufficientQuota(response)) {
-    return { outcome: "FAILURE", alert: "upstream_quota_exhausted" };
-  }
+      if (
+        response.status === 400 ||
+        response.status === 404 ||
+        response.status === 413 ||
+        response.status === 422
+      ) {
+        return { outcome: "SUCCESS", alert: "upstream_probe_rejected" };
+      }
 
-  if (
-    response.status === 400 ||
-    response.status === 404 ||
-    response.status === 413 ||
-    response.status === 422
-  ) {
-    return { outcome: "SUCCESS", alert: "upstream_probe_rejected" };
-  }
+      if (response.status === 403) {
+        return { outcome: "FAILURE", alert: "upstream_probe_access_denied" };
+      }
 
-  if (response.status === 403) {
-    return { outcome: "FAILURE", alert: "upstream_probe_access_denied" };
-  }
+      return { outcome: "FAILURE" };
 
-  return { outcome: "FAILURE" };
+    case "undecodable":
+    case "network_failed":
+    case "aborted":
+      return { outcome: "FAILURE" };
+
+    default:
+      return assertNever(response);
+  }
 }
 
 type ProbeRunnerDependencies = {
