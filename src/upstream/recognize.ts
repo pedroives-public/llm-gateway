@@ -71,7 +71,7 @@ function isSuccessStatus(status: number): boolean {
   return status >= 200 && status < 300;
 }
 
-function is3xxStatus(status: number): boolean {
+export function is3xxStatus(status: number): boolean {
   return status >= 300 && status < 400;
 }
 

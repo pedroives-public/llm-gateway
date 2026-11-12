@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import http from "node:http";
 import { createOpenAIClient } from "../../src/upstream/openai.js";
-import type { Logger } from "../../src/upstream/rejection.js";
 import { listenEphemeral } from "../helpers/ephemeral-server.js";
 
 // Header-isolation pin: the upstream credential, auth headers, and endpoint
@@ -12,7 +11,7 @@ import { listenEphemeral } from "../helpers/ephemeral-server.js";
 // a real socket: a fake-upstream seam bypasses the adapter and proves nothing
 // about the headers it constructs.
 
-const silentLog: Logger = { error: () => {} };
+const silentLog = { error: () => {}, info: () => {} };
 const freshSignal = (): AbortSignal => new AbortController().signal;
 
 // Unique token planted in every consumer-controlled field; found anywhere
