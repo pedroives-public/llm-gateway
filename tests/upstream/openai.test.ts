@@ -372,6 +372,63 @@ describe("openai client: a 3xx body whose cancel rejects", () => {
   );
 });
 
+describe("openai client: the upper edge of the 2xx range", () => {
+  it("buffered call: a 299 whose body parses is ok, and its body is parsed", async () => {
+    const body = { id: "chatcmpl-299" };
+    await withServer(
+      (_req, res) => {
+        res.writeHead(299, { "content-type": "application/json" });
+        res.end(JSON.stringify(body));
+      },
+      async (baseURL) => {
+        const client = createOpenAIClient({ apiKey: "k", baseURL });
+
+        const outcome = await client.buffered(reqBody, freshSignal(), silentLog);
+
+        expect(
+          outcome,
+          "299 is the last 2xx: the adapter parses its body and the outcome is ok, never an upstream_error",
+        ).toStrictEqual({ kind: "ok", status: 299, body_parsed: body });
+      },
+    );
+  });
+
+  it("streaming call: a 299 with an SSE head is an accepted stream", async () => {
+    await withServer(
+      (_req, res) => {
+        res.writeHead(299, { "content-type": "text/event-stream" });
+        res.end("data: [DONE]\n\n");
+      },
+      async (baseURL) => {
+        const client = createOpenAIClient({ apiKey: "k", baseURL });
+
+        // A rejection becomes a value, so a failure names this cell's rule.
+        const settled = await client
+          .streaming({ ...reqBody, stream: true }, freshSignal(), silentLog)
+          .then(
+            (outcome) => ({
+              kind: outcome.kind as string,
+              status: "status" in outcome ? outcome.status : undefined,
+              reader:
+                outcome.kind === "accepted_stream" ? outcome.reader : undefined,
+            }),
+            (error: unknown) => ({
+              kind: `rejected: ${String(error)}`,
+              status: undefined,
+              reader: undefined,
+            }),
+          );
+
+        expect(
+          { kind: settled.kind, status: settled.status },
+          "299 is the last 2xx: an SSE head is an accepted stream, and its body is not read as an error body",
+        ).toStrictEqual({ kind: "accepted_stream", status: 299 });
+        await settled.reader?.cancel();
+      },
+    );
+  });
+});
+
 describe("openai client: the redirect option handed to the runtime", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
