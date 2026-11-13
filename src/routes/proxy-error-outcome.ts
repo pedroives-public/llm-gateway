@@ -227,6 +227,16 @@ export function terminalForErrorOutcome(
   }
 }
 
+// The upstream's own status for the request-complete line, only for a 3xx:
+// its terminal, REDIRECT_BLOCKED, covers a hundred statuses and the answered
+// status is the gateway's 502. Every other terminal already shows the
+// upstream's status in the recorded status or in the terminal's name.
+export function upstreamStatusForErrorOutcome(
+  outcome: ErrorOutcome,
+): number | undefined {
+  return outcome.kind === "upstream_3xx" ? outcome.status : undefined;
+}
+
 export function bodyForErrorOutcome(
   outcome: ErrorOutcome,
   errorClass: ErrorClass,
