@@ -1,129 +1,177 @@
-import { describe, it, expect } from "vitest";
 import http from "node:http";
-import type { AddressInfo } from "node:net";
-import { REDIRECT_BLOCKED_MESSAGE } from "../../src/upstream/recognize.js";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import {
+  createOpenAIClient,
+  type OpenAIClient,
+} from "../../src/upstream/openai.js";
+import { listenEphemeral } from "../helpers/ephemeral-server.js";
+import { wrapGlobalFetch } from "../helpers/global-fetch-wrapper.js";
 
-// ENVIRONMENT PIN — the Node/undici behavior the redirect discriminator
-// rests on. The recognizer keys on undici's redirect rejection shape (free
-// text, not a contract): cause.message plus the ABSENCE of cause.code. If a
-// Node bump changes either half, this file must fail loud before a redirect
-// silently falls back to the unrecognized 500 lane in production.
+// CONTRACT PIN — what a 3xx from the configured endpoint becomes, on the real
+// adapter and the runtime's own fetch. The adapter asks for redirect
+// "manual": the runtime must hand every 3xx back as a response, which the
+// adapter turns into the 3xx outcome, and must send nothing to the host that
+// Location names. If a runtime bump changes either half, this file fails
+// before a 3xx is followed or relayed in production.
 //
-// The follow control proves the apparatus: same fixture, only `redirect`
-// changes. Without it, a rejection here could be the fixture failing rather
-// than the policy acting — the two runs are only attributable together.
+// Location names a second local server that records every request it
+// receives: a followed hop is a recorded request, not an inferred one. The
+// control arm proves the apparatus: the same scene, with a wrapper around the
+// global fetch forcing redirect "follow", reaches that server once on each
+// status the runtime follows.
 
-async function withServer(
-  handler: http.RequestListener,
-  fn: (baseURL: string) => Promise<void>,
-): Promise<void> {
-  const server = http.createServer(handler);
-  server.on("clientError", () => {});
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address() as AddressInfo;
-  try {
-    await fn(`http://127.0.0.1:${port}`);
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
-}
+const silentLog = { error: () => {}, info: () => {} };
+const reqBody = { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] };
 
-// Target + redirector pair; `targetHits` is the positive oracle (a followed
-// hop is a counted connection, not an inferred one).
-async function withRedirectPair(
-  fn: (redirectorURL: string, targetHits: () => number) => Promise<void>,
-): Promise<void> {
-  let hits = 0;
-  await withServer(
-    (_req, res) => {
-      hits += 1;
+const adapterCalls = [
+  {
+    call: "buffered",
+    run: (client: OpenAIClient, signal: AbortSignal): Promise<unknown> =>
+      client.buffered(reqBody, signal, silentLog),
+  },
+  {
+    call: "streaming",
+    run: (client: OpenAIClient, signal: AbortSignal): Promise<unknown> =>
+      client.streaming({ ...reqBody, stream: true }, signal, silentLog),
+  },
+];
+
+const EVERY_3XX_STATUS = Array.from({ length: 100 }, (_, index) => 300 + index);
+// The statuses the runtime's fetch treats as a redirect to follow.
+const STATUSES_FETCH_FOLLOWS = [301, 302, 303, 307, 308];
+
+const everyStatusOnBothCalls = adapterCalls.flatMap((adapterCall) =>
+  EVERY_3XX_STATUS.map((status) => ({ ...adapterCall, status })),
+);
+const followedStatusesOnBothCalls = adapterCalls.flatMap((adapterCall) =>
+  STATUSES_FETCH_FOLLOWS.map((status) => ({ ...adapterCall, status })),
+);
+
+describe("contract pin — a 3xx from the configured endpoint, real adapter and runtime fetch", () => {
+  // Paths of the requests the second server received, in arrival order.
+  const hopRequests: string[] = [];
+  let hop: { port: number; close: () => Promise<void> };
+  let upstream: { port: number; close: () => Promise<void> };
+  let hopServer: http.Server;
+  let upstreamServer: http.Server;
+
+  const hopRequestsFor = (cell: string): number =>
+    hopRequests.filter((path) => path === `/${cell}`).length;
+
+  // The upstream answers the status its path names; with "with-location" the
+  // answer carries a Location that names the second server and the cell.
+  const upstreamBaseURL = (
+    status: number,
+    location: "with-location" | "without-location",
+    cell: string,
+  ): string => `http://127.0.0.1:${upstream.port}/${status}/${location}/${cell}`;
+
+  beforeAll(async () => {
+    hopServer = http.createServer((req, res) => {
+      req.resume();
+      hopRequests.push(req.url ?? "");
       res.writeHead(204);
       res.end();
-    },
-    async (targetURL) => {
-      await withServer(
-        (_req, res) => {
-          res.writeHead(302, { location: targetURL });
-          res.end();
-        },
-        async (redirectorURL) => {
-          await fn(redirectorURL, () => hits);
-        },
+    });
+    hop = await listenEphemeral(hopServer);
+
+    upstreamServer = http.createServer((req, res) => {
+      req.resume();
+      const [, status, location, cell] = (req.url ?? "").split("/");
+      res.writeHead(
+        Number(status),
+        location === "with-location"
+          ? { location: `http://127.0.0.1:${hop.port}/${cell ?? ""}` }
+          : {},
       );
+      res.end();
+    });
+    upstream = await listenEphemeral(upstreamServer);
+  });
+
+  afterAll(async () => {
+    upstreamServer.closeAllConnections();
+    hopServer.closeAllConnections();
+    await upstream.close();
+    await hop.close();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each(everyStatusOnBothCalls)(
+    "$call call, $status with Location: the 3xx outcome, and nothing reaches the host Location names",
+    async ({ call, run, status }) => {
+      const cell = `${call}-${status}`;
+      const client = createOpenAIClient({
+        apiKey: "k",
+        baseURL: upstreamBaseURL(status, "with-location", cell),
+      });
+
+      const outcome = await run(client, new AbortController().signal);
+
+      expect(
+        outcome,
+        "every status from 300 to 399 reaches the adapter as a response and becomes the 3xx outcome carrying that status: the runtime must neither reject it nor follow it",
+      ).toStrictEqual({ kind: "upstream_3xx", status });
+      expect(
+        hopRequestsFor(cell),
+        "nothing may reach the host that Location names",
+      ).toBe(0);
     },
   );
-}
 
-// Mirrors the production call shape (src/upstream/openai.ts); only `redirect`
-// is the variable under test.
-function attempt(url: string, redirect: "error" | "follow"): Promise<Response> {
-  return fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ probe: true }),
-    redirect,
-  });
-}
+  it.each(adapterCalls)(
+    "$call call, 302 without Location: the 3xx outcome, and the second server receives nothing",
+    async ({ call, run }) => {
+      const requestsBefore = hopRequests.length;
+      const client = createOpenAIClient({
+        apiKey: "k",
+        baseURL: upstreamBaseURL(302, "without-location", `${call}-bare`),
+      });
 
-async function rejectionOf(fn: () => Promise<unknown>): Promise<unknown> {
-  try {
-    await fn();
-  } catch (err) {
-    return err;
-  }
-  throw new Error("expected the fetch to reject, but it resolved");
-}
+      const outcome = await run(client, new AbortController().signal);
 
-function causeOf(err: unknown): unknown {
-  if (typeof err === "object" && err !== null && "cause" in err) {
-    return err.cause;
-  }
-  return undefined;
-}
+      expect(
+        outcome,
+        "a 3xx is recognized by its status, with or without Location",
+      ).toStrictEqual({ kind: "upstream_3xx", status: 302 });
+      expect(
+        hopRequests.length,
+        "no request reached the second server during the cell",
+      ).toBe(requestsBefore);
+    },
+  );
 
-function messageOf(x: unknown): string | undefined {
-  if (
-    typeof x === "object" &&
-    x !== null &&
-    "message" in x &&
-    typeof x.message === "string"
-  ) {
-    return x.message;
-  }
-  return undefined;
-}
+  it.each(followedStatusesOnBothCalls)(
+    'CONTROL, $call call, $status: with redirect "follow" forced, the runtime reaches the host Location names once',
+    async ({ call, run, status }) => {
+      const cell = `follow-${call}-${status}`;
+      const wrapper = wrapGlobalFetch("follow");
+      const client = createOpenAIClient({
+        apiKey: "k",
+        baseURL: upstreamBaseURL(status, "with-location", cell),
+      });
 
-function codeOf(x: unknown): string | undefined {
-  if (
-    typeof x === "object" &&
-    x !== null &&
-    "code" in x &&
-    typeof x.code === "string"
-  ) {
-    return x.code;
-  }
-  return undefined;
-}
+      await run(client, new AbortController().signal);
 
-describe("environment pin — undici blocked-redirect rejection shape", () => {
-  it("rejects with the two-half shape the recognizer depends on", async () => {
-    await withRedirectPair(async (redirectorURL, targetHits) => {
-      const err = await rejectionOf(() => attempt(redirectorURL, "error"));
-      const cause = causeOf(err);
-
-      expect(messageOf(cause)).toBe(REDIRECT_BLOCKED_MESSAGE);
-      expect(codeOf(cause)).not.toBeDefined();
-      expect(err).toBeInstanceOf(Error);
-      expect(targetHits()).toEqual(0);
-    });
-  });
-
-  it("CONTROL: the same fixture with redirect:'follow' resolves and hits the target", async () => {
-    await withRedirectPair(async (redirectorURL, targetHits) => {
-      const response = await attempt(redirectorURL, "follow");
-
-      expect(response.status).toBe(204);
-      expect(targetHits()).toBe(1);
-    });
-  });
+      expect(
+        wrapper.responseStatuses,
+        "control: the runtime followed the hop and handed back the second server's 204; without this the zero of the other cells could be a dead fixture",
+      ).toStrictEqual([204]);
+      expect(
+        hopRequestsFor(cell),
+        "control: the second server recorded the followed hop exactly once",
+      ).toBe(1);
+    },
+  );
 });
