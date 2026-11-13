@@ -1,0 +1,36 @@
+import { vi } from "vitest";
+
+export type RedirectOption = RequestInit["redirect"];
+
+export interface GlobalFetchWrapper {
+  /** The redirect option of each call, as the caller wrote it. */
+  readonly sentRedirects: readonly RedirectOption[];
+}
+
+// Wraps the runtime's global fetch until vi.unstubAllGlobals(): every call is
+// recorded and delegated to the runtime's own fetch, so sockets and the
+// runtime's abort wiring stay real. With `forceRedirect`, the delegated call
+// carries that option in place of the caller's. That is the control arm of a
+// pair: the same scene under another redirect option, with the adapter
+// untouched, because the adapter takes no fetch parameter.
+export function wrapGlobalFetch(
+  forceRedirect?: RedirectOption,
+): GlobalFetchWrapper {
+  const runtimeFetch = globalThis.fetch;
+  const sentRedirects: RedirectOption[] = [];
+
+  vi.stubGlobal(
+    "fetch",
+    (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      sentRedirects.push(init?.redirect);
+      return runtimeFetch(
+        input,
+        forceRedirect === undefined
+          ? init
+          : { ...init, redirect: forceRedirect },
+      );
+    },
+  );
+
+  return { sentRedirects };
+}

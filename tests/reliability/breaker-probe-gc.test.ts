@@ -7,6 +7,10 @@ import { PROBE_CLOCK_MS } from "../../src/config.js";
 import { createProbeRunner } from "../../src/reliability/breaker-probe.js";
 import { createOpenAIClient } from "../../src/upstream/openai.js";
 import { listenEphemeral } from "../helpers/ephemeral-server.js";
+import {
+  wrapGlobalFetch,
+  type RedirectOption,
+} from "../helpers/global-fetch-wrapper.js";
 
 // A real garbage collection, without the --expose-gc flag on the runner.
 v8.setFlagsFromString("--expose-gc");
@@ -23,6 +27,12 @@ const KEEPALIVE_EVERY_MS = 200;
 // sentence, under Vitest's test timeout set on the cell.
 const HEAD_DEADLINE_MS = 2_000;
 const COLLECTION_DEADLINE_MS = 2_000;
+// How long the cell keeps collecting after the canary is gone before it reads
+// the listener count. The control arm lost its listener at most 38 ms after
+// the canary's collection (10 runs, Node 22.22.3, 20 ms poll step); the window
+// is over ten times that, so an arm that keeps its listener is read only after
+// a removal would have shown.
+const LISTENER_OBSERVATION_MS = 500;
 const PROBE_END_DEADLINE_MS = 2_000;
 const SOCKET_CLOSE_DEADLINE_MS = 2_000;
 const POLL_STEP_MS = 20;
@@ -105,52 +115,94 @@ async function startScene(mode: "keepalive" | "stalled") {
   };
 }
 
+// An object nothing else references: once it is gone, a collection has run.
+function newCanary(): WeakRef<object> {
+  return new WeakRef({});
+}
+
+// The same scene under two redirect options. "manual" is what the adapter
+// writes; "error" is forced by the wrapper around the global fetch and is the
+// control arm: it reproduces the abort the runtime loses after a collection.
+const arms: ReadonlyArray<{
+  option: "manual" | "error";
+  forceRedirect: RedirectOption;
+  listenersAfterCollection: number;
+  listenerRule: string;
+}> = [
+  {
+    option: "manual",
+    forceRedirect: undefined,
+    listenersAfterCollection: 2,
+    listenerRule:
+      'under redirect "manual" the runtime keeps its abort listener across a collection, so an abort still reaches the read',
+  },
+  {
+    option: "error",
+    forceRedirect: "error",
+    listenersAfterCollection: 1,
+    listenerRule:
+      'control arm: under redirect "error" a collection removes the runtime\'s abort listener; if it stays, the arm no longer reproduces the lost abort',
+  },
+];
+
+// With keepalives, a chunk after the clock also wakes the probe's read loop;
+// a stalled body sends nothing, so only the cancel can end the read.
+const modes = ["keepalive", "stalled"] as const;
+const cells = arms.flatMap((arm) => modes.map((mode) => ({ ...arm, mode })));
+
 describe("breaker probe — real runtime, after a garbage collection", () => {
   let close: (() => Promise<void>) | undefined;
 
   afterEach(async () => {
     await close?.();
     close = undefined;
+    vi.unstubAllGlobals();
   });
 
-  // With keepalives, a chunk after the clock also wakes the probe's read loop;
-  // a stalled body sends nothing, so only the cancel can end the read.
-  it.each(["keepalive", "stalled"] as const)(
-    "ends at its clock even though the runtime lost the abort (%s)",
-    async (mode) => {
+  it.each(cells)(
+    'redirect "$option", $mode upstream: ends at its clock by the reader cancel',
+    async ({ mode, forceRedirect, listenersAfterCollection, listenerRule }) => {
+      const wrapper = wrapGlobalFetch(forceRedirect);
       const scene = await startScene(mode);
       close = scene.close;
+      const canary = newCanary();
 
       const pendingProbe = scene.start();
       await waitFor(() => scene.headsSent() === 1, HEAD_DEADLINE_MS, "the upstream never sent the probe's head");
       await sleep(KEEPALIVE_EVERY_MS);
       const listenersBeforeCollection = scene.abortListeners();
 
-      collectGarbage();
       await waitFor(
         () => {
           collectGarbage();
-          return scene.abortListeners() < listenersBeforeCollection;
+          return canary.deref() === undefined;
         },
         COLLECTION_DEADLINE_MS,
-        "no collection removed the runtime's abort listener: the scene no longer reproduces the lost abort",
+        "the canary was not collected: there is no evidence that a garbage collection ran",
       );
-      const listenersAfterCollection = scene.abortListeners();
+      // Keep collecting through the window, so a removal that follows the
+      // collection has shown before the count is read.
+      const canaryGoneAt = performance.now();
+      while (performance.now() - canaryGoneAt < LISTENER_OBSERVATION_MS) {
+        collectGarbage();
+        await sleep(POLL_STEP_MS);
+      }
 
+      expect(
+        wrapper.sentRedirects,
+        'the adapter wrote redirect "manual" in one call: the arms differ only by what the wrapper forces',
+      ).toStrictEqual(["manual"]);
       expect(
         listenersBeforeCollection,
         "before the collection the probe's signal carries two abort listeners: the runner's cancel and the runtime's own",
       ).toBe(2);
-      expect(
-        listenersAfterCollection,
-        "control: the collection removed the runtime's abort listener, so an abort can no longer reach the read",
-      ).toBe(1);
+      expect(scene.abortListeners(), listenerRule).toBe(listenersAfterCollection);
 
       await vi.advanceTimersByTimeAsync(PROBE_CLOCK_MS);
       await settlesWithin(
         pendingProbe,
         PROBE_END_DEADLINE_MS,
-        "the probe never ended after its clock: the lost abort still holds it",
+        "the probe never ended after its clock: the body read still holds it",
       );
 
       expect(scene.vote, "the clock decides the probe once").toHaveBeenCalledTimes(1);

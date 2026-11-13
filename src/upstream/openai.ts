@@ -73,10 +73,12 @@ export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
         "content-type": "application/json",
       },
       body: JSON.stringify(body),
-      // Fail-closed egress: a 3xx from the configured endpoint is an
-      // operator-config fault; following it would replay the request
-      // (tenant body included) against an unvetted host.
-      redirect: "error",
+      // A 3xx from the configured endpoint is an operator-config fault. With
+      // "manual" the runtime follows nothing and returns the 3xx as a
+      // response, which the adapter decides at the head. "error" refuses it
+      // too, but loses the caller's abort on a body read after a garbage
+      // collection (measured on Node 22).
+      redirect: "manual",
       signal,
     });
 
