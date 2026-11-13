@@ -26,7 +26,6 @@ type ProbeDecision = {
 function decideProbeOutcome(response: ErrorOutcome): ProbeDecision {
   switch (response.kind) {
     case "upstream_3xx":
-    case "redirect_blocked":
       return {
         outcome: "FAILURE",
         alert: "upstream_redirect_blocked",

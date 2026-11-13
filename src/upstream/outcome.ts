@@ -20,9 +20,6 @@ export type Outcome =
       cause_name?: string;
     }
   | {
-      kind: "redirect_blocked";
-    }
-  | {
       kind: "ok";
       status: number;
       body_parsed: unknown;

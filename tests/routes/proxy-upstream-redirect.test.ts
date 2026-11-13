@@ -83,7 +83,7 @@ async function injectScripted(script: Outcome[]): Promise<ProbeResult> {
 describe("upstream redirect blocked — sanitized terminal, breaker failure", () => {
   it("answers 502 upstream-redirect-blocked: sanitized body, single attempt, breaker FAILURE, req_complete emitted", async () => {
     const { res, recorded, upstreamCalls, capture } = await injectScripted([
-      { kind: "redirect_blocked" },
+      { kind: "upstream_3xx", status: 302 },
     ]);
 
     expect(res.statusCode).toBe(502);

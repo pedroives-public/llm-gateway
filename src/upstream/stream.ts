@@ -25,7 +25,6 @@ export function isAcceptedStream(
     case "upstream_error":
     case "undecodable":
     case "network_failed":
-    case "redirect_blocked":
     case "upstream_3xx":
     case "ok":
     case "aborted":

@@ -33,10 +33,7 @@ export type UnrecognizedRejection = {
 export type RejectionFacts = Extract<RawFacts, { resolved: false }>;
 export type ResponseFacts = Extract<RawFacts, { resolved: true }>;
 export type RejectionRecognition =
-  | Extract<
-      Outcome,
-      { kind: "network_failed" | "aborted" | "redirect_blocked" }
-    >
+  | Extract<Outcome, { kind: "network_failed" | "aborted" }>
   | UnrecognizedRejection;
 export type ResponseRecognition = Extract<
   Outcome,
