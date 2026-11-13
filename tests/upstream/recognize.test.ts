@@ -76,6 +76,18 @@ describe("recognize", () => {
     ).toEqual({ kind: "upstream_error", status: 400, body_raw: '{"error":"bad request"}' });
   });
 
+  it("keeps 199 out of the 2xx range and 299 inside it: the 2xx range ends at its own edges", () => {
+    expect(
+      recognize({ resolved: true, parsed: false, status: 199, body_raw: "not json" }),
+      "199 is not a 2xx: a body that does not parse is an upstream_error, never undecodable",
+    ).toEqual({ kind: "upstream_error", status: 199, body_raw: "not json" });
+
+    expect(
+      recognize({ resolved: true, parsed: false, status: 299, body_raw: "not json" }),
+      "299 is the last 2xx: a body that does not parse is undecodable, never an upstream_error",
+    ).toEqual({ kind: "undecodable", undecodable_kind: "unparsable_body" });
+  });
+
   it("maps a resolved 2xx response with a parsed body to ok", () => {
     const result = recognize({
       resolved: true,
