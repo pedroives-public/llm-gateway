@@ -48,6 +48,7 @@ import {
   deriveRetryDisposition,
   isSanitizedUpstreamTerminal,
   terminalForErrorOutcome,
+  upstreamStatusForErrorOutcome,
 } from "./proxy-error-outcome.js";
 import { sendProxyError } from "./proxy-error-handler.js";
 import {
@@ -707,6 +708,7 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
             attempts,
             retry_disposition: retryDisposition,
             terminal: reqCompleteTerminal,
+            upstream_status: upstreamStatusForErrorOutcome(outcome),
           });
 
           reply

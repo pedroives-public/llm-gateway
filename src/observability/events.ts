@@ -131,6 +131,8 @@ export interface ReqCompletePayload {
   attempts: number;
   retry_disposition: RetryDisposition;
   terminal?: ReqCompleteTerminal;
+  // The upstream's status, present only with the REDIRECT_BLOCKED terminal.
+  upstream_status?: number;
 }
 
 export interface ReqRejectPayload {

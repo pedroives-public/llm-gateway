@@ -211,11 +211,31 @@ stop. This condition never self-heals.
 
 **Meaning**
 
-The configured upstream endpoint (`OPENAI_BASE_URL`) answered a 3xx
-redirect. The gateway refuses to follow redirects (fail-closed egress):
+The configured upstream endpoint (`OPENAI_BASE_URL`) answered a status
+from 300 to 399. The gateway never follows a redirect (fail-closed egress):
 following one would replay the request — tenant prompt body and the
-deployment credential included — against a host nobody vetted. A redirect
-has exactly three possible causes, all operator-side, discriminated below.
+deployment credential included — against a host nobody vetted. It never
+relays a 3xx to the tenant either: every status in the range ends as this
+alert and the sanitized `502`.
+
+Which status it was is in the tenant's `req_complete` line, in
+`upstream_status`, a number written only with `terminal:
+"REDIRECT_BLOCKED"`:
+
+```json
+{"event":"req_complete","status":502,"error_class":"upstream-redirect-blocked","terminal":"REDIRECT_BLOCKED","upstream_status":302}
+```
+
+- `301`, `302`, `303`, `307`, `308` — a redirect with a target. It has
+  exactly three possible causes, all operator-side, discriminated below.
+- `300`, `304`, `305`, `306` or any other 3xx — not a redirect a client
+  follows, and usually without a `Location`. None of them is an answer the
+  gateway expects from a chat completions endpoint: treat it as **cause 3**
+  (something on the path answered in the provider's place).
+
+A 3xx met only by the breaker's recovery probe raises the same alert with
+`req_id: "breaker_probe"` and writes no `req_complete`: read the status by
+reproducing it (Step 1).
 
 **Diagnosis**
 
@@ -227,6 +247,8 @@ curl -s -o /dev/null -D - -X POST "$OPENAI_BASE_URL/chat/completions" | sed -n '
 
 - `HTTP/… 3xx` with a `Location:` header → confirmed from here; note the
   Location value and go to Step 2.
+- `HTTP/… 3xx` without a `Location:` header (`300`, `304`, `305`, `306`…)
+  → confirmed from here, with no target to classify: go to **cause 3**.
 - No 3xx (401/404/200…) → the redirect does not reproduce from your
   machine: suspect **cause 3** (an intermediary on the deployment's network
   path, not on yours). Re-run the same curl from inside the deployment
