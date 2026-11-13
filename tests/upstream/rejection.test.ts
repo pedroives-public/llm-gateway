@@ -196,7 +196,7 @@ describe("resolveRejection", () => {
     });
   });
 
-  describe("redirect rejections (no cause.code, undici redirect message)", () => {
+  describe("rejections whose cause carries no code", () => {
     it("re-throws and logs the boundary payload for the runtime's redirect rejection text: no rejection becomes a redirect outcome", () => {
       const err = new TypeError("fetch failed", {
         cause: new Error("unexpected redirect"),
@@ -227,7 +227,7 @@ describe("resolveRejection", () => {
       });
     });
 
-    it("keeps the NETWORK lane when a cause.code is present, even with the redirect message (code absence is required)", () => {
+    it("keeps the NETWORK lane when a cause.code is present, even with the redirect text", () => {
       const cause = new Error("unexpected redirect");
       (cause as Error & { code?: string }).code = "ECONNRESET";
       const err = new TypeError("fetch failed", { cause });
@@ -248,7 +248,7 @@ describe("resolveRejection", () => {
       expect(logger.error).not.toHaveBeenCalled();
     });
 
-    it("re-throws and logs the boundary payload when the no-code message is not the redirect one (open class stays out)", () => {
+    it("re-throws and logs the boundary payload for any other no-code message (open class stays out)", () => {
       const err = new TypeError("fetch failed", {
         cause: new Error("some future undici failure"),
       });
