@@ -106,9 +106,10 @@ export function createProbeRunner({
     let alert: AlertName | undefined;
     let caughtError: { value: unknown } | undefined;
 
-    // After a garbage collection, with redirect "error", the abort no longer
-    // reaches a body read in progress (the runtime drops its abort listener).
-    // Cancelling the reader still ends the read and closes the connection.
+    // Ends a body read at an abort without relying on the runtime to deliver
+    // that abort to the read: a runtime can drop its abort listener after a
+    // garbage collection (redirect "error" did, on Node 22). Cancelling the
+    // reader ends the read and closes the connection either way.
     const cancelReaderAfterAbort = (): void => {
       if (reader === undefined || readerCancelledByAbort) return;
 
@@ -137,7 +138,8 @@ export function createProbeRunner({
     });
     // Registered before the request starts, so it runs before the runtime's
     // own abort listener: the cancel finds the body still open instead of
-    // already errored.
+    // already errored, and no upstream_cancel_rejected line is written at
+    // every expiry.
     probeSignal.addEventListener("abort", cancelReaderAfterAbort, {
       once: true,
     });
