@@ -187,10 +187,7 @@ describe("recognize", () => {
 
   it("exposes branch-specific recognizers with branch-specific return types", () => {
     expectTypeOf<ReturnType<typeof recognizeRejection>>().toEqualTypeOf<
-      | Extract<
-          Outcome,
-          { kind: "network_failed" | "aborted" | "redirect_blocked" }
-        >
+      | Extract<Outcome, { kind: "network_failed" | "aborted" }>
       | UnrecognizedRejection
     >();
     expectTypeOf<ReturnType<typeof recognizeResponse>>().toEqualTypeOf<

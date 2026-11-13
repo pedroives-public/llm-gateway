@@ -17,7 +17,7 @@ import { makeLogCapture } from "../log-capture.js";
 describe("upstream redirect blocked — first-occurrence operator alert", () => {
   it("two blocked redirects → two req_complete records but exactly ONE operational_alert", async () => {
     const upstreamRedirect = (): Promise<Outcome> =>
-      Promise.resolve({ kind: "redirect_blocked" });
+      Promise.resolve({ kind: "upstream_3xx", status: 302 });
     const capture = makeLogCapture();
 
     const app = await buildApp({
