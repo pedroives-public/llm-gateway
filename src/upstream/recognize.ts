@@ -57,7 +57,9 @@ const POSSIBLY_POST_SEND_CODES: readonly string[] = [
   "UND_ERR_SOCKET",
 ];
 
-function isSuccessStatus(status: number): boolean {
+// The one definition of a 2xx: the body-stage recognition and the adapter's
+// two branch points consult it.
+export function isSuccessStatus(status: number): boolean {
   return status >= 200 && status < 300;
 }
 

@@ -1,5 +1,6 @@
 import type { Outcome } from "./outcome.js";
 import {
+  isSuccessStatus,
   recognizeResponse,
   recognizeResponseHead,
   type ResponseFacts,
@@ -113,7 +114,7 @@ export function createOpenAIClient(config: OpenAIClientConfig): OpenAIClient {
       return recognizedHead;
     }
 
-    if (response.status < 200 || response.status >= 300) {
+    if (!isSuccessStatus(response.status)) {
       const recognized = await readAndRecognize(response, signal, log);
 
       // A rejected or capped read passes through as it is; only recognition
@@ -185,7 +186,7 @@ function toResponseFacts(
   bodyText: string,
   retryAfter: string | undefined,
 ): ResponseFacts {
-  if (status >= 200 && status < 300) {
+  if (isSuccessStatus(status)) {
     try {
       return {
         resolved: true,
