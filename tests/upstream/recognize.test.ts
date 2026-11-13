@@ -180,14 +180,17 @@ describe("recognize", () => {
     expect(result).toEqual({ kind: "unrecognized" });
   });
 
-  it("maps the undici redirect rejection message to redirect_blocked", () => {
+  it("returns the unrecognized variant for the runtime's redirect rejection text: a 3xx is recognized by its status, never by a message", () => {
     const result = recognize({
       resolved: false,
       rejection: "redirect",
       cause_message: "unexpected redirect",
     });
 
-    expect(result).toEqual({ kind: "redirect_blocked" });
+    expect(
+      result,
+      'no rejection is recognized as a redirect by its text: under redirect "manual" a 3xx arrives as a response and is recognized by its status',
+    ).toEqual({ kind: "unrecognized" });
   });
 
   it("returns the unrecognized variant for a redirect cause message outside the exact match (fail-loud on undici rewording)", () => {

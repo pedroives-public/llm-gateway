@@ -65,11 +65,6 @@ const POSSIBLY_POST_SEND_CODES: readonly string[] = [
   "UND_ERR_SOCKET",
 ];
 
-// Free-text internals of undici's redirect:"error" rejection, not a contract.
-// Matched exactly on purpose: if a Node bump rewords it, redirects fall to
-// unrecognized (fail-loud 500 + boundary log) instead of silently matching.
-export const REDIRECT_BLOCKED_MESSAGE = "unexpected redirect";
-
 function isSuccessStatus(status: number): boolean {
   return status >= 200 && status < 300;
 }
@@ -112,9 +107,6 @@ export function recognizeRejection(raw: RejectionFacts): RejectionRecognition {
       }
       return { kind: "unrecognized" };
     case "redirect":
-      if (raw.cause_message === REDIRECT_BLOCKED_MESSAGE) {
-        return { kind: "redirect_blocked" };
-      }
       return { kind: "unrecognized" };
     default:
       return assertNever(raw);
