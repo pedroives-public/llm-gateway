@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 import {
   afterEach,
@@ -9,7 +10,10 @@ import {
 } from "vitest";
 import type { StreamingUpstream } from "../../src/upstream/openai.js";
 import type { StreamingAdapter } from "../../src/upstream/stream.js";
+import { stubBreaker } from "../helpers/breaker-stubs.js";
 import { listenEphemeral } from "../helpers/ephemeral-server.js";
+import { bearer, fakeAuthDb } from "../helpers/fake-auth-db.js";
+import { makeLogCapture } from "../log-capture.js";
 
 // Every way a recovery probe can end, through the real adapter and a real
 // socket: the adapter decides which outcome each response becomes, so a fake
@@ -183,6 +187,80 @@ describe("breaker probe — outcome table", () => {
       "a probe repeats every 60 s and must summon the operator only once",
     ).toEqual(["upstream_probe_access_denied"]);
   });
+
+  // The redirect alert is once per process and shared with the tenant path.
+  // The tenant request runs through the real route, loaded in the same module
+  // registry as the probe, so both reach the same record of fired alerts.
+  it.each([
+    { scene: "300", response: json(300) },
+    {
+      scene: "302 with Location",
+      response: {
+        status: 302,
+        headers: { location: "http://127.0.0.1:1/" },
+        body: "",
+      },
+    },
+  ])(
+    "$scene after a tenant request raised the redirect alert votes FAILURE and raises nothing",
+    async ({ response }) => {
+      const { buildApp } = await import("../../src/app.js");
+      const { proxyRoute } = await import("../../src/routes/proxy.js");
+      const { createProbeRunner } = await import(
+        "../../src/reliability/breaker-probe.js"
+      );
+      const tenantCapture = makeLogCapture();
+      const app = await buildApp({
+        logger: tenantCapture.logger,
+        db: fakeAuthDb(randomUUID()),
+        registerProtected: async (scope) => {
+          await scope.register(proxyRoute, {
+            breaker: stubBreaker,
+            upstreamBuffered: () =>
+              Promise.resolve({ kind: "upstream_3xx", status: 302 }),
+          });
+        },
+      });
+      try {
+        await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { authorization: bearer() },
+          payload: {
+            model: "gpt-4o",
+            messages: [{ role: "user", content: "hi" }],
+          },
+        });
+      } finally {
+        await app.close();
+      }
+      // Positive control: without the tenant's alert in this process, a
+      // silent probe below would say nothing about the rule.
+      expect(
+        tenantCapture.byEvent("operational_alert").map((line) => line.alert),
+        "the scene needs the tenant request to have raised the redirect alert",
+      ).toEqual(["upstream_redirect_blocked"]);
+
+      const captured = capturingLog();
+      const vote = vi.fn();
+      await withUpstream(response, async ({ streaming }) => {
+        await createProbeRunner({
+          streaming,
+          model: "probe-model",
+          log: captured.log,
+        })(vote, NOT_CLOSING);
+      });
+
+      expect(
+        vote.mock.calls,
+        "a 3xx proves no recovery, whoever alerted first",
+      ).toEqual([["FAILURE"]]);
+      expect(
+        captured.alerts(),
+        "the redirect alert fires once per process and the tenant path already raised it: the probe adds nothing",
+      ).toEqual([]);
+    },
+  );
 
   // Alerts fire once per process by name: if a refused config and a denied
   // account shared a name, the earlier one would silence the outage.
