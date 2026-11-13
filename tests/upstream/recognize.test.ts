@@ -8,7 +8,7 @@ import type { Outcome, ErrorOutcome } from "../../src/upstream/outcome.js";
 import { describe, it, expect, expectTypeOf } from "vitest";
 
 describe("recognize", () => {
-  it("maps a resolved non-2xx response to upstream_error carrying status and raw body", () => {
+  it("maps a resolved 5xx response to upstream_error carrying status and raw body", () => {
     const result = recognize({
       resolved: true,
       parsed: false,
@@ -23,7 +23,7 @@ describe("recognize", () => {
     });
   });
 
-  it("maps a resolved 4xx the same way as a 5xx — any non-2xx is upstream_error", () => {
+  it("maps a resolved 4xx the same way as a 5xx: upstream_error", () => {
     const result = recognize({
       resolved: true,
       parsed: false,
