@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import {
@@ -214,19 +214,32 @@ async function holdOpenUpstream(
   };
 }
 
+type AdapterLog = Parameters<OpenAIClient["buffered"]>[2];
+
+// The two calls of the adapter, driven the same way: every custody rule of a
+// 3xx body holds on both.
+const adapterCalls = [
+  {
+    call: "buffered",
+    run: (
+      client: OpenAIClient,
+      signal: AbortSignal,
+      log: AdapterLog,
+    ): Promise<unknown> => client.buffered(reqBody, signal, log),
+  },
+  {
+    call: "streaming",
+    run: (
+      client: OpenAIClient,
+      signal: AbortSignal,
+      log: AdapterLog,
+    ): Promise<unknown> =>
+      client.streaming({ ...reqBody, stream: true }, signal, log),
+  },
+];
+
 describe("openai client: custody of a 3xx body", () => {
-  it.each([
-    {
-      call: "buffered",
-      run: (client: OpenAIClient, signal: AbortSignal): Promise<unknown> =>
-        client.buffered(reqBody, signal, silentLog),
-    },
-    {
-      call: "streaming",
-      run: (client: OpenAIClient, signal: AbortSignal): Promise<unknown> =>
-        client.streaming({ ...reqBody, stream: true }, signal, silentLog),
-    },
-  ])(
+  it.each(adapterCalls)(
     "$call call: a 300 whose body stays open is decided at the head and its body is released",
     async ({ run }) => {
       const upstream = await holdOpenUpstream(300, "held");
@@ -238,7 +251,7 @@ describe("openai client: custody of a 3xx body", () => {
         });
 
         const outcome = await withinDeadline(
-          run(client, caller.signal),
+          run(client, caller.signal, silentLog),
           UPSTREAM_CLOSE_DEADLINE_MS,
           "the adapter did not decide the 3xx at the response head: no outcome before the deadline while the body was open",
         );
@@ -259,6 +272,96 @@ describe("openai client: custody of a 3xx body", () => {
         caller.abort();
         await upstream.close();
       }
+    },
+  );
+
+  it.each(adapterCalls)(
+    "$call call: a 304, which carries no body, is the 3xx outcome and nothing is released",
+    async ({ run }) => {
+      await withServer(
+        (_req, res) => {
+          res.writeHead(304);
+          res.end();
+        },
+        async (baseURL) => {
+          const client = createOpenAIClient({ apiKey: "k", baseURL });
+
+          const settled = await run(client, freshSignal(), silentLog).then(
+            (outcome) => outcome,
+            (error: unknown) => `rejected: ${String(error)}`,
+          );
+
+          expect(
+            settled,
+            "a 3xx without a body is decided at the head and has nothing to release: the adapter must not ask a missing body for a reader",
+          ).toStrictEqual({ kind: "upstream_3xx", status: 304 });
+        },
+      );
+    },
+  );
+});
+
+class AbortLikeError extends Error {
+  override name = "AbortError";
+}
+
+describe("openai client: a 3xx body whose cancel rejects", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each(adapterCalls)(
+    "$call call: the rejected cancel is one log line and the 3xx outcome is kept",
+    async ({ run }) => {
+      // The runtime's fetch rejects a cancel only on a body that already
+      // errored, so the response reaches the adapter through a wrapper around
+      // the global fetch: a real ReadableStream whose source rejects its
+      // cancel.
+      const body = new ReadableStream<Uint8Array>({
+        cancel() {
+          return Promise.reject(new AbortLikeError("SECRET-IN-MESSAGE"));
+        },
+      });
+      vi.stubGlobal("fetch", () =>
+        Promise.resolve(new Response(body, { status: 300 })),
+      );
+      const lines: object[] = [];
+      const log: AdapterLog = {
+        error: () => {},
+        info: (line) => {
+          lines.push(line);
+        },
+      };
+      const client = createOpenAIClient({
+        apiKey: "k",
+        baseURL: "http://upstream.invalid",
+      });
+
+      // The stubbed body never ends, so an adapter that waited for it would
+      // hang: the deadline turns that into a named failure.
+      const settled = await withinDeadline(
+        run(client, freshSignal(), log).then(
+          (outcome) => outcome,
+          (error: unknown) => `rejected: ${String(error)}`,
+        ),
+        UPSTREAM_CLOSE_DEADLINE_MS,
+        "the adapter did not decide the 3xx at the response head: no outcome before the deadline while the body was open",
+      );
+
+      expect(
+        settled,
+        "a cancel that rejects is a cleanup observation: it must not replace the 3xx outcome",
+      ).toStrictEqual({ kind: "upstream_3xx", status: 300 });
+      expect(
+        lines,
+        "a rejected cancel of a 3xx body writes exactly one line, from the adapter's site, carrying the error's name and never its message",
+      ).toStrictEqual([
+        {
+          event: "upstream_cancel_rejected",
+          site: "upstream_adapter",
+          err_name: "AbortError",
+        },
+      ]);
     },
   );
 });
