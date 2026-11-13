@@ -91,7 +91,7 @@ describe("openai buffered client", () => {
     );
   });
 
-  it("blocks an upstream redirect as redirect_blocked and never contacts the hop target", async () => {
+  it("returns a 302 as the 3xx outcome and never contacts the hop target", async () => {
     let targetHits = 0;
     await withServer(
       (_req, res) => {
@@ -112,9 +112,15 @@ describe("openai buffered client", () => {
               freshSignal(),
               silentLog,
             );
-            expect(outcome).toEqual({ kind: "redirect_blocked" });
+            expect(
+              outcome,
+              "a 302 reaches the adapter as a response and becomes the 3xx outcome: the runtime must neither reject it nor follow it",
+            ).toStrictEqual({ kind: "upstream_3xx", status: 302 });
             // The egress defense itself: nothing reached the redirect target.
-            expect(targetHits).toBe(0);
+            expect(
+              targetHits,
+              "nothing may reach the host that Location names",
+            ).toBe(0);
           },
         );
       },
@@ -362,6 +368,38 @@ describe("openai client: a 3xx body whose cancel rejects", () => {
           err_name: "AbortError",
         },
       ]);
+    },
+  );
+});
+
+describe("openai client: the redirect option handed to the runtime", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each(adapterCalls)(
+    '$call call: sends exactly one request, with redirect "manual"',
+    async ({ run }) => {
+      // The option is written inside the adapter and is not a setting, so the
+      // cell reads it at the point where the adapter hands the request to the
+      // runtime: a wrapper around the global fetch that records each call. It
+      // answers a 304, which the adapter decides at the head without a body.
+      const sentRedirects: Array<RequestInit["redirect"]> = [];
+      vi.stubGlobal("fetch", (_input: unknown, init?: RequestInit) => {
+        sentRedirects.push(init?.redirect);
+        return Promise.resolve(new Response(null, { status: 304 }));
+      });
+      const client = createOpenAIClient({
+        apiKey: "k",
+        baseURL: "http://upstream.invalid",
+      });
+
+      await run(client, freshSignal(), silentLog);
+
+      expect(
+        sentRedirects,
+        'the adapter must hand the runtime exactly one request carrying redirect "manual": the runtime then returns a 3xx as a response for the adapter to decide and never follows it',
+      ).toStrictEqual(["manual"]);
     },
   );
 });
