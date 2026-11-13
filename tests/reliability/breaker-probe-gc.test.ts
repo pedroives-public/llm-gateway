@@ -1,74 +1,56 @@
 import http from "node:http";
-import v8 from "node:v8";
-import vm from "node:vm";
-import { getEventListeners } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PROBE_CLOCK_MS } from "../../src/config.js";
 import { createProbeRunner } from "../../src/reliability/breaker-probe.js";
 import { createOpenAIClient } from "../../src/upstream/openai.js";
 import { listenEphemeral } from "../helpers/ephemeral-server.js";
 import {
+  abortListeners,
+  collectThroughWindow,
+  newCanary,
+  settlesWithin,
+  sleep,
+  waitFor,
+} from "../helpers/garbage-collection.js";
+import {
   wrapGlobalFetch,
   type RedirectOption,
 } from "../helpers/global-fetch-wrapper.js";
-
-// A real garbage collection, without the --expose-gc flag on the runner.
-v8.setFlagsFromString("--expose-gc");
-const collectGarbage = vm.runInNewContext("gc") as () => void;
-
-// Captured before the cell fakes setTimeout, so waits run on real time.
-const realSetTimeout = globalThis.setTimeout;
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => realSetTimeout(resolve, ms));
 
 // Keepalive cadence of the local upstream below (real time).
 const KEEPALIVE_EVERY_MS = 200;
 // Real-time bounds for the waits of the scene; each fails with its own
 // sentence, under Vitest's test timeout set on the cell.
 const HEAD_DEADLINE_MS = 2_000;
-const COLLECTION_DEADLINE_MS = 2_000;
-// How long the cell keeps collecting after the canary is gone before it reads
-// the listener count. The control arm lost its listener at most 38 ms after
-// the canary's collection (10 runs, Node 22.22.3, 20 ms poll step); the window
-// is over ten times that, so an arm that keeps its listener is read only after
-// a removal would have shown.
-const LISTENER_OBSERVATION_MS = 500;
 const PROBE_END_DEADLINE_MS = 2_000;
 const SOCKET_CLOSE_DEADLINE_MS = 2_000;
-const POLL_STEP_MS = 20;
+// How long the control arm watches an attempt the abort did not reach. Under
+// redirect "manual" the attempt ended at most 4 ms after its clock (3 runs,
+// Node 22.22.3); the window is over a hundred times that, so an attempt the
+// abort did reach would have ended inside it.
+const HELD_ATTEMPT_OBSERVATION_MS = 500;
 
-// Rejects with `sentence` when `promise` has not settled within `ms` of real
-// time; used where the defect is an absence (a probe that never ends).
-function settlesWithin<T>(promise: Promise<T>, ms: number, sentence: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => {
-      realSetTimeout(() => reject(new Error(sentence)), ms);
-    }),
-  ]);
-}
+type UpstreamMode = "keepalive" | "stalled" | "error-body-stalled";
 
-async function waitFor(check: () => boolean, ms: number, sentence: string): Promise<void> {
-  const startedAt = performance.now();
-  while (!check()) {
-    if (performance.now() - startedAt > ms) throw new Error(sentence);
-    await sleep(POLL_STEP_MS);
-  }
-}
-
-// The real adapter, the real runner and a local upstream that sends a 2xx SSE
-// head and then, depending on `mode`, keepalive comments or nothing; never
-// [DONE]. Only setTimeout and
-// clearTimeout are faked, so the probe's clock moves on demand while sockets,
-// the upstream's keepalives and the garbage collector stay real.
-async function startScene(mode: "keepalive" | "stalled") {
+// The real adapter, the real runner and a local upstream that never finishes
+// its reply. "keepalive" and "stalled" send a 2xx SSE head and then keepalive
+// comments or nothing, never [DONE]; "error-body-stalled" sends a 500 head
+// and part of an error body. Only setTimeout and clearTimeout are faked, so
+// the probe's clock moves on demand while sockets, the upstream's keepalives
+// and the garbage collector stay real.
+async function startScene(mode: UpstreamMode) {
   let headsSent = 0;
   let socketsClosed = 0;
   const server = http.createServer((req, res) => {
     req.resume();
     req.on("end", () => {
-      res.writeHead(200, { "content-type": "text/event-stream" });
-      res.write(": open\n\n");
+      if (mode === "error-body-stalled") {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.write('{"error":{"message":"partial');
+      } else {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(": open\n\n");
+      }
       headsSent += 1;
       const keepalive =
         mode === "keepalive"
@@ -106,18 +88,13 @@ async function startScene(mode: "keepalive" | "stalled") {
     headsSent: () => headsSent,
     socketsClosed: () => socketsClosed,
     // Abort listeners on the signal the probe handed to the runtime's fetch.
-    abortListeners: () => (probeSignal === undefined ? -1 : getEventListeners(probeSignal, "abort").length),
+    abortListeners: () => abortListeners(probeSignal),
     close: async () => {
       vi.useRealTimers();
       server.closeAllConnections();
       await upstream.close();
     },
   };
-}
-
-// An object nothing else references: once it is gone, a collection has run.
-function newCanary(): WeakRef<object> {
-  return new WeakRef({});
 }
 
 // The same scene under two redirect options. "manual" is what the adapter
@@ -172,21 +149,7 @@ describe("breaker probe — real runtime, after a garbage collection", () => {
       await sleep(KEEPALIVE_EVERY_MS);
       const listenersBeforeCollection = scene.abortListeners();
 
-      await waitFor(
-        () => {
-          collectGarbage();
-          return canary.deref() === undefined;
-        },
-        COLLECTION_DEADLINE_MS,
-        "the canary was not collected: there is no evidence that a garbage collection ran",
-      );
-      // Keep collecting through the window, so a removal that follows the
-      // collection has shown before the count is read.
-      const canaryGoneAt = performance.now();
-      while (performance.now() - canaryGoneAt < LISTENER_OBSERVATION_MS) {
-        collectGarbage();
-        await sleep(POLL_STEP_MS);
-      }
+      await collectThroughWindow(canary);
 
       expect(
         wrapper.sentRedirects,
@@ -227,6 +190,108 @@ describe("breaker probe — real runtime, after a garbage collection", () => {
         SOCKET_CLOSE_DEADLINE_MS,
         "the cancel did not close the real upstream connection",
       );
+    },
+    15_000,
+  );
+});
+
+// A non-2xx head whose body stalls: the adapter reads that body with its own
+// reader, which the probe cannot cancel, so only the abort can end the read.
+const errorBodyArms = [
+  { ...arms[0], attemptAfterClock: "ends with one FAILURE vote" },
+  { ...arms[1], attemptAfterClock: "stays pending without a vote" },
+] as const;
+
+describe("breaker probe — real runtime, a stalled error body after a garbage collection", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each(errorBodyArms)(
+    'redirect "$option": at its clock the attempt $attemptAfterClock',
+    async ({
+      forceRedirect,
+      listenersAfterCollection,
+      listenerRule,
+      attemptAfterClock,
+    }) => {
+      const wrapper = wrapGlobalFetch(forceRedirect);
+      const scene = await startScene("error-body-stalled");
+      const canary = newCanary();
+      let ended = false;
+      const pendingProbe = scene.start().finally(() => {
+        ended = true;
+      });
+
+      try {
+        await waitFor(() => scene.headsSent() === 1, HEAD_DEADLINE_MS, "the upstream never sent the probe's head");
+        await sleep(KEEPALIVE_EVERY_MS);
+        const listenersBeforeCollection = scene.abortListeners();
+
+        await collectThroughWindow(canary);
+
+        expect(
+          wrapper.sentRedirects,
+          'the adapter wrote redirect "manual" in one call: the arms differ only by what the wrapper forces',
+        ).toStrictEqual(["manual"]);
+        expect(
+          listenersBeforeCollection,
+          "before the collection the probe's signal carries two abort listeners: the runner's cancel and the runtime's own",
+        ).toBe(2);
+        expect(scene.abortListeners(), listenerRule).toBe(listenersAfterCollection);
+
+        await vi.advanceTimersByTimeAsync(PROBE_CLOCK_MS);
+
+        if (attemptAfterClock === "ends with one FAILURE vote") {
+          await settlesWithin(
+            pendingProbe,
+            PROBE_END_DEADLINE_MS,
+            "the probe never ended after its clock: the error body read still holds it",
+          );
+          expect(
+            scene.vote.mock.calls,
+            "an attempt that ends at its clock votes FAILURE once",
+          ).toStrictEqual([["FAILURE"]]);
+          expect(
+            scene.log.info,
+            "the clock that decided writes exactly one line",
+          ).toHaveBeenCalledTimes(1);
+          expect(
+            scene.log.info,
+            "the one line is the clock-expired event",
+          ).toHaveBeenCalledWith(
+            expect.objectContaining({ event: "breaker_probe_clock_expired" }),
+          );
+          await waitFor(
+            () => scene.socketsClosed() === 1,
+            SOCKET_CLOSE_DEADLINE_MS,
+            "the abort did not close the upstream connection",
+          );
+        } else {
+          await sleep(HELD_ATTEMPT_OBSERVATION_MS);
+          expect(
+            ended,
+            "control arm: with the listener gone, the abort does not reach the error body read and the attempt stays pending through the window",
+          ).toBe(false);
+          expect(
+            scene.vote.mock.calls,
+            "control arm: a pending attempt has not voted",
+          ).toStrictEqual([]);
+          expect(
+            scene.socketsClosed(),
+            "control arm: the upstream connection stays open through the window",
+          ).toBe(0);
+        }
+      } finally {
+        // Closing the upstream ends a read the abort did not reach, so the
+        // attempt finishes before the next cell starts.
+        await scene.close();
+        await settlesWithin(
+          pendingProbe.catch(() => undefined),
+          PROBE_END_DEADLINE_MS,
+          "the probe did not end after its upstream closed",
+        );
+      }
     },
     15_000,
   );
