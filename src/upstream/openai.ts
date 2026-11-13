@@ -42,12 +42,16 @@ export interface OpenAIClient {
 
 type CappedRead = { capped: true } | { capped: false; bodyText: string };
 
+// Asks the head question before any body read. A 3xx is answered from its
+// status alone, so its body is never read, only released: a 3xx whose body
+// stayed open would otherwise hold the call until the request clock expired.
+// A null body (a 304) has nothing to release.
 async function recognizeAndRelease3xx(
   response: Response,
   log: Logger & MinLogger,
 ): Promise<ResponseHeadRecognition> {
   const recognizedHead = recognizeResponseHead(response.status);
-  
+
   if (recognizedHead.kind === "upstream_3xx") {
     if (response.body !== null) {
       const reader = response.body.getReader();

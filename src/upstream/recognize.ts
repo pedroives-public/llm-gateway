@@ -47,8 +47,8 @@ export type ResponseRecognition = Extract<
   Outcome,
   { kind: "ok" | "upstream_error" | "undecodable" | "upstream_3xx" }
 >;
-export type ResponseHeadRecognition = 
-  | { kind: "upstream_3xx"; status: number } 
+export type ResponseHeadRecognition =
+  | Extract<Outcome, { kind: "upstream_3xx" }>
   | { kind: "not_3xx" };
 
 const PRE_SEND_PROVEN_CODES: readonly string[] = [
@@ -74,7 +74,7 @@ function isSuccessStatus(status: number): boolean {
   return status >= 200 && status < 300;
 }
 
-export function is3xxStatus(status: number): boolean {
+function is3xxStatus(status: number): boolean {
   return status >= 300 && status < 400;
 }
 
@@ -122,8 +122,10 @@ export function recognizeRejection(raw: RejectionFacts): RejectionRecognition {
 }
 
 export function recognizeResponse(raw: ResponseFacts): ResponseRecognition {
-  if (is3xxStatus(raw.status)) {
-    return { kind: "upstream_3xx", status: raw.status };
+  const recognizedHead = recognizeResponseHead(raw.status);
+
+  if (recognizedHead.kind === "upstream_3xx") {
+    return recognizedHead;
   }
 
   if (raw.parsed) {
