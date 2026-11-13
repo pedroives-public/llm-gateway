@@ -35,21 +35,6 @@ function extractCauseCode(err: unknown): string | undefined {
   return undefined;
 }
 
-function extractCauseMessage(err: unknown): string | undefined {
-  if (
-    typeof err === "object" &&
-    err !== null &&
-    "cause" in err &&
-    typeof err.cause === "object" &&
-    err.cause !== null &&
-    "message" in err.cause &&
-    typeof err.cause.message === "string"
-  ) {
-    return err.cause.message;
-  }
-  return undefined;
-}
-
 function extractCauseName(err: unknown): string | undefined {
   if (
     typeof err === "object" &&
@@ -115,25 +100,17 @@ export function resolveRejection(
   } else {
     causeCode = extractCauseCode(err);
     if (causeCode === undefined) {
-      const causeMessage = extractCauseMessage(err);
-      if (causeMessage === undefined) {
-        logAndRethrow(err, abortIdentity, logger);
-      }
-
-      arm = {
-        resolved: false,
-        rejection: "redirect",
-        cause_message: causeMessage,
-      };
-    } else {
-      causeName = extractCauseName(err);
-
-      arm = {
-        resolved: false,
-        rejection: "network",
-        cause_code: causeCode,
-      };
+      // Recognition keys on the cause's code: without one there is nothing
+      // to recognize.
+      logAndRethrow(err, abortIdentity, logger);
     }
+    causeName = extractCauseName(err);
+
+    arm = {
+      resolved: false,
+      rejection: "network",
+      cause_code: causeCode,
+    };
   }
 
   const outcome = recognizeRejection(arm);

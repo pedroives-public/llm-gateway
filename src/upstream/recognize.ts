@@ -22,11 +22,6 @@ export type RawFacts =
     }
   | {
       resolved: false;
-      rejection: "redirect";
-      cause_message: string;
-    }
-  | {
-      resolved: false;
       rejection: "abort";
       abort_kind: string;
     };
@@ -105,8 +100,6 @@ export function recognizeRejection(raw: RejectionFacts): RejectionRecognition {
       if (POSSIBLY_POST_SEND_CODES.includes(raw.cause_code)) {
         return { kind: "network_failed", pre_send_proven: false };
       }
-      return { kind: "unrecognized" };
-    case "redirect":
       return { kind: "unrecognized" };
     default:
       return assertNever(raw);
