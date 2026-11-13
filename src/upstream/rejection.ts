@@ -115,10 +115,6 @@ export function resolveRejection(
   } else {
     causeCode = extractCauseCode(err);
     if (causeCode === undefined) {
-      // Undici's blocked-redirect rejection carries no cause.code (measured
-      // on Node 22), so it must be recognized before the no-code rethrow.
-      // Code absence is one half of the discriminator; the exact message
-      // match in recognizeRejection is the other.
       const causeMessage = extractCauseMessage(err);
       if (causeMessage === undefined) {
         logAndRethrow(err, abortIdentity, logger);

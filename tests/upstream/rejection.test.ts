@@ -197,20 +197,34 @@ describe("resolveRejection", () => {
   });
 
   describe("redirect rejections (no cause.code, undici redirect message)", () => {
-    it("returns redirect_blocked for the undici blocked-redirect shape", () => {
+    it("re-throws and logs the boundary payload for the runtime's redirect rejection text: no rejection becomes a redirect outcome", () => {
       const err = new TypeError("fetch failed", {
         cause: new Error("unexpected redirect"),
       });
       const logger = makeLogger();
 
-      const outcome = resolveRejection(
-        err,
-        new AbortController().signal,
-        logger,
-      );
+      let returned: unknown;
+      let caught: unknown;
+      try {
+        returned = resolveRejection(err, new AbortController().signal, logger);
+      } catch (thrown) {
+        caught = thrown;
+      }
 
-      expect(outcome).toEqual({ kind: "redirect_blocked" });
-      expect(logger.error).not.toHaveBeenCalled();
+      expect(
+        returned,
+        "a rejection carrying the redirect text is unrecognized: it must not be turned into an outcome",
+      ).toBeUndefined();
+      expect(caught, "the same error is re-thrown").toBe(err);
+      expect(
+        firstErrorPayload(logger),
+        "an unrecognized rejection writes exactly one boundary line, with the allowlisted fields only",
+      ).toEqual({
+        cause_code: "UNKNOWN",
+        cause_name: "UNKNOWN",
+        err_name: "TypeError",
+        abort_identity: false,
+      });
     });
 
     it("keeps the NETWORK lane when a cause.code is present, even with the redirect message (code absence is required)", () => {
