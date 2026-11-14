@@ -31,16 +31,24 @@ import { wrapGlobalFetch } from "../helpers/global-fetch-wrapper.js";
 const silentLog = { error: () => {}, info: () => {} };
 const reqBody = { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] };
 
+// A rejected call becomes a value, so a cell that fails names its own rule
+// instead of the runtime's error.
+const settled = (call: Promise<unknown>): Promise<unknown> =>
+  call.then(
+    (outcome) => outcome,
+    (error: unknown) => `rejected: ${String(error)}`,
+  );
+
 const adapterCalls = [
   {
     call: "buffered",
     run: (client: OpenAIClient, signal: AbortSignal): Promise<unknown> =>
-      client.buffered(reqBody, signal, silentLog),
+      settled(client.buffered(reqBody, signal, silentLog)),
   },
   {
     call: "streaming",
     run: (client: OpenAIClient, signal: AbortSignal): Promise<unknown> =>
-      client.streaming({ ...reqBody, stream: true }, signal, silentLog),
+      settled(client.streaming({ ...reqBody, stream: true }, signal, silentLog)),
   },
 ];
 
