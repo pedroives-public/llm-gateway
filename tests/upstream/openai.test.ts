@@ -244,11 +244,38 @@ const adapterCalls = [
   },
 ];
 
+// 300 is a 3xx that fetch never follows. The other five are the statuses it
+// follows under another redirect option.
+const OPEN_BODY_3XX_STATUSES = [300, 301, 302, 303, 307, 308];
+const openBodyCells = adapterCalls.flatMap((adapterCall) =>
+  OPEN_BODY_3XX_STATUSES.map((status) => ({ ...adapterCall, status })),
+);
+
+// Keeps every response the runtime hands the adapter alive until the cell
+// ends. The runtime releases the body of a response that was garbage
+// collected, and the upstream would then see a close the adapter did not
+// cause.
+function holdResponsesAlive(): Response[] {
+  const runtimeFetch = globalThis.fetch;
+  const held: Response[] = [];
+  vi.stubGlobal("fetch", async (...args: Parameters<typeof fetch>) => {
+    const response = await runtimeFetch(...args);
+    held.push(response);
+    return response;
+  });
+  return held;
+}
+
 describe("openai client: custody of a 3xx body", () => {
-  it.each(adapterCalls)(
-    "$call call: a 300 whose body stays open is decided at the head and its body is released",
-    async ({ run }) => {
-      const upstream = await holdOpenUpstream(300, "held");
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each(openBodyCells)(
+    "$call call: a $status whose body stays open is decided at the head and its body is released",
+    async ({ run, status }) => {
+      const heldResponses = holdResponsesAlive();
+      const upstream = await holdOpenUpstream(status, "held");
       const caller = new AbortController();
       try {
         const client = createOpenAIClient({
@@ -261,7 +288,10 @@ describe("openai client: custody of a 3xx body", () => {
           UPSTREAM_CLOSE_DEADLINE_MS,
           "the adapter did not decide the 3xx at the response head: no outcome before the deadline while the body was open",
         );
-        expect(outcome).toStrictEqual({ kind: "upstream_3xx", status: 300 });
+        expect(
+          outcome,
+          "a 3xx with an open body is the 3xx outcome carrying its own status",
+        ).toStrictEqual({ kind: "upstream_3xx", status });
 
         const finished = await withinDeadline(
           upstream.closed,
@@ -272,6 +302,10 @@ describe("openai client: custody of a 3xx body", () => {
           finished,
           "the upstream connection closed only after the fake ended the body, not by the adapter releasing it",
         ).toBe(false);
+        expect(
+          heldResponses,
+          "the cell held the one response alive, so the close above was the adapter's release",
+        ).toHaveLength(1);
       } finally {
         // A cell that fails leaves the adapter's read pending; the caller's
         // abort ends it.
