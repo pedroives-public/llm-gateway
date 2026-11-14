@@ -127,6 +127,52 @@ describe("upstream 3xx at the real boundary — what the consumer receives", () 
   });
 });
 
+// The four 3xx statuses fetch does not treat as a redirect under any option.
+const NOT_A_REDIRECT_CELLS = [300, 304, 305, 306].flatMap((status) => [
+  { status, call: "buffered", stream: false },
+  { status, call: "streaming", stream: true },
+]);
+
+describe("upstream 3xx at the real boundary — a 3xx that is not a redirect", () => {
+  it.each(NOT_A_REDIRECT_CELLS)(
+    "$call $status: the consumer gets the sanitized 502 and the operator gets the alert",
+    async ({ status, stream }) => {
+      const { response, capture, answersSent } = await requestThroughGateway(
+        (res) => {
+          res.writeHead(status, { "content-type": "text/plain" });
+          res.end(BODY_CANARY);
+        },
+        stream,
+      );
+
+      expect(answersSent(), "the scene needs the upstream's answer to be sent").toBe(1);
+      expect(
+        {
+          status: response.statusCode,
+          errorClass: response.headers["x-gateway-error-class"],
+          body: JSON.parse(response.payload) as unknown,
+        },
+        "a 3xx is never relayed to the consumer, redirect or not: the answer is the gateway's own 502",
+      ).toStrictEqual({
+        status: 502,
+        errorClass: "upstream-redirect-blocked",
+        body: SANITIZED_REDIRECT_BODY,
+      });
+      expect(
+        capture.byEvent("operational_alert").map((line) => line.alert),
+        "a 3xx that fetch would not follow is still the operator's fault: it raises the redirect alert, once",
+      ).toStrictEqual(["upstream_redirect_blocked"]);
+      expect(
+        capture.byEvent("req_complete").map((line) => ({
+          terminal: line.terminal,
+          upstream_status: line.upstream_status,
+        })),
+        "the request ends as REDIRECT_BLOCKED and its line says which status the upstream answered",
+      ).toStrictEqual([{ terminal: "REDIRECT_BLOCKED", upstream_status: status }]);
+    },
+  );
+});
+
 describe("upstream 3xx at the real boundary — what the logs carry", () => {
   it.each([
     { call: "buffered", stream: false },
