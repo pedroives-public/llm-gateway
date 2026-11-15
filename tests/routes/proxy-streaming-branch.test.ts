@@ -1264,15 +1264,16 @@ describe("streaming flag ON, stream: true: the cost caps of the buffered body ho
     {
       sent: "no output-token field",
       extra: {},
-      forwarded: { max_tokens: OUTPUT_TOKEN_CEILING, max_completion_tokens: undefined },
+      forwarded: { max_tokens: undefined, max_completion_tokens: OUTPUT_TOKEN_CEILING },
       because:
-        "a stream: true body that omits both output-token fields is forwarded with the ceiling injected, so omission never reaches the upstream uncapped",
+        "a stream: true body that omits both output-token fields is forwarded with the ceiling as max_completion_tokens, so omission never reaches the upstream uncapped and no model is sent a field name it refuses",
     },
     {
       sent: "max_tokens under the ceiling",
       extra: { max_tokens: 100 },
-      forwarded: { max_tokens: 100, max_completion_tokens: undefined },
-      because: "a client's own max_tokens under the ceiling is forwarded as sent, never replaced",
+      forwarded: { max_tokens: undefined, max_completion_tokens: 100 },
+      because:
+        "a client's own max_tokens under the ceiling reaches the upstream as max_completion_tokens with the same value: the upstream is sent one output-limit field, the one newer models accept",
     },
     {
       sent: "only max_completion_tokens",
@@ -1280,6 +1281,13 @@ describe("streaming flag ON, stream: true: the cost caps of the buffered body ho
       forwarded: { max_tokens: undefined, max_completion_tokens: 100 },
       because:
         "a client's own max_completion_tokens already bounds the output, so no max_tokens is injected beside it",
+    },
+    {
+      sent: "both output-token fields",
+      extra: { max_tokens: 100, max_completion_tokens: 200 },
+      forwarded: { max_tokens: undefined, max_completion_tokens: 200 },
+      because:
+        "when a client sends both fields the upstream is sent max_completion_tokens alone, with the client's own max_completion_tokens value: it is the field the upstream itself prefers",
     },
   ])(
     "forwards a stream: true body with $sent to the streaming upstream with the buffered body's output bound",

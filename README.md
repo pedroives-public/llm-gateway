@@ -29,8 +29,8 @@ client unchanged as they arrive; a stream the gateway ends before the
 upstream's `[DONE]` closes with one SSE error event carrying
 `"gateway": {"terminal": "<reason>"}`. Auth via `Authorization: Bearer lkey_...`. The body must carry `model` and a
 non-empty `messages[]`. Cost-containment caps on the shared operator account:
-`max_tokens`/`max_completion_tokens` ≤ 16384 (injected when absent) and
-`n` fixed at 1.
+`max_tokens`/`max_completion_tokens` ≤ 16384 (injected when absent, and
+always sent upstream as `max_completion_tokens`) and `n` fixed at 1.
 
 Reliability envelope per request: at most one retry, permitted only on a
 network failure proven to have happened before the request left the process
