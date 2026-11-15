@@ -267,16 +267,21 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
       let upstreamDurationMs = 0;
       let attemptStartedAt = requestStartedAt;
 
-      // A schema maximum only fires on a present field: when the client omits
-      // both spend fields, inject the cap so omission cannot reach the
-      // upstream uncapped.
-      const hasSpendField =
-        request.body.max_tokens !== undefined ||
-        request.body.max_completion_tokens !== undefined;
+      // The upstream is sent one output-limit field, max_completion_tokens:
+      // newer models refuse the max_tokens name, and every model measured
+      // accepts the newer one. Its value is the client's
+      // max_completion_tokens, else the client's max_tokens, else the cap, so
+      // an omitted limit never reaches the upstream uncapped. A schema
+      // maximum only fires on a present field, which is why the cap is added
+      // here.
+      const { max_tokens, max_completion_tokens, ...bodyWithoutSpendFields } =
+        request.body;
 
-      const forwardedBody = hasSpendField
-        ? request.body
-        : { ...request.body, max_tokens: MAX_OUTPUT_TOKENS_CAP };
+      const forwardedBody = {
+        ...bodyWithoutSpendFields,
+        max_completion_tokens:
+          max_completion_tokens ?? max_tokens ?? MAX_OUTPUT_TOKENS_CAP,
+      };
 
       const upstreamLog = request.log.child({ req_id: request.reqId });
       const callUpstream = async (): Promise<AttemptResult> => {

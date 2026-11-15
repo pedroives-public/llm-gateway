@@ -179,9 +179,12 @@ describe("cost caps on client-controlled spend fields", () => {
 
   // Absence closes the bypass the schema cannot see: a maximum only fires on a
   // present field, and omitting both fields would otherwise hand the upstream
-  // its model-maximum default. The gateway injects max_tokens = cap only when
-  // NEITHER field came from the client; a present field is forwarded untouched.
-  it("injects max_tokens = cap when neither spend field is present; never otherwise", async () => {
+  // its model-maximum default. The gateway sends the upstream one output-limit
+  // field, max_completion_tokens: newer models refuse the max_tokens name, and
+  // the models that accept it accept the newer name too (measured on eleven
+  // models, 2026-11-15). An absent limit becomes the cap, and a client's
+  // max_tokens keeps its value under the newer name.
+  it("sends the output limit upstream as max_completion_tokens: the cap when the client sent none, the client's own value otherwise", async () => {
     async function forwardedBody(body: Record<string, unknown>) {
       let captured: Record<string, unknown> | null = null;
       const { app } = await buildCapProbe(async (upstreamBody) => {
@@ -214,13 +217,43 @@ describe("cost caps on client-controlled spend fields", () => {
     }
 
     const injected = await forwardedBody({});
-    expect(injected?.max_tokens).toBe(MAX_OUTPUT_TOKENS_CAP);
+    expect(
+      injected?.max_completion_tokens,
+      "a body with no output limit is forwarded with the cap as max_completion_tokens",
+    ).toBe(MAX_OUTPUT_TOKENS_CAP);
+    expect(
+      injected?.max_tokens,
+      "the forwarded body carries no max_tokens: newer models refuse that name",
+    ).toBeUndefined();
 
     const explicit = await forwardedBody({ max_tokens: 100 });
-    expect(explicit?.max_tokens).toBe(100);
+    expect(
+      explicit?.max_completion_tokens,
+      "a client's max_tokens reaches the upstream as max_completion_tokens with the same value",
+    ).toBe(100);
+    expect(
+      explicit?.max_tokens,
+      "the forwarded body carries no max_tokens: newer models refuse that name",
+    ).toBeUndefined();
 
     const aliasOnly = await forwardedBody({ max_completion_tokens: 100 });
-    expect(aliasOnly?.max_completion_tokens).toBe(100);
+    expect(
+      aliasOnly?.max_completion_tokens,
+      "control: a client's max_completion_tokens is forwarded as sent",
+    ).toBe(100);
     expect(aliasOnly?.max_tokens).toBeUndefined();
+
+    const both = await forwardedBody({
+      max_tokens: 100,
+      max_completion_tokens: 200,
+    });
+    expect(
+      both?.max_completion_tokens,
+      "when a client sends both fields, its max_completion_tokens value is the one forwarded",
+    ).toBe(200);
+    expect(
+      both?.max_tokens,
+      "the forwarded body carries no max_tokens: newer models refuse that name",
+    ).toBeUndefined();
   });
 });
