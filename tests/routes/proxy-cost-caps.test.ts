@@ -50,7 +50,7 @@ describe("cost caps on client-controlled spend fields", () => {
           "content-type": "application/json",
         },
         payload: JSON.stringify({
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
           max_tokens: MAX_OUTPUT_TOKENS_CAP + 1,
         }),
@@ -84,7 +84,7 @@ describe("cost caps on client-controlled spend fields", () => {
           "content-type": "application/json",
         },
         payload: JSON.stringify({
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
           max_completion_tokens: MAX_OUTPUT_TOKENS_CAP + 1,
         }),
@@ -118,7 +118,7 @@ describe("cost caps on client-controlled spend fields", () => {
           "content-type": "application/json",
         },
         payload: JSON.stringify({
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
           n: 2,
         }),
@@ -153,7 +153,7 @@ describe("cost caps on client-controlled spend fields", () => {
             "content-type": "application/json",
           },
           payload: JSON.stringify({
-            model: "gpt-4o",
+            model: "gpt-4o-mini",
             messages: [{ role: "user", content: "hi" }],
             ...body,
           }),
@@ -204,7 +204,7 @@ describe("cost caps on client-controlled spend fields", () => {
             "content-type": "application/json",
           },
           payload: JSON.stringify({
-            model: "gpt-4o",
+            model: "gpt-4o-mini",
             messages: [{ role: "user", content: "hi" }],
             ...body,
           }),

@@ -30,7 +30,7 @@ import {
 // through the real route, client, and breaker — do not delete that unit test.
 
 const validBody = {
-  model: "gpt-4o",
+  model: "gpt-4o-mini",
   messages: [{ role: "user", content: "hi" }],
 };
 

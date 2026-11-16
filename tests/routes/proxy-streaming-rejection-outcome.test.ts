@@ -44,7 +44,7 @@ vi.mock("../../src/reliability/timeouts.js", async (importOriginal) => {
 });
 
 const validBody = {
-  model: "gpt-4o",
+  model: "gpt-4o-mini",
   messages: [{ role: "user", content: "hi" }],
 };
 const ONE_CONTENT_FRAME =

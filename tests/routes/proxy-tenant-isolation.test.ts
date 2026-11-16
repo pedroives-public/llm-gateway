@@ -26,7 +26,7 @@ const TENANT_B = "22222222-2222-4222-8222-222222222222";
 const LABEL_A = "probe-a";
 
 const body = {
-  model: "llama-3.1-8b-instant",
+  model: "gpt-4o-mini",
   messages: [{ role: "user", content: "probe" }],
 };
 

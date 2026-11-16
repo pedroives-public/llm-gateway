@@ -78,7 +78,7 @@ describe("proxy route — buffered skeleton", () => {
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
         payload: {
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
         },
       });
@@ -125,7 +125,7 @@ describe("proxy route — buffered skeleton", () => {
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
         payload: {
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
         },
       });
@@ -188,7 +188,7 @@ describe("proxy route — buffered skeleton", () => {
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
         payload: {
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
         },
       });
@@ -253,7 +253,7 @@ describe("proxy route — buffered skeleton", () => {
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
         payload: {
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
         },
       });
@@ -309,7 +309,7 @@ describe("proxy route — buffered skeleton", () => {
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
         payload: {
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
         },
       });
@@ -365,7 +365,7 @@ describe("proxy route — buffered skeleton", () => {
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
         payload: {
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
         },
       });
@@ -428,7 +428,7 @@ describe("proxy route — buffered skeleton", () => {
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
         payload: {
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
         },
       });
@@ -541,7 +541,7 @@ describe("proxy route — default wiring (e2e)", () => {
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
         payload: {
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
         },
       });
@@ -598,7 +598,7 @@ describe("proxy route — error desk (scoped setErrorHandler)", () => {
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
         payload: {
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: big }],
         },
       });
@@ -682,7 +682,7 @@ describe("proxy route — error desk (scoped setErrorHandler)", () => {
         method: "POST",
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
-        payload: { model: "gpt-4o", messages: [] },
+        payload: { model: "gpt-4o-mini", messages: [] },
       });
       expect(res.statusCode).toBe(400);
       expect(res.headers["x-gateway-error-class"]).toBe("client-fault");
@@ -707,7 +707,7 @@ describe("proxy route — error desk (scoped setErrorHandler)", () => {
         url: "/v1/chat/completions",
         headers: { authorization: `Bearer ${apiKey}` },
         payload: {
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
         },
       });
@@ -815,7 +815,7 @@ describe("proxy route — reliability integration (8.1 harness)", () => {
   }
 
   const validBody = {
-    model: "gpt-4o",
+    model: "gpt-4o-mini",
     messages: [{ role: "user", content: "hi" }],
   };
 
