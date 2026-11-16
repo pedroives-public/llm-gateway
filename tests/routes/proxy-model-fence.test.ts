@@ -431,6 +431,75 @@ describe("model allowlist per plan", () => {
     ).toBe(0);
   });
 
+  it("length: a model longer than 256 characters is refused by body validation, so the refusal message has a bound", async () => {
+    // The allowlist's refusal repeats the requested model. Without a limit on
+    // its length, the answer grows with whatever text a client sends.
+    const LIMIT = 256;
+
+    const atLimit = "m".repeat(LIMIT);
+    const allowed = await runScene({
+      plan: "pro",
+      body: { model: atLimit, messages: MESSAGES },
+    });
+    expect(
+      allowed.status,
+      "control: a model of exactly 256 characters passes body validation and gets the allowlist's refusal",
+    ).toBe(403);
+    expect(
+      (JSON.parse(allowed.payload) as { error: { message: string } }).error
+        .message,
+      "control: a model of exactly 256 characters is repeated whole in the refusal",
+    ).toBe(
+      `gateway: model '${atLimit}' is not allowed for tier 'pro'. Allowed: gpt-4o-mini, gpt-5-mini, gpt-5.6-luna`,
+    );
+
+    // The largest refusal there can be: every character needs escaping, on
+    // the plan with the longest list.
+    const worstCase = await runScene({
+      plan: "enterprise",
+      body: { model: "\u0000".repeat(LIMIT), messages: MESSAGES },
+    });
+    expect(
+      worstCase.status,
+      "control: 256 characters that need escaping pass body validation and get the allowlist's refusal",
+    ).toBe(403);
+    expect(
+      Buffer.byteLength(worstCase.payload),
+      "the largest refusal stays under 2048 bytes",
+    ).toBeLessThan(2048);
+
+    for (const length of [LIMIT + 1, 200_000]) {
+      const scene = await runScene({
+        plan: "pro",
+        body: { model: "m".repeat(length), messages: MESSAGES },
+      });
+      expect(
+        scene.status,
+        `a model of ${length} characters is refused by body validation with 400`,
+      ).toBe(400);
+      expect(
+        scene.errorClass,
+        "the body-validation refusal carries the client-fault class",
+      ).toBe("client-fault");
+      expect(
+        Buffer.byteLength(scene.payload),
+        `the answer to a model of ${length} characters stays under 512 bytes`,
+      ).toBeLessThan(512);
+      expect(
+        scene.upstreamRequests,
+        "a model longer than the limit never reaches the upstream",
+      ).toBe(0);
+      expect(
+        scene.breakerAcquires,
+        "a model longer than the limit does not consult the circuit breaker",
+      ).toBe(0);
+      expect(
+        scene.byEvent("req_rejected").map((event) => event.reason),
+        "a model longer than the limit is rejected as a schema violation, not by the allowlist",
+      ).toEqual(["schema_validation"]);
+    }
+  });
+
   it("log: one req_rejected, no req_start or req_complete, and the requested model in no log line", async () => {
     // A model name no list holds and no other test uses, so finding it in a
     // log line can only mean the request's model was written there.

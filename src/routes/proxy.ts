@@ -63,6 +63,14 @@ const WALL_CLOCK_MS = 30_000;
 const BODY_LIMIT_BYTES = 262_144;
 const MAX_OUTPUT_TOKENS_CAP = 16_384;
 
+// Longest model name the body may carry. The allowlist's refusal repeats the
+// requested model, so with no limit the answer grows with whatever text a
+// client sends: a 262,009-byte model came back in a 785,988-byte answer
+// (measured 2026-11-16). The longest name on any plan's list has 12
+// characters. 256 leaves room for any real model name and keeps the largest
+// refusal under 2 KiB.
+const MAX_MODEL_NAME_LENGTH = 256;
+
 // Models each plan may request. A plan holds every model of the plan below
 // it. Each list is ordered by model family, oldest first, and the refusal
 // message shows it in that order. A model enters a list only after it
@@ -116,7 +124,7 @@ const chatCompletionsBodySchema = {
   type: "object",
   required: ["model", "messages"],
   properties: {
-    model: { type: "string", minLength: 1 },
+    model: { type: "string", minLength: 1, maxLength: MAX_MODEL_NAME_LENGTH },
     messages: { type: "array", minItems: 1 },
     // Flag-OFF form: reject stream:true at the schema, before it can reach the
     // breaker or the upstream. The flag-ON form drops the `const`.
