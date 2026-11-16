@@ -41,7 +41,7 @@ describe("pre-validation parse failures at the proxy error desk", () => {
   }
 
   it("malformed JSON body -> 400 client-fault malformed_json", async () => {
-    const observed = await probe("application/json", '{"model": "gpt-4o", ');
+    const observed = await probe("application/json", '{"model": "gpt-4o-mini", ');
     expect(observed).toMatchObject({
       status: 400,
       errorClass: "client-fault",
@@ -85,7 +85,7 @@ describe("pre-validation parse failures at the proxy error desk", () => {
   });
 
   it("control: schema-invalid JSON stays a 400 client-fault", async () => {
-    const observed = await probe("application/json", '{"model": "gpt-4o"}');
+    const observed = await probe("application/json", '{"model": "gpt-4o-mini"}');
     expect(observed).toMatchObject({
       status: 400,
       errorClass: "client-fault",

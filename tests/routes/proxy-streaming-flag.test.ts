@@ -16,7 +16,7 @@ import { buildProxyApp } from "../helpers/proxy-app.js";
 // streaming seam injected below throws if a cell ever reaches it.
 
 const validBody = {
-  model: "gpt-4o",
+  model: "gpt-4o-mini",
   messages: [{ role: "user", content: "hi" }],
 };
 

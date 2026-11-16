@@ -49,7 +49,7 @@ describe("req_rejected terminal event for schema rejections", () => {
           authorization: bearer(),
           "content-type": "application/json",
         },
-        payload: '{"model": "gpt-4o"}',
+        payload: '{"model": "gpt-4o-mini"}',
       });
 
       expect(res.statusCode).toBe(400);
@@ -76,7 +76,7 @@ describe("req_rejected terminal event for schema rejections", () => {
           authorization: auth,
           "content-type": "application/json",
         },
-        payload: '{"model": "gpt-4o"}',
+        payload: '{"model": "gpt-4o-mini"}',
       });
 
       expect(res.statusCode).toBe(400);
@@ -145,7 +145,7 @@ describe("req_rejected terminal event for schema rejections", () => {
           "content-type": "application/json",
         },
         payload:
-          '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}',
+          '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}',
       });
 
       expect(res.statusCode).toBe(500);
@@ -182,7 +182,7 @@ describe("req_rejected terminal event for schema rejections", () => {
           "content-type": "application/json",
         },
         payload:
-          '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}',
+          '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}',
       });
 
       expect(res.statusCode).toBe(500);
@@ -213,7 +213,7 @@ describe("req_rejected terminal event for schema rejections", () => {
           authorization: bearer(),
           "content-type": "application/json",
         },
-        payload: '{"model": "gpt-4o"}',
+        payload: '{"model": "gpt-4o-mini"}',
       });
 
       expect(res.statusCode).toBe(400);
@@ -243,7 +243,7 @@ describe("req_rejected terminal event for schema rejections", () => {
           "content-type": "application/json",
         },
         payload:
-          '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}',
+          '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}',
       });
 
       expect(res.statusCode).toBe(200);
@@ -269,7 +269,7 @@ describe("req_rejected terminal event for schema rejections", () => {
           authorization: bearer(),
           "content-type": "application/json",
         },
-        payload: `{"model":"gpt-4o","messages":[{"role":"user","content":"${"x".repeat(262_200)}"}]}`,
+        payload: `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"${"x".repeat(262_200)}"}]}`,
       });
 
       expect(res.statusCode).toBe(413);
@@ -312,7 +312,7 @@ describe("req_rejected population guard: tenant-null anomaly", () => {
         method: "POST",
         url: "/v1/chat/completions",
         headers: { "content-type": "application/json" },
-        payload: '{"model": "gpt-4o"}',
+        payload: '{"model": "gpt-4o-mini"}',
       });
 
       expect(res.statusCode).toBe(400);
@@ -384,7 +384,7 @@ describe("lifecycle order: auth precedes validation", () => {
           authorization: bearer(),
           "content-type": "application/json",
         },
-        payload: '{"model": "gpt-4o"}',
+        payload: '{"model": "gpt-4o-mini"}',
       });
 
       expect(res.statusCode).toBe(401);

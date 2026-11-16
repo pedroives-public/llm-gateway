@@ -26,7 +26,7 @@ import { buildProxyApp } from "../helpers/proxy-app.js";
 // stubbed). Everything else in the suite covers these seams in halves.
 
 const validBody = {
-  model: "gpt-4o",
+  model: "gpt-4o-mini",
   messages: [{ role: "user", content: "hi" }],
 };
 

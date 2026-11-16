@@ -76,7 +76,7 @@ async function inject401(
       url: "/v1/chat/completions",
       headers: { authorization: bearer() },
       payload: {
-        model: "gpt-4o",
+        model: "gpt-4o-mini",
         messages: [{ role: "user", content: "hi" }],
       },
     });
@@ -184,7 +184,7 @@ describe("upstream 403 — sanitized access denial (breaker-neutral)", () => {
           url: "/v1/chat/completions",
           headers: { authorization: bearer() },
           payload: {
-            model: "model-outside-account-scope",
+            model: "gpt-4o-mini",
             messages: [{ role: "user", content: "hi" }],
           },
         });
@@ -206,7 +206,7 @@ describe("upstream 403 — sanitized access denial (breaker-neutral)", () => {
         url: "/v1/chat/completions",
         headers: { authorization: bearer() },
         payload: {
-          model: "model-outside-account-scope",
+          model: "gpt-4o-mini",
           messages: [{ role: "user", content: "hi" }],
         },
       });
@@ -282,7 +282,7 @@ describe("retry-then-401 — credential classification survives the retry path",
           url: "/v1/chat/completions",
           headers: { authorization: bearer() },
           payload: {
-            model: "gpt-4o",
+            model: "gpt-4o-mini",
             messages: [{ role: "user", content: "hi" }],
           },
         });

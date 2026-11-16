@@ -41,7 +41,7 @@ describe("upstream 401 — first-occurrence operator alert", () => {
           url: "/v1/chat/completions",
           headers: { authorization: bearer() },
           payload: {
-            model: "gpt-4o",
+            model: "gpt-4o-mini",
             messages: [{ role: "user", content: "hi" }],
           },
         });

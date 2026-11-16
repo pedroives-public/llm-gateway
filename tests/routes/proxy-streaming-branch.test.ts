@@ -33,7 +33,7 @@ import { PARSER_BUFFER_CAP } from "../../src/upstream/sse-frame-reader.js";
 // upstream body is observed from the fake's side of the socket.
 
 const validBody = {
-  model: "gpt-4o",
+  model: "gpt-4o-mini",
   messages: [{ role: "user", content: "hi" }],
 };
 
