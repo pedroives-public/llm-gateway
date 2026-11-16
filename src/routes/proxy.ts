@@ -9,6 +9,7 @@ import {
 import {
   emitReqStart,
   emitReqComplete,
+  emitReqRejected,
   wasColdStart,
   type ErrorClass,
   emitOperationalAlert,
@@ -56,10 +57,30 @@ import {
 } from "./proxy-streaming-post-loop.js";
 import { forwardUntilTerminal } from "./proxy-streaming-loop.js";
 import { observeClientDeparture } from "./proxy-client-departure.js";
+import type { PlanTier } from "../db/schema.js";
 
 const WALL_CLOCK_MS = 30_000;
 const BODY_LIMIT_BYTES = 262_144;
 const MAX_OUTPUT_TOKENS_CAP = 16_384;
+
+// Models each plan may request. A plan holds every model of the plan below
+// it. Each list is ordered by model family, oldest first, and the refusal
+// message shows it in that order. A model enters a list only after it
+// answered a request that carries tools on Chat Completions (measured
+// 2026-11-16). gpt-5.6-luna does so only when the request sets
+// reasoning_effort to "none", a setting left to the client.
+const AVAILABLE_MODELS: Record<PlanTier, readonly string[]> = {
+  free: ["gpt-4o-mini"],
+  pro: ["gpt-4o-mini", "gpt-5-mini", "gpt-5.6-luna"],
+  enterprise: [
+    "gpt-4o-mini",
+    "gpt-4.1",
+    "gpt-5-mini",
+    "gpt-5.1",
+    "gpt-5.2",
+    "gpt-5.6-luna",
+  ],
+};
 
 export interface ChatCompletionsBody {
   model: string;
@@ -187,6 +208,26 @@ export const proxyRoute: FastifyPluginAsync<ProxyRouteOptions> = async (
             message: "internal server error",
             type: "internal_error",
             code: "unhandled_exception",
+          },
+        };
+      }
+
+      const allowedModels = AVAILABLE_MODELS[request.planTier];
+      if (!allowedModels.includes(request.body.model)) {
+        emitReqRejected(request.log, {
+          req_id: request.reqId,
+          tenant_id: request.tenantId,
+          route: request.routeOptions.url,
+          reason: "model_not_allowed",
+          status: 403,
+        });
+
+        reply.code(403).header("x-gateway-error-class", "client-fault");
+        return {
+          error: {
+            message: `gateway: model '${request.body.model}' is not allowed for tier '${request.planTier}'. Allowed: ${allowedModels.join(", ")}`,
+            type: "permission_error",
+            code: "model_not_allowed",
           },
         };
       }

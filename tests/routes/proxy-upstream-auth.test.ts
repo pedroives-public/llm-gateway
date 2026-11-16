@@ -175,9 +175,10 @@ describe("upstream 403 — sanitized access denial (breaker-neutral)", () => {
     });
 
     try {
-      // A consumer can induce 403s at will via the free-form model field; the
-      // breaker is deployment-shared, so six delta-0 terminals inside one
-      // 30 s window must leave the FSM untouched.
+      // An upstream 403 depends on the model the request names, which a
+      // consumer picks among its plan's models. The breaker is
+      // deployment-shared, so six delta-0 terminals inside one 30 s window
+      // must leave the FSM untouched.
       for (let i = 1; i <= 6; i++) {
         const res = await app.inject({
           method: "POST",

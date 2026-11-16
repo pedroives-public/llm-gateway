@@ -1,11 +1,16 @@
 import { randomBytes } from "node:crypto";
 import type { DrizzleClient } from "../../src/db/client.js";
+import type { PlanTier } from "../../src/db/schema.js";
 
 // One valid active row for any presented key, so an authenticated request
 // reaches the route under test. Auth edge cases (bad hash, unknown key,
 // revoked rows) live in tests/middleware/auth.test.ts, which builds its own
-// fakes against a real Postgres row set.
-export function fakeAuthDb(tenantId: string): DrizzleClient {
+// fakes against a real Postgres row set. The tenant's plan is `pro` unless a
+// test names another one.
+export function fakeAuthDb(
+  tenantId: string,
+  planTier: PlanTier = "pro",
+): DrizzleClient {
   return {
     select() {
       return {
@@ -19,7 +24,7 @@ export function fakeAuthDb(tenantId: string): DrizzleClient {
                       return Promise.resolve([
                         {
                           tenantId,
-                          planTier: "pro",
+                          planTier,
                           apiKeyStatus: "active",
                           tenantStatus: "active",
                         },
