@@ -28,7 +28,10 @@ streamed. With `stream: true` the upstream's SSE frames are forwarded to the
 client unchanged as they arrive; a stream the gateway ends before the
 upstream's `[DONE]` closes with one SSE error event carrying
 `"gateway": {"terminal": "<reason>"}`. Auth via `Authorization: Bearer lkey_...`. The body must carry `model` and a
-non-empty `messages[]`. Cost-containment caps on the shared operator account:
+non-empty `messages[]`. `model` must be on the list of the tenant's plan: a
+request for any other model is refused with `403` and `error.code`
+`model_not_allowed` before any upstream call (`src/routes/proxy.ts`, pinned in
+`tests/routes/proxy-model-fence.test.ts`). Cost-containment caps on the shared operator account:
 `max_tokens`/`max_completion_tokens` ≤ 16384 (injected when absent, and
 always sent upstream as `max_completion_tokens`) and `n` fixed at 1. The
 upstream field is built in `src/routes/proxy.ts`, and the exact text sent is
@@ -65,7 +68,8 @@ reaches the consumer. Requests rejected before any upstream attempt carry
 per-field `error.code` values such as `malformed_json`, `empty_body`,
 `unsupported_content_type`, `stream_not_supported` (streaming flag off),
 `n_not_supported`,
-`max_tokens_too_large`, or `max_completion_tokens_too_large`.
+`max_tokens_too_large`, `max_completion_tokens_too_large`, or
+`model_not_allowed`.
 
 ### Idempotency-Key (V1: accepted, no-op)
 
