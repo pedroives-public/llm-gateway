@@ -100,8 +100,9 @@ const chatCompletionsBodySchema = {
     // Flag-OFF form: reject stream:true at the schema, before it can reach the
     // breaker or the upstream. The flag-ON form drops the `const`.
     stream: { type: "boolean", const: false },
-    // Cost cap: the upstream honors either field (max_completion_tokens succeeds max_tokens),
-    // so both carry the same ceiling on purpose — capping only one leaves the other as a bypass.
+    // Cost cap: a client may send either field, and whichever it sends sets
+    // the output limit forwarded upstream, so both carry the same ceiling on
+    // purpose. Capping only one leaves the other as a bypass.
     max_tokens: { type: "integer", minimum: 1, maximum: MAX_OUTPUT_TOKENS_CAP },
     max_completion_tokens: {
       type: "integer",
