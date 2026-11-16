@@ -30,7 +30,9 @@ upstream's `[DONE]` closes with one SSE error event carrying
 `"gateway": {"terminal": "<reason>"}`. Auth via `Authorization: Bearer lkey_...`. The body must carry `model` and a
 non-empty `messages[]`. Cost-containment caps on the shared operator account:
 `max_tokens`/`max_completion_tokens` ≤ 16384 (injected when absent, and
-always sent upstream as `max_completion_tokens`) and `n` fixed at 1.
+always sent upstream as `max_completion_tokens`) and `n` fixed at 1. The
+upstream field is built in `src/routes/proxy.ts`, and the exact text sent is
+pinned on a real socket in `tests/routes/proxy-output-limit-wire.test.ts`.
 
 Reliability envelope per request: at most one retry, permitted only on a
 network failure proven to have happened before the request left the process
