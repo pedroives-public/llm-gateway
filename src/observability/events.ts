@@ -68,7 +68,10 @@ export interface BreakerProbeClockExpiredPayload {
   upstream_reply: ProbeUpstreamReply;
 }
 
-export type ReqRejectedReason = "schema_validation" | "cost_cap_exceeded";
+export type ReqRejectedReason =
+  | "schema_validation"
+  | "cost_cap_exceeded"
+  | "model_not_allowed";
 
 export type AlertName = (typeof ALERT_NAMES)[number];
 
@@ -210,9 +213,9 @@ export function emitReqComplete(
 }
 
 /**
- * Gateway-side rejection before any upstream attempt (schema validation or
- * cost cap). Its own event so rejections never enter the upstream
- * success-rate population.
+ * Gateway-side rejection before any upstream attempt (schema validation,
+ * cost cap or the model allowlist). Its own event so rejections never enter
+ * the upstream success-rate population.
  */
 export function emitReqRejected(
   log: MinLogger,
