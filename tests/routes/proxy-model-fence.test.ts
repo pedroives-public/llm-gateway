@@ -145,7 +145,9 @@ const ALLOWED_ROWS: AllowedRow[] = [
   { plan: "pro", model: "gpt-4o-mini" },
   { plan: "pro", model: "gpt-5-mini" },
   { plan: "pro", model: "gpt-5.6-luna" },
+  { plan: "enterprise", model: "gpt-4o-mini" },
   { plan: "enterprise", model: "gpt-4.1" },
+  { plan: "enterprise", model: "gpt-5-mini" },
   { plan: "enterprise", model: "gpt-5.1" },
   { plan: "enterprise", model: "gpt-5.2" },
   { plan: "enterprise", model: "gpt-5.6-luna" },
@@ -221,6 +223,37 @@ const REFUSED_ROWS: RefusedRow[] = [
     model: "gpt-5-mini ",
     message:
       "gateway: model 'gpt-5-mini ' is not allowed for tier 'pro'. Allowed: gpt-4o-mini, gpt-5-mini, gpt-5.6-luna",
+  },
+  // The next four look like a listed name on a screen and are a different
+  // text: the comparison takes the text as sent, with no normalization and
+  // nothing stripped.
+  {
+    name: "exact match: fullwidth letters are not the listed name",
+    plan: "pro",
+    model: "\uff47\uff50\uff54\uff0d\uff14\uff4f\uff0d\uff4d\uff49\uff4e\uff49",
+    message:
+      "gateway: model '\uff47\uff50\uff54\uff0d\uff14\uff4f\uff0d\uff4d\uff49\uff4e\uff49' is not allowed for tier 'pro'. Allowed: gpt-4o-mini, gpt-5-mini, gpt-5.6-luna",
+  },
+  {
+    name: "exact match: a trailing zero-width space is not the listed name",
+    plan: "pro",
+    model: "gpt-4o-mini\u200b",
+    message:
+      "gateway: model 'gpt-4o-mini\u200b' is not allowed for tier 'pro'. Allowed: gpt-4o-mini, gpt-5-mini, gpt-5.6-luna",
+  },
+  {
+    name: "exact match: a trailing NUL is not the listed name",
+    plan: "pro",
+    model: "gpt-4o-mini\u0000",
+    message:
+      "gateway: model 'gpt-4o-mini\u0000' is not allowed for tier 'pro'. Allowed: gpt-4o-mini, gpt-5-mini, gpt-5.6-luna",
+  },
+  {
+    name: "exact match: a leading byte-order mark is not the listed name",
+    plan: "pro",
+    model: "\ufeffgpt-4o-mini",
+    message:
+      "gateway: model '\ufeffgpt-4o-mini' is not allowed for tier 'pro'. Allowed: gpt-4o-mini, gpt-5-mini, gpt-5.6-luna",
   },
 ];
 
