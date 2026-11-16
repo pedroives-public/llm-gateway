@@ -68,9 +68,9 @@ export function classify(
           breaker_delta: 1,
         };
       }
-      // Access denial depends on the model the request names, which a consumer
-      // picks among its plan's models, so it must not count toward the shared
-      // breaker.
+      // Access denial is consumer-influencible (the model a request names among
+      // its plan's models, and every other field forwarded as sent), so it must
+      // not count toward the shared breaker.
       if (outcome.status === 403) {
         return {
           error_class: "upstream-access-denied",
