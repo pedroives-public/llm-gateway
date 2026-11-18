@@ -65,8 +65,8 @@ reasoning effort `high`.
 - Reasoning effort `high` is not served on this route. Measured the same day,
   it passed 300 s without a response head, which is also the outbound client's
   own limit.
-- With all 41 post-auth slots running to the deadline, the gateway admits at
-  most about 8.8 streaming requests per minute.
+- With all 12 post-auth slots running to the deadline, the gateway admits at
+  most about 2.6 streaming requests per minute.
 
 **Diagnosis**
 

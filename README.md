@@ -45,8 +45,10 @@ execution. `Retry-After` on `429`/`503` is parsed (delta-seconds) but grants no
 retry. 30-second wall-clock on buffered requests and one 280-second total
 deadline on streaming requests; 1 MiB response cap; circuit breaker (5 failures /
 30 s → open 60 s, single half-open probe); per-phase admission control
-(10 pre-auth and 41 post-auth requests in flight, immediate `503` beyond
-that, no queue).
+(10 pre-auth and 12 post-auth requests in flight, immediate `503` beyond
+that, no queue). A request body may carry up to 1.5 MiB, and a larger one is
+refused with `413` before the upstream (`BODY_LIMIT_BYTES` in
+`src/routes/proxy.ts`, pinned at its edge in `tests/routes/proxy.test.ts`).
 
 ### Error classes
 
@@ -120,6 +122,13 @@ Manual deploys before the CD job (Fly releases v1 to v8, May to 13 August) are
 not included.
 
 ## Load probe: gateway overhead and the admission wedge (measured 2026-08-29 and 2026-09-02)
+
+The ceilings in this section are the ones in force when the probe ran: 41
+post-auth requests in flight and an edge hard limit of 48. They are 12 and 15
+since the request-body limit went to 1.5 MiB, because a request that large
+costs more memory while in flight (derivation next to
+`ADMISSION_CAPACITY_POST_AUTH` in `src/config.ts`). The probe has not been
+repeated under the new ceilings.
 
 Method, reproducible by anyone with a Fly account: a staging copy of the
 gateway (`llm-gateway-probe`: the production image, same VM size
