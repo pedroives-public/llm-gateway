@@ -26,17 +26,14 @@ export const ADMISSION_CAPACITY_POST_AUTH = 12;
 // Inputs pinned by tests/reliability/admission-derivation-pin.test.ts.
 export const ADMISSION_CAPACITY_PRE_AUTH = 10;
 
-// Streaming total-duration deadline, derived as a corridor and not as a point:
-// - above 165 s, the slowest legitimate completion measured (gpt-5, reasoning
-//   effort medium, chat completions, 2026-08-26): headers at 133 s, after a
-//   silent reasoning phase, then 32 s of generation;
-// - at least 1.5 x 165 s = 247.5 s, the margin over that measurement;
-// - strictly under 300 s, the default outbound dispatcher's headersTimeout
-//   (its bodyTimeout is also 300 s), so the gateway's own deadline fires first.
-// 280 s is the point chosen inside the corridor. Output that still fits after
-// a 133 s silent phase: (280 - 133) s x ~62 tokens/s (4,076 tokens in 66 s,
-// same day) = ~9k tokens. Cost: 12 post-auth slots each held up to 280 s admit
-// at most ~2.6 streaming requests per minute when every slot runs to the end.
+// Streaming total-duration deadline: 280 s, chosen inside a derived corridor.
+// Floor: 1.5 x 165 s = 247.5 s, where 165 s is the slowest legitimate
+// completion measured (gpt-5, reasoning effort medium, 2026-08-26: headers at
+// 133 s after a silent reasoning phase, then 32 s of generation). Ceiling:
+// under 300 s, the default outbound dispatcher's headersTimeout and
+// bodyTimeout, so the gateway's own deadline fires first. Output that fits
+// after the silent phase: (280 - 133) s x ~62 tokens/s (same day) = ~9k
+// tokens. Cost: 12 post-auth slots held up to 280 s admit ~2.6 requests/min.
 // Corridor pinned by tests/reliability/total-duration-derivation-pin.test.ts.
 export const STREAM_TOTAL_DURATION_MS = 280_000;
 
