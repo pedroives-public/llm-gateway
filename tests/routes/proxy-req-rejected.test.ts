@@ -269,7 +269,7 @@ describe("req_rejected terminal event for schema rejections", () => {
           authorization: bearer(),
           "content-type": "application/json",
         },
-        payload: `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"${"x".repeat(262_200)}"}]}`,
+        payload: `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"${"x".repeat(1_572_900)}"}]}`,
       });
 
       expect(res.statusCode).toBe(413);
