@@ -9,7 +9,7 @@ import { ADMISSION_CAPACITY_PRE_AUTH } from "../../src/config.js";
 // constant equals it: whoever changes an input (pool size, statement
 // timeout, the residence tie) is forced to re-derive the capacity instead
 // of silently running with a stale ceiling. Bounds: socket-buffer headroom
-// floor(19 MiB / 1.38 MiB tcp_rmem max) = 13, and the auth-phase drain
+// floor(24 MiB / 1.38 MiB tcp_rmem max) = 17, and the auth-phase drain
 // chain (throughput x residence); the smaller wins.
 
 // Max pre-auth residence. Not a production constant: it is inherited from
@@ -23,7 +23,7 @@ const MiB = 1024 * 1024;
 
 describe("pre-auth capacity derivation pin", () => {
   it("K_pre equals the derivation recomputed from its inputs", () => {
-    const memoryBound = Math.floor((19 * MiB) / (1.38 * MiB));
+    const memoryBound = Math.floor((24 * MiB) / (1.38 * MiB));
     // occupancy = throughput x residence: (pool / statement_timeout) x T_pre_max
     const drainChainBound = Math.floor(
       DB_POOL_MAX * (T_PRE_MAX_MS / DEFAULT_DB_STATEMENT_TIMEOUT_MS),
