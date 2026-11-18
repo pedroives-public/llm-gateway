@@ -60,7 +60,14 @@ import { observeClientDeparture } from "./proxy-client-departure.js";
 import type { PlanTier } from "../db/schema.js";
 
 const WALL_CLOCK_MS = 30_000;
-const BODY_LIMIT_BYTES = 262_144;
+
+// Largest request body accepted: 200,000 input tokens at 5 bytes per token,
+// the highest ratio observed, plus one 224 KiB step of tool results, rounded
+// up to 1.5 MiB. The 343,488 bytes of rounding cover denser text and larger
+// steps. ADMISSION_CAPACITY_POST_AUTH in config.ts is sized for a body of this
+// size, so the two move together.
+const BODY_LIMIT_BYTES = 1_572_864;
+
 const MAX_OUTPUT_TOKENS_CAP = 16_384;
 
 // Longest model name the body may carry. The allowlist's refusal repeats the

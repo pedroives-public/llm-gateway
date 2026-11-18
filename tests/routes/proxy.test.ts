@@ -591,8 +591,8 @@ describe("proxy route — error desk (scoped setErrorHandler)", () => {
     };
     const { app, apiKey } = await buildWithUpstream(countingUpstream);
     try {
-      // > 256 KiB once serialized; the route bodyLimit rejects it pre-handler.
-      const big = "x".repeat(300_000);
+      // Over 1.5 MiB once serialized: the route bodyLimit rejects it pre-handler.
+      const big = "x".repeat(1_600_000);
       const res = await app.inject({
         method: "POST",
         url: "/v1/chat/completions",
@@ -618,6 +618,67 @@ describe("proxy route — error desk (scoped setErrorHandler)", () => {
       await app.close();
     }
   });
+
+  // A chat-completions body whose serialized size is exactly `bytes`.
+  function bodyOfExactly(bytes: number): string {
+    const head = '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"';
+    const tail = '"}]}';
+    return `${head}${"x".repeat(bytes - head.length - tail.length)}${tail}`;
+  }
+
+  // The body limit pinned at its edge, with literal sizes: 1,572,864 bytes is
+  // the limit and one byte more is the first size refused.
+  const BODY_LIMIT_ROWS = [
+    {
+      name: "a body of exactly 1,572,864 bytes is accepted",
+      bodyBytes: 1_572_864,
+      status: 200,
+      upstreamCalls: 1,
+      because: "a body at the limit is answered 200 and reaches the upstream",
+    },
+    {
+      name: "a body of 1,572,865 bytes is refused",
+      bodyBytes: 1_572_865,
+      status: 413,
+      upstreamCalls: 0,
+      because:
+        "a body one byte over the limit is refused with 413 before the upstream",
+    },
+  ];
+
+  it.each(BODY_LIMIT_ROWS)(
+    "body limit: $name",
+    async ({ bodyBytes, status, upstreamCalls: expectedCalls, because }) => {
+      let upstreamCalls = 0;
+      const countingUpstream = (): Promise<Outcome> => {
+        upstreamCalls += 1;
+        return Promise.resolve({ kind: "ok", status: 200, body_parsed: {} });
+      };
+      const { app, apiKey } = await buildWithUpstream(countingUpstream);
+      try {
+        const payload = bodyOfExactly(bodyBytes);
+        expect(
+          Buffer.byteLength(payload),
+          "the cell sends the size its row names",
+        ).toBe(bodyBytes);
+
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: {
+            authorization: `Bearer ${apiKey}`,
+            "content-type": "application/json",
+          },
+          payload,
+        });
+
+        expect(res.statusCode, because).toBe(status);
+        expect(upstreamCalls, because).toBe(expectedCalls);
+      } finally {
+        await app.close();
+      }
+    },
+  );
 
   it("400 missing `model` → invalid_request_error + code model_missing, no upstream call", async () => {
     let upstreamCalls = 0;
