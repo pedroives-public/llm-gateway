@@ -2,27 +2,29 @@ const KNOWN_DEFAULT_PEPPERS = new Set(["change-me-min-32-chars-recommended"]);
 
 // Inbound time budget. Request cap: 20s = the 1.5 MiB body limit at 1.26 Mbps
 // of upload (10s) with 2x margin, so a body still arrives in time at 629 kbps.
-// Headers (~1 KiB): 10s. Node enforces both via a periodic sweep: a 5s interval
-// bounds the worst-case kill at 25s, under the 30s handler wall-clock, so an
-// upload never outlives its slot. requestTimeout is a top-level Fastify
-// option, the rest createServer-only.
+// Headers (~1 KiB): 10s. Node enforces both via a sweep every 5s. A stalled
+// upload was answered 408 between 22 and 28s after it started (measured
+// 2026-11-18), under the 30s handler wall-clock. requestTimeout is a top-level
+// Fastify option, the rest createServer-only.
 export const REQUEST_TIMEOUT_MS = 20_000;
 export const HTTP_SERVER_OPTIONS = {
   headersTimeout: 10_000,
   connectionsCheckingInterval: 5_000,
 } as const;
 
-// Post-auth admission capacity: floor((124.2 MiB MemAvailable on the idle
-// deploy target - 3.3 MiB for one open database connection) x 0.85 safety
-// factor / 8.0 MiB per in-flight request) = 12, measured 2026-11-18. The
-// 8.0 MiB is the peak for a 1.5 MiB body of conversation text and a 1 MiB
-// response, with every response landing at once. Other body shapes cost more.
+// Post-auth admission capacity: floor(120.2 MiB MemAvailable on the deploy
+// target x 0.85 safety factor / 8.0 MiB per in-flight request) = 12, measured
+// 2026-11-18. 120.2 is the lowest of three readings, and opening the database
+// pool with ten lookups moved it by less than 1 MiB. The 8.0 MiB is the peak
+// for a 1.5 MiB body of conversation text and a 1 MiB response, with every
+// response landing at once. Other body shapes cost more.
 // The Fly edge hard_limit (15) is the blind backstop sitting above this gate.
 export const ADMISSION_CAPACITY_POST_AUTH = 12;
 
-// Pre-auth admission capacity: min of socket-buffer headroom (floor(19 MiB
-// spare / 1.38 MiB tcp_rmem max) = 13) and the auth-phase drain chain
-// (10 DB connections / 2 s statement_timeout x 2 s residence = 10, binds).
+// Pre-auth admission capacity: min of socket-buffer headroom (floor(24 MiB
+// left by the post-auth budget / 1.38 MiB tcp_rmem max) = 17) and the
+// auth-phase drain chain (10 DB connections / 2 s statement_timeout x 2 s
+// residence = 10, binds).
 // Inputs pinned by tests/reliability/admission-derivation-pin.test.ts.
 export const ADMISSION_CAPACITY_PRE_AUTH = 10;
 
