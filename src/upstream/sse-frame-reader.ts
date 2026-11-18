@@ -8,7 +8,7 @@
 // the buffer's capacity: held bytes can reach the cap plus one chunk (64 KiB
 // at most, measured locally), and doubling keeps the capacity under twice
 // that: about 1.1 MiB per stream, briefly 1.65 MiB while it grows, about
-// 68 MiB across ADMISSION_CAPACITY_POST_AUTH (41) streams.
+// 20 MiB across ADMISSION_CAPACITY_POST_AUTH (12) streams.
 //
 // Unlike the buffered response cap, which fires on a large but valid response,
 // this one fires on bytes that never form a frame: evidence against the
