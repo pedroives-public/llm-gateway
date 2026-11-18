@@ -11,10 +11,13 @@ export const HTTP_SERVER_OPTIONS = {
   connectionsCheckingInterval: 5_000,
 } as const;
 
-// Post-auth admission capacity: floor(117 MiB operational MemAvailable on the
-// deploy target x 0.85 safety factor / 2.4 MiB per in-flight buffered request).
-// The Fly edge hard_limit (48) is the blind backstop sitting above this gate.
-export const ADMISSION_CAPACITY_POST_AUTH = 41;
+// Post-auth admission capacity: floor((124.2 MiB MemAvailable on the idle
+// deploy target - 3.3 MiB for one open database connection) x 0.85 safety
+// factor / 8.0 MiB per in-flight request) = 12, measured 2026-11-18. The
+// 8.0 MiB is the peak for a 1.5 MiB body of conversation text and a 1 MiB
+// response, with every response landing at once. Other body shapes cost more.
+// The Fly edge hard_limit (15) is the blind backstop sitting above this gate.
+export const ADMISSION_CAPACITY_POST_AUTH = 12;
 
 // Pre-auth admission capacity: min of socket-buffer headroom (floor(19 MiB
 // spare / 1.38 MiB tcp_rmem max) = 13) and the auth-phase drain chain
@@ -31,8 +34,8 @@ export const ADMISSION_CAPACITY_PRE_AUTH = 10;
 //   (its bodyTimeout is also 300 s), so the gateway's own deadline fires first.
 // 280 s is the point chosen inside the corridor. Output that still fits after
 // a 133 s silent phase: (280 - 133) s x ~62 tokens/s (4,076 tokens in 66 s,
-// same day) = ~9k tokens. Cost: 41 post-auth slots each held up to 280 s admit
-// at most ~8.8 streaming requests per minute when every slot runs to the end.
+// same day) = ~9k tokens. Cost: 12 post-auth slots each held up to 280 s admit
+// at most ~2.6 streaming requests per minute when every slot runs to the end.
 // Corridor pinned by tests/reliability/total-duration-derivation-pin.test.ts.
 export const STREAM_TOTAL_DURATION_MS = 280_000;
 

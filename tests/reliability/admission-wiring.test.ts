@@ -13,7 +13,7 @@ import { createAdmissionGate } from "../../src/reliability/admission-gate.js";
 // fakeAuthDb (instant auth) or deferredAuthDb (parks at the auth seam), a
 // handler that parks on a deferred promise, and app.inject() fired WITHOUT
 // await — await only the assertions. First describe: the POST_AUTH budget
-// (tiny injected gate; the pin builds the DEFAULT app: 41 parked, 42nd ->
+// (tiny injected gate; the pin builds the DEFAULT app: 12 parked, 13th ->
 // 503). Second: the PRE_AUTH bulkhead — parked requests hold PRE slots and
 // the handoff must return them.
 
@@ -271,7 +271,7 @@ describe("admission wiring — protected scope", () => {
     }
   });
 
-  it("production default capacity is 41 — behavioral pin", async () => {
+  it("production default capacity is 12 — behavioral pin", async () => {
     const tenantId = randomUUID();
     const apiKey = `lkey_${randomBytes(32).toString("base64url")}`;
     const fakeDb = fakeAuthDb(tenantId);
@@ -296,11 +296,11 @@ describe("admission wiring — protected scope", () => {
     });
 
     try {
-      // Sequential arrivals: a concurrent burst of 41 would be refused by
+      // Sequential arrivals: a concurrent burst of 12 would be refused by
       // the PRE gate (capacity 10) by design — this pin isolates the POST
       // budget.
       const requests = [];
-      for (let i = 0; i < 41; i++) {
+      for (let i = 0; i < 12; i++) {
         const arrivedInHandler = new Promise<void>((resolve) => {
           notifyParked = resolve;
         });
@@ -313,7 +313,7 @@ describe("admission wiring — protected scope", () => {
         requests.push(request);
 
         // Fail fast with the reason: resolving instead of parking means a
-        // refusal or early completion — capacity below 41 or a lost slot.
+        // refusal or early completion — capacity below 12 or a lost slot.
         const early = await Promise.race([
           arrivedInHandler.then(() => null),
           request.then((res) => res),
@@ -321,16 +321,28 @@ describe("admission wiring — protected scope", () => {
         if (early !== null) {
           throw new Error(
             `request ${i + 1} resolved with ${early.statusCode} before ` +
-              "parking — effective capacity is below 41 or a slot was never returned",
+              "parking — effective capacity is below 12 or a slot was never returned",
           );
         }
       }
 
-      const extraReq = await app.inject({
-        method: "GET",
-        url: "/probe",
-        headers: { authorization: `Bearer ${apiKey}` },
+      // If the 13th request enters the handler, the gate admitted past capacity:
+      // fail with that sentence instead of the runner's timeout.
+      const extraEnteredHandler = new Promise<void>((resolve) => {
+        notifyParked = resolve;
       });
+      const extraReq = await Promise.race([
+        app.inject({
+          method: "GET",
+          url: "/probe",
+          headers: { authorization: `Bearer ${apiKey}` },
+        }),
+        extraEnteredHandler.then((): never => {
+          throw new Error(
+            "request 13 entered the handler — effective capacity is above 12",
+          );
+        }),
+      ]);
 
       expect(extraReq.statusCode).toBe(503);
       const body = JSON.parse(extraReq.body);
