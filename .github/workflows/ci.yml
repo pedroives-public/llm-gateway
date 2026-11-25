@@ -119,7 +119,7 @@ jobs:
             -d '{"model":"smoke","messages":[{"role":"user","content":"smoke"}]}')
           if [ "$code" != "401" ] || [ "$(cat "$body")" != '{"error":"Unauthorized"}' ]; then
             echo "FAIL: expected 401 with the auth envelope, got '$code' with body:"
-            cat "$body"
+            tail -c "$BODY_TAIL_BYTES" "$body" | LC_ALL=C tr -c '[:print:]\n' '?' | sed -e 's/##\[/##_[/g' -e 's/^/| /'
             exit 1
           fi
 
