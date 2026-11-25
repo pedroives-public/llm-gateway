@@ -67,6 +67,17 @@ jobs:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       APP_NAME: llm-gateway-v1
       APP_URL: https://llm-gateway-v1.fly.dev
+      # Bytes taken from the end of a response body when a failed smoke prints
+      # it. A body is bytes this job does not control, and anyone who can see
+      # the run can read its log. The cut is in bytes because a line count
+      # bounds nothing when the body is one long line: 2000 holds the
+      # gateway's longest stream-closing line (177 bytes) and the frames
+      # before it. The printed bytes also must not start a workflow command.
+      # The runner reads as a command a line that begins with `::` after
+      # leading spaces, and `##[` anywhere in a line, so control bytes are
+      # replaced, `##[` is broken and every printed line gets a prefix. With
+      # the prefixes the printed text can reach three times the bytes taken.
+      BODY_TAIL_BYTES: 2000
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -134,6 +145,6 @@ jobs:
             -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"smoke"}],"max_tokens":1,"stream":false}')
           if [ "$code" != "200" ]; then
             echo "FAIL: expected 200 from an authenticated request, got '$code' with body:"
-            cat "$body"
+            tail -c "$BODY_TAIL_BYTES" "$body" | LC_ALL=C tr -c '[:print:]\n' '?' | sed -e 's/##\[/##_[/g' -e 's/^/| /'
             exit 1
           fi
