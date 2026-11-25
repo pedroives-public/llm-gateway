@@ -148,3 +148,74 @@ jobs:
             tail -c "$BODY_TAIL_BYTES" "$body" | LC_ALL=C tr -c '[:print:]\n' '?' | sed -e 's/##\[/##_[/g' -e 's/^/| /'
             exit 1
           fi
+
+      # The request above takes the buffered path. A release can break the
+      # streaming relay while the buffered path still answers, and the status
+      # would not show it: the gateway writes the response head after the
+      # first frame, so 200 with the SSE content type proves nothing past that
+      # frame. The last data line shows that the relay reached the end: on a
+      # clean end the gateway relays the provider's `[DONE]` frame, and a
+      # stream the gateway had to end itself closes with an error line
+      # instead. A line is read the way the gateway reads one (CR, LF or CRLF
+      # line ends, one optional space after `data:`). The gateway judges a
+      # whole frame and this step only its last data line, and the frames in
+      # between are not inspected.
+      #
+      # STREAMING_ENABLED in fly.toml is the kill switch, and this step takes
+      # its expectation from the file being deployed. With streaming off, or
+      # with the variable absent, which the gateway reads as off, the same
+      # request must be refused with 400 `stream_not_supported`. The deploy
+      # that turns streaming off then ends green, with the refusal seen on
+      # the machine that answered. The value is taken by a line match, not by
+      # a TOML parse, so the variable stays on a line of its own, in the form
+      # `STREAMING_ENABLED = 'true'`.
+      - name: "Smoke: streamed request ends with [DONE], or is refused with streaming off"
+        env:
+          SMOKE_API_KEY: ${{ secrets.SMOKE_API_KEY }}
+        run: |
+          if [ -z "$SMOKE_API_KEY" ]; then
+            echo "FAIL: SMOKE_API_KEY is not set on the production environment"
+            exit 1
+          fi
+          clean() {
+            LC_ALL=C tr -c '[:print:]\n' '?' | sed -e 's/##\[/##_[/g'
+          }
+          fail() {
+            echo "FAIL: $1"
+            tail -c "$BODY_TAIL_BYTES" "$body" | clean | sed -e 's/^/| /'
+            exit 1
+          }
+          flag=$(sed -n "s/^[[:space:]]*STREAMING_ENABLED[[:space:]]*=[[:space:]]*//p" fly.toml | tr -d '[:space:]')
+          case "$flag" in
+            "'true'" | '"true"') streaming=on ;;
+            "'false'" | '"false"' | "") streaming=off ;;
+            *)
+              echo "FAIL: fly.toml must set STREAMING_ENABLED to 'true' or 'false', or leave it out"
+              exit 1
+              ;;
+          esac
+          body=$(mktemp)
+          result=$(curl -sS -o "$body" -w '%{http_code} %{content_type}' --max-time 60 \
+            -X POST "$APP_URL/v1/chat/completions" \
+            -H "authorization: Bearer $SMOKE_API_KEY" \
+            -H "content-type: application/json" \
+            -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"smoke"}],"max_tokens":1,"stream":true}')
+          read -r code content_type <<< "$result"
+          if [ "$streaming" = "off" ]; then
+            if [ "$code" != "400" ] || ! grep -qaF '"code":"stream_not_supported"' "$body"; then
+              fail "fly.toml turns streaming off, so expected 400 stream_not_supported, got '$code' with body:"
+            fi
+            exit 0
+          fi
+          if [ "$code" != "200" ]; then
+            fail "expected 200 from a streamed request, got '$code' with body:"
+          fi
+          media_type=$(printf '%s' "${content_type%%;*}" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
+          if [ "$media_type" != "text/event-stream" ]; then
+            shown_type=$(printf '%s' "$content_type" | clean | cut -c1-100)
+            fail "expected content type text/event-stream, got '$shown_type' with body:"
+          fi
+          last=$(sed 's/\r$//' "$body" | tr '\r' '\n' | grep -aE '^data(:|$)' | tail -n 1 | sed -E 's/^data:? ?//' || true)
+          if [ "$last" != "[DONE]" ]; then
+            fail "expected the last data line of the stream to be [DONE], got body:"
+          fi
