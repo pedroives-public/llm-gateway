@@ -18,6 +18,17 @@ updates:
       # A runtime upgrade is a deliberate decision, never a routine bump.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+      # postgres 4 rewrites the pool, the connection and the protocol
+      # layers, and changes behavior that is not measured here: a
+      # connection refused for too many connections is retried until
+      # connect_timeout instead of failing at once, a fatal error built by
+      # a connection pooler rejects with that error instead of
+      # CONNECTION_CLOSED, and the server decides parameter types instead
+      # of JavaScript. Revisit when the gateway starts writing per-request
+      # tracking data to PostgreSQL, or earlier if `pnpm audit --prod`
+      # reports the installed 3.x.
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
